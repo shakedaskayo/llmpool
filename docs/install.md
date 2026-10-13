@@ -17,6 +17,8 @@ The script downloads the latest release for your machine and checks it against t
 
 Built from source on Linux, it also needs the D-Bus development files (`sudo apt install libdbus-1-dev pkg-config`, or `sudo dnf install dbus-devel pkgconf-pkg-config`); the script says so if they are missing. Windows is not supported.
 
+The macOS app is not yet signed with an Apple Developer ID. Installed by the script it opens normally. If you download the zip from the releases page in a browser instead, macOS will hold it back: open it once with right-click → **Open**.
+
 ## First steps
 
 ```bash

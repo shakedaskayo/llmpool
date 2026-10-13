@@ -147,13 +147,15 @@ ul.cards > .card:hover { background: color-mix(in srgb, var(--text) 3%, transpar
 .tile.bad strong { color: var(--bad); }
 
 .acct, .sess { display: grid; align-items: center; column-gap: 16px; padding: 13px 16px; }
-.acct { grid-template-columns: 32px minmax(150px, 1.3fr) 124px minmax(210px, 1.2fr) 84px auto; }
+.acct { grid-template-columns: 32px minmax(150px, 1.3fr) 112px minmax(200px, 1.2fr) 80px auto; }
 .sess { grid-template-columns: 32px minmax(170px, 1.3fr) minmax(190px, 1fr) minmax(210px, 1.2fr); }
 .acct.off { background: var(--sunken); }
 .acct.off .avatar, .acct.off .usage { opacity: 0.5; }
 .acct .actions { display: flex; justify-content: flex-end; gap: 2px; white-space: nowrap; }
-.acct .actions button { visibility: hidden; }
-.acct:hover .actions button, .acct:focus-within .actions button, .acct .actions button.primary, .acct.off .actions button { visibility: visible; }
+/* Always there, for the keyboard and for anyone who has not hovered yet;
+   quiet until the row is the one being looked at. */
+.acct .actions button.quiet { opacity: 0.55; }
+.acct:hover .actions button.quiet, .acct:focus-within .actions button.quiet, .acct.off .actions button.quiet { opacity: 1; }
 
 .avatar { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: hsl(var(--h) 55% 90%); color: hsl(var(--h) 55% 28%); }
 @media (prefers-color-scheme: dark) { .avatar { background: hsl(var(--h) 35% 22%); color: hsl(var(--h) 65% 78%); } }
