@@ -315,6 +315,14 @@ Swap of a managed Claude session:
 4. Write the incoming credential and the matching identity block to the store.
 5. Release the lock, move the lease, record a `swap` event.
 
+A swap acts on the store, so every session attached to that store moves
+together and each receives the notice. A session that should move alone has to
+be restarted onto its own account.
+
+An `ask` action fired by a running session is shown as a GUI picker. If the
+GUI is not running it degrades to `notify`, naming the candidates and the
+`llmbank switch` command.
+
 If step 3 or 4 fails, the outgoing credential is left in place and the swap is
 reported as failed. The store is never left empty.
 
