@@ -33,19 +33,27 @@ fn connect() -> Result<Client, String> {
         .open(data.join("daemon.log"))
         .map_err(|e| format!("daemon log: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    std::process::Command::new(exe)
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .map_err(|e| format!("could not start the daemon: {e}"))?;
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    let mut last_spawn = None::<std::time::Instant>;
+    while start.elapsed() < Duration::from_secs(10) {
+        // Spawned again if nothing came up: a daemon that was just stopped may
+        // still have held the instance lock when the first one tried. The
+        // lock makes extra spawns harmless.
+        if last_spawn.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
+            let log = log.try_clone().map_err(|e| format!("daemon log: {e}"))?;
+            std::process::Command::new(&exe)
+                .arg("daemon")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(log)
+                .spawn()
+                .map_err(|e| format!("could not start the daemon: {e}"))?;
+            last_spawn = Some(std::time::Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(50));
         if let Some(client) = Client::existing(timeout) {
             return Ok(client);
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
     Err(format!("the daemon did not start; see {}", data.join("daemon.log").display()))
 }
@@ -523,7 +531,10 @@ fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
     // Without the variable this Claude Code was started on its own; the
     // daemon recognises it by the session id in the payload.
     let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
-    let Some(client) = Client::existing(Duration::from_secs(2)) else {
+    // A session starting is the one moment worth waiting for the daemon to
+    // come up; every other hook only talks to one that is already there.
+    let client = if event == "SessionStart" { connect().ok() } else { Client::existing(Duration::from_secs(2)) };
+    let Some(client) = client else {
         return ExitCode::SUCCESS;
     };
     let path = match argument {
