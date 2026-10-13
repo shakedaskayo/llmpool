@@ -31,6 +31,12 @@ const PENDING_SECS: i64 = 600;
 const GRANT_SECS: i64 = 120;
 /// How long a session of ours lasts before the person signs in again.
 const SESSION_SECS: i64 = 30 * 24 * 3600;
+/// A browser's session lasts as long as its cookie.
+const WEB_SESSION_SECS: i64 = 12 * 3600;
+/// Logins one member may hold for themselves at once, and the sessions they
+/// may claim on any one account.
+const MAX_SEATS: usize = 3;
+const MAX_SESSIONS: usize = 64;
 /// A seat is given up when its holder has not reported using it for this long.
 const SEAT_SECS: i64 = 180;
 const MAX_PENDING: usize = 256;
@@ -325,6 +331,15 @@ fn append_bounded(path: &std::path::Path, line: &str, max: u64) {
     }
 }
 
+/// A place in a count, given back when the work ends, however it ends.
+struct Counted<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Set when the process is asked to stop (SIGTERM or SIGINT).
 static TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -410,22 +425,32 @@ fn claims_of(id_token: &str) -> Option<Value> {
 }
 
 impl TeamServer {
-    pub fn new(daemon: Arc<Daemon>, config: Config) -> Self {
+    pub fn new(daemon: Arc<Daemon>, config: Config) -> std::io::Result<Self> {
         let members_path = daemon.data_dir().join("team-members.json");
         let members = std::fs::read_to_string(&members_path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let settings = std::fs::read_to_string(daemon.data_dir().join("team-settings.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_else(|| Settings {
-                share_logins: config.share_logins,
-                access: config.access.clone(),
-                blocked: config.blocked.clone(),
-                gateway: config.gateway,
-            });
-        Self {
+        // What an administrator set is kept or the server does not start:
+        // falling back to the deployment's values could reopen what they
+        // closed (a blocked member, lending instead of the gateway).
+        let saved = daemon.data_dir().join("team-settings.json");
+        let settings = match std::fs::read_to_string(&saved) {
+            Ok(text) => Some(serde_json::from_str(&text).map_err(|e| {
+                std::io::Error::other(format!(
+                    "{} cannot be read ({e}); repair or remove it before starting",
+                    saved.display()
+                ))
+            })?),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| Settings {
+            share_logins: config.share_logins,
+            access: config.access.clone(),
+            blocked: config.blocked.clone(),
+            gateway: config.gateway,
+        });
+        Ok(Self {
             settings: Mutex::new(settings),
             gateway: Mutex::new(gateway::Gateway::restored(daemon.data_dir())),
             active: std::sync::atomic::AtomicUsize::new(0),
@@ -438,7 +463,7 @@ impl TeamServer {
             }),
             provider: Mutex::new(None),
             members_path,
-        }
+        })
     }
 
     /// One line per thing worth knowing afterwards: who came in, who was
@@ -559,11 +584,18 @@ impl TeamServer {
             let mut state = self.state();
             let t = now();
             state.pending.retain(|_, p| t - p.at < PENDING_SECS);
-            if state.pending.len() >= MAX_PENDING {
-                return Err(fail(
-                    429,
-                    "too many sign-ins in progress; try again shortly",
-                ));
+            // A flood of started sign-ins pushes out the oldest of its own
+            // kind; it cannot keep real people from starting theirs.
+            while state.pending.len() >= MAX_PENDING {
+                let Some(oldest) = state
+                    .pending
+                    .iter()
+                    .min_by_key(|(_, p)| p.at)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                state.pending.remove(&oldest);
             }
             state.pending.insert(
                 state_id.clone(),
@@ -655,7 +687,7 @@ impl TeamServer {
         }
         if pending.port == 0 {
             return Ok(Reply::Session(
-                Some(self.open_session(&email, false)),
+                Some(self.open_session(&email, false, WEB_SESSION_SECS)),
                 "/".into(),
             ));
         }
@@ -692,7 +724,7 @@ impl TeamServer {
             .filter(|g| t - g.at < GRANT_SECS && g.challenge == sha256_hex(text("verifier")))
             .ok_or_else(|| fail(400, "this sign-in code is unknown, used or too old"))?;
         drop(state);
-        let token = self.open_session(&grant.email, false);
+        let token = self.open_session(&grant.email, false, SESSION_SECS);
         let expires_at = t + SESSION_SECS;
         Ok(Reply::Json(
             json!({"token": token, "email": grant.email, "expires_at": expires_at}),
@@ -701,7 +733,7 @@ impl TeamServer {
 
     /// A new session of ours for `email`; the token is returned once and
     /// only its hash is kept.
-    fn open_session(&self, email: &str, by_key: bool) -> String {
+    fn open_session(&self, email: &str, by_key: bool, lasts: i64) -> String {
         let token = random_hex(32);
         let t = now();
         let mut state = self.state();
@@ -710,7 +742,7 @@ impl TeamServer {
             sha256_hex(&token),
             Member {
                 email: email.to_string(),
-                expires_at: t + SESSION_SECS,
+                expires_at: t + lasts,
                 by_key,
             },
         );
@@ -791,6 +823,7 @@ impl TeamServer {
         }
         let mut rows = Vec::new();
         let mut news = Vec::new();
+        let mut taken = 0usize;
         for mut account in accounts {
             if !account.usable() || g.renewing.contains(&account.id) {
                 continue;
@@ -804,20 +837,32 @@ impl TeamServer {
                 continue;
             }
             let holders = state.seats.entry(account.id.clone()).or_default();
-            let others: usize = holders.values().map(|(_, n)| n).sum();
+            let others: usize = holders.values().map(|(_, n)| n.min(&MAX_SESSIONS)).sum();
             let exclusive = account.kind == Kind::Oauth && !settings.share_logins;
             let held = exclusive && others > 0;
-            if let (Some(sessions), false) = (using.get(&account.id), held) {
-                holders.insert(email.to_string(), (t, *sessions));
-            }
+            // A member's word for what they run on is taken within limits:
+            // nobody reserves the whole pool by saying they use all of it.
+            let seated = match (using.get(&account.id), held) {
+                (Some(sessions), false) if !exclusive || taken < MAX_SEATS => {
+                    holders.insert(email.to_string(), (t, (*sessions).clamp(1, MAX_SESSIONS)));
+                    taken += usize::from(exclusive);
+                    true
+                }
+                _ => false,
+            };
             // The server runs no sessions; what it knows of usage is what
-            // clients tell it.
-            if let Some(seen) = usage.get(&account.id) {
-                if account
-                    .usage
-                    .as_ref()
-                    .is_none_or(|have| seen.fetched_at > have.fetched_at)
-                    && seen.fetched_at <= t + 60
+            // the members running on an account tell it, and only they.
+            if let (Some(seen), true) = (usage.get(&account.id), seated) {
+                let sane = seen.fetched_at <= t
+                    && seen.windows.len() <= 8
+                    && seen.windows.iter().all(|(name, w)| {
+                        name.len() <= 16 && (0.0..=100.0).contains(&w.used_percent)
+                    });
+                if sane
+                    && account
+                        .usage
+                        .as_ref()
+                        .is_none_or(|have| seen.fetched_at > have.fetched_at)
                 {
                     account.usage = Some(seen.clone());
                     g.store.put(&account)?;
@@ -827,7 +872,8 @@ impl TeamServer {
                 Value::Null
             } else if account.kind != Kind::Oauth {
                 // A key is lent whole: there is nothing shorter-lived to give.
-                match d.vault.get(&account.id)? {
+                // One entry that cannot be read is that account's trouble only.
+                match d.vault.get(&account.id).ok().flatten() {
                     Some(text) if crate::keys::env_of(&text).is_ok() => {
                         serde_json::from_str(&text)?
                     }
@@ -1030,14 +1076,19 @@ impl TeamServer {
         if request.url().starts_with("/gateway/") {
             return self.handle(request);
         }
+        // Whether the server is alive is answered at once and counts against
+        // nothing: a crowd at the door must not get the process restarted.
+        if request.url() == "/health" && *request.method() == tiny_http::Method::Get {
+            return self.handle(request);
+        }
         if self.busy.fetch_add(1, Ordering::SeqCst) >= MAX_CONTROL {
             self.busy.fetch_sub(1, Ordering::SeqCst);
             return gateway::refuse(request, 503, "the server is busy; try again");
         }
         let server = self.clone();
         std::thread::spawn(move || {
+            let _slot = Counted(&server.busy);
             server.handle(request);
-            server.busy.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
@@ -1056,8 +1107,8 @@ impl TeamServer {
             }
             let server = self.clone();
             std::thread::spawn(move || {
+                let _slot = Counted(&server.active);
                 server.gateway(request);
-                server.active.fetch_sub(1, Ordering::SeqCst);
             });
             return;
         }
@@ -1068,7 +1119,10 @@ impl TeamServer {
             .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
             .map(str::to_string);
         let mut text = String::new();
-        let _ = request.as_reader().take(MAX_BODY).read_to_string(&mut text);
+        // Nothing is waited for where nothing is expected.
+        if *request.method() != tiny_http::Method::Get {
+            let _ = request.as_reader().take(MAX_BODY).read_to_string(&mut text);
+        }
         let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or_default().to_string();
@@ -1199,7 +1253,7 @@ impl Serving {
 pub fn start(daemon: Arc<Daemon>, config: Config, listen: &str) -> std::io::Result<Serving> {
     let server = Arc::new(tiny_http::Server::http(listen).map_err(std::io::Error::other)?);
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
-    let team = Arc::new(TeamServer::new(daemon, config));
+    let team = Arc::new(TeamServer::new(daemon, config)?);
     let stop = Arc::new(AtomicBool::new(false));
     for _ in 0..4 {
         let (server, team, stop) = (server.clone(), team.clone(), stop.clone());

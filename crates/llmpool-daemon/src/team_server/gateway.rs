@@ -26,6 +26,61 @@ const CEILING: f64 = 90.0;
 /// passed over, when the provider does not say.
 const COOL_SECS: i64 = 60;
 const ATTEMPTS: usize = 3;
+/// Requests one member may have in flight at once. An agent with a few
+/// helpers needs several; nobody needs so many that others are kept out.
+const MAX_PER_MEMBER: usize = 16;
+/// Free text from a request that ends up in a trace is kept this short.
+const TRACE_TEXT: usize = 128;
+
+/// What a member's agent may ask a provider for through the pool's
+/// credentials: asking a model something, and listing models. Everything
+/// else an account can do at a provider (its files, its billing, its keys,
+/// other people's stored work) is not the gateway's to hand out.
+fn allowed(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or_default();
+    let clean = !path.is_empty()
+        && path.len() <= 200
+        && !path.contains("..")
+        && !path.contains("//")
+        && !path.contains('%')
+        && !path.contains('\\')
+        && path.bytes().all(|b| b.is_ascii_graphic());
+    if !clean {
+        return false;
+    }
+    // Some providers put the version elsewhere or leave it out.
+    let tail = ["v1beta/", "v1/", "openai/v1/", "api/v1/"]
+        .iter()
+        .find_map(|prefix| path.strip_prefix(prefix))
+        .unwrap_or(path);
+    match method {
+        "POST" => {
+            matches!(
+                tail,
+                "messages"
+                    | "messages/count_tokens"
+                    | "chat/completions"
+                    | "completions"
+                    | "responses"
+                    | "embeddings"
+            ) || (tail.starts_with("models/")
+                && [
+                    ":generateContent",
+                    ":streamGenerateContent",
+                    ":countTokens",
+                    ":embedContent",
+                ]
+                .iter()
+                .any(|verb| tail.ends_with(verb)))
+        }
+        "GET" => tail == "models" || (tail.starts_with("models/") && !tail[7..].contains('/')),
+        _ => false,
+    }
+}
+
+fn short(text: &str) -> String {
+    text.chars().take(TRACE_TEXT).collect()
+}
 /// How long an account the provider refused outright is passed over.
 const REFUSED_SECS: i64 = 300;
 /// Requests remembered for the server's page; the log file keeps them all.
@@ -51,6 +106,12 @@ pub(super) struct Gateway {
     sticky: BTreeMap<(String, String), AccountId>,
     /// Accounts to pass over, and until when.
     cooling: BTreeMap<AccountId, i64>,
+    /// Accounts a provider refused outright for one member, and until when.
+    /// Kept per member: what one member's request provokes must not take an
+    /// account away from the others.
+    refused: BTreeMap<(String, AccountId), i64>,
+    /// Requests each member has in flight.
+    in_flight: BTreeMap<String, usize>,
     recent: VecDeque<Value>,
     /// Where the decision model said a member's requests should go, and until when.
     preferred: BTreeMap<(String, String), (AccountId, i64)>,
@@ -219,6 +280,7 @@ impl TeamServer {
         let t = now();
         let mut state = self.gateway_state();
         state.cooling.retain(|_, until| *until > t);
+        state.refused.retain(|_, until| *until > t);
         let pair = (who.to_string(), provider.to_string());
         let sticky = state.sticky.get(&pair).cloned();
         state.preferred.retain(|_, (_, until)| *until > t);
@@ -229,6 +291,9 @@ impl TeamServer {
                 || !account.usable()
                 || g.renewing.contains(&account.id)
                 || state.cooling.contains_key(&account.id)
+                || state
+                    .refused
+                    .contains_key(&(who.to_string(), account.id.clone()))
                 || !settings.opens(who, &account.tags)
             {
                 continue;
@@ -242,9 +307,12 @@ impl TeamServer {
                 };
                 (token.to_string(), default_base.clone())
             } else {
+                // One entry that cannot be read is that account's trouble only.
                 let Some(env) = d
                     .vault
-                    .get(&account.id)?
+                    .get(&account.id)
+                    .ok()
+                    .flatten()
                     .and_then(|t| crate::keys::env_of(&t).ok())
                 else {
                     continue;
@@ -405,6 +473,9 @@ impl TeamServer {
         let settings = self.settings();
         let t = now();
         let (candidates, load, history, current) = {
+            // The daemon's lock before the gateway's, here as everywhere:
+            // two orders would one day wait on each other for ever.
+            let mut g = d.lock();
             let mut state = self.gateway_state();
             if state
                 .asked
@@ -413,7 +484,6 @@ impl TeamServer {
             {
                 return;
             }
-            let mut g = d.lock();
             let Ok(accounts) = d.accounts(&g) else {
                 return;
             };
@@ -424,6 +494,7 @@ impl TeamServer {
                         && a.usable()
                         && a.peak_used() < 100.0
                         && !state.cooling.contains_key(&a.id)
+                        && !state.refused.contains_key(&(who.to_string(), a.id.clone()))
                         && settings.opens(who, &a.tags)
                 })
                 .collect();
@@ -538,6 +609,40 @@ impl TeamServer {
         let provider = parts.next().unwrap_or_default().to_string();
         let rest = parts.next().unwrap_or_default().to_string();
         let method = request.method().as_str().to_string();
+        if !llmpool_core::providers::name_ok(&provider) || !allowed(&method, &rest) {
+            return refuse(
+                request,
+                403,
+                "this gateway carries requests to models and nothing else an account can do",
+            );
+        }
+        // Counted for as long as this request lives, however it ends.
+        struct Slot<'a>(&'a TeamServer, String);
+        impl Drop for Slot<'_> {
+            fn drop(&mut self) {
+                let mut state = self.0.gateway_state();
+                if let Some(n) = state.in_flight.get_mut(&self.1) {
+                    *n = n.saturating_sub(1);
+                    if *n == 0 {
+                        state.in_flight.remove(&self.1);
+                    }
+                }
+            }
+        }
+        {
+            let mut state = self.gateway_state();
+            let mine = state.in_flight.entry(who.clone()).or_insert(0);
+            if *mine >= MAX_PER_MEMBER {
+                drop(state);
+                return refuse(
+                    request,
+                    429,
+                    "you have too many requests in flight; let some finish",
+                );
+            }
+            *mine += 1;
+        }
+        let _slot = Slot(self, who.clone());
         let mut body = Vec::new();
         if request
             .as_reader()
@@ -550,7 +655,7 @@ impl TeamServer {
         }
         let model = serde_json::from_slice::<Value>(&body)
             .ok()
-            .and_then(|v| v["model"].as_str().map(str::to_string));
+            .and_then(|v| v["model"].as_str().map(short));
         let upstreams = match self.upstreams(&who, &provider) {
             Ok(found) if !found.is_empty() => found,
             Ok(_) => {
@@ -632,22 +737,28 @@ impl TeamServer {
             let status = response.status();
             // Refusals that are about the account, not the request: try the
             // next account, and leave this one alone for a while.
-            if matches!(status, 401 | 403 | 429) || status >= 500 {
+            // Refusals that are about the account or the provider's moment,
+            // not about the request, and that mean nothing was done with it:
+            // only those are worth another account. (A plain 500 may have
+            // run; sending it again could run, and bill, it twice.)
+            if matches!(status, 401 | 403 | 429 | 502 | 503 | 529) {
                 if matches!(status, 401 | 403) {
-                    // The provider no longer takes this login or key. It is
-                    // passed over for a while rather than tried first on
-                    // every request, and an administrator is told once.
+                    // Set aside for this member only: it may be their request
+                    // the provider objects to, not the account.
                     let fresh = self
                         .gateway_state()
-                        .cooling
-                        .insert(upstream.account.id.clone(), now() + REFUSED_SECS)
+                        .refused
+                        .insert(
+                            (who.clone(), upstream.account.id.clone()),
+                            now() + REFUSED_SECS,
+                        )
                         .is_none();
                     if fresh {
                         self.audit(
                             "account_refused",
                             &who,
                             &format!(
-                                "{provider}: the provider answered {status} for {}",
+                                "{provider}: the provider answered {status} on {}",
                                 upstream.account.label
                             ),
                         );
@@ -658,7 +769,7 @@ impl TeamServer {
                         .header("retry-after")
                         .and_then(|v| v.parse::<i64>().ok())
                         .unwrap_or(COOL_SECS)
-                        .clamp(5, 3600);
+                        .clamp(5, 300);
                     self.gateway_state()
                         .cooling
                         .insert(upstream.account.id.clone(), now() + wait);
@@ -737,7 +848,7 @@ impl TeamServer {
         let took = started.elapsed().as_millis() as u64;
         self.trace(json!({
             "at": now(), "who": who, "provider": provider, "account": upstream.account.label,
-            "model": model, "method": method, "path": rest.split('?').next(), "status": status,
+            "model": model, "method": method, "path": rest.split('?').next().map(short), "status": status,
             "ms": took, "bytes": bytes,
             "input_tokens": sniff.input, "output_tokens": sniff.output,
             "tried": tried, "streamed": events,

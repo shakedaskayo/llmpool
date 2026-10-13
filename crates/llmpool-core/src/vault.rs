@@ -234,14 +234,24 @@ impl Vault for FileVault {
         use std::io::Write;
         let io = |e: std::io::Error| VaultError::Backend(e.to_string());
         std::fs::create_dir_all(&self.0).map_err(io)?;
+        // Written beside the old one and moved over it: a full disk or a
+        // killed process leaves the old secret, never half of a new one. A
+        // renewed login that is lost cannot be had again.
+        let tmp = self.0.join(format!(".{id}.tmp"));
+        let _ = std::fs::remove_file(&tmp);
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options
-            .open(self.0.join(id))
-            .and_then(|mut f| f.write_all(secret.as_bytes()))
-            .map_err(io)
+        let written = options.open(&tmp).and_then(|mut f| {
+            f.write_all(secret.as_bytes())?;
+            f.sync_all()
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io(e));
+        }
+        std::fs::rename(&tmp, self.0.join(id)).map_err(io)
     }
 
     fn get(&self, id: &str) -> Result<Option<String>, VaultError> {
@@ -398,6 +408,14 @@ mod sealed_tests {
         let tampered = format!("{}{last}", &on_disk[..on_disk.len() - 1]);
         std::fs::write(dir.path().join("a"), tampered).unwrap();
         assert!(vault.get("a").is_err());
+
+        // A write that cannot finish leaves what was there.
+        let plain = FileVault(dir.path().to_path_buf());
+        plain.put("keep", "old").unwrap();
+        std::fs::create_dir(dir.path().join(".keep.tmp")).unwrap();
+        assert!(plain.put("keep", "new").is_err());
+        assert_eq!(plain.get("keep").unwrap().as_deref(), Some("old"));
+        std::fs::remove_dir(dir.path().join(".keep.tmp")).unwrap();
 
         // What was there before the key was set still reads, and is sealed
         // when next written.

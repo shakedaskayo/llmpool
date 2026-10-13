@@ -525,6 +525,19 @@ impl Daemon {
         }
     }
 
+    /// Accounts whose stored login or key cannot be opened: the vault key is
+    /// not the one they were sealed with, or the entry is damaged.
+    pub fn unreadable(&self) -> Vec<String> {
+        let g = self.lock();
+        g.store
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| self.vault.get(&a.id).is_err())
+            .map(|a| a.label)
+            .collect()
+    }
+
     /// Serve the pool to others: keep every access token fresh.
     pub fn set_keep_fresh(&mut self, on: bool) {
         self.keep_fresh = on;

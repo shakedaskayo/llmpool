@@ -26,6 +26,12 @@ curl https://pool.example.com/gateway/openai/v1/chat/completions \
   -H "Authorization: Bearer $MY_LLMPOOL_KEY" -d '{"model": "...", "messages": [...]}'
 ```
 
+## What it carries, and what it does not
+
+The gateway carries requests to models: messages, chat completions, responses, embeddings, token counts, and listing models. Everything else an account can do at its provider (files, stored work, fine-tuning, the account's own keys and billing) is refused here and never reaches the provider. A member borrows the pool's capacity, not its accounts.
+
+One member may have 16 requests in flight at once; beyond that they are told to wait, and nobody else is affected. If a provider refuses an account for one member's request, the account is set aside for that member only.
+
 ## Which account a request runs on
 
 The server keeps a member on the account they were last on while it has room, which keeps the provider's prompt cache warm. It moves to another account when that one passes 90% of a window, when the provider refuses it for being over its rate (it is then left alone for as long as the provider says), or when it fails. If one account refuses a request, the same request is tried on the next, up to three. The agent sees none of this, and nothing restarts.

@@ -22,6 +22,10 @@ permalink: /security/
 - **Audit.** Sign-ins, refusals, lent accounts, switches and administrators' changes are written to `team-audit.log` and standard error, never with a secret. Gateway traces never hold what was said.
 - **Transport.** The server speaks HTTP; TLS is your ingress's. Clients refuse a server that is not `https` unless it is on their own machine.
 
+- **The gateway hands out models, nothing else.** Only requests to models are forwarded; an account's files, keys, billing and stored work at the provider are out of reach through it. A member cannot wear out or lock an account for the others: there is a limit on requests in flight per member, and a refusal provoked by one member's request sets the account aside for that member alone.
+- **A member's word is taken within limits.** When lending, a member can hold at most three logins for themselves, and only members running on an account can report its usage.
+- **A server sets only its provider's variables.** On a member's machine, an account from a server can set the variables that provider's agents read and no others.
+- **Settings fail closed.** What an administrator changed is written whole or not at all, and a settings file that cannot be read stops the server instead of falling back to looser values.
 - **Guessing is slow.** Tokens are 256 random bits and keys must be 24 characters or more; on top of that, a burst of wrong tokens gets everyone without a right one told to wait.
 - **The page's own protections.** Every page is sent with a content security policy (only the server's own scripts run), no framing, no referrer, and strict transport security when served over `https`.
 

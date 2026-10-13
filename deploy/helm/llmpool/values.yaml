@@ -62,7 +62,9 @@ blocked: []
 # Logins on the volume are encrypted with this key. Left empty, one is made at
 # install and kept in the release's Secret (which survives `helm uninstall`:
 # without the key the pool on the volume cannot be read). With existingSecret,
-# put it there as LLMPOOL_VAULT_KEY (32+ random characters).
+# put it there as LLMPOOL_VAULT_KEY (32+ random characters). If you render the
+# chart without the cluster (helm template, Argo CD, Flux), set it here or in
+# existingSecret: a rendered chart cannot see the key it made before.
 vaultKey: ""
 
 # Off: a subscription login in use by one member is not lent to another.
@@ -103,8 +105,9 @@ resources:
     cpu: 20m
     memory: 32Mi
   limits:
-    # Room for many requests in flight at once; raise it with gateway.maxInFlight.
-    memory: 512Mi
+    # Room for many requests in flight at once, some of them large; raise it
+    # with gateway.maxInFlight.
+    memory: 1Gi
 
 podAnnotations: {}
 nodeSelector: {}

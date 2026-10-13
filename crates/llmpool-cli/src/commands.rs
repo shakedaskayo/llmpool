@@ -1711,6 +1711,15 @@ fn serve(listen: &str) -> Result<ExitCode, String> {
     let mut daemon = Daemon::open_default().map_err(|e| e.message)?;
     daemon.set_keep_fresh(true);
     let daemon = Arc::new(daemon);
+    // Said once, loudly, at the start: these accounts will be passed over.
+    let locked = daemon.unreadable();
+    if !locked.is_empty() {
+        eprintln!(
+            "llmpool: WARNING: {} account(s) cannot be opened with this vault key and will not be used: {}",
+            locked.len(),
+            locked.join(", ")
+        );
+    }
     let local = http::start(daemon.clone(), lock).map_err(|e| e.to_string())?;
     let serving =
         team_server::start(daemon, config, listen).map_err(|e| format!("{listen}: {e}"))?;

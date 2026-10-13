@@ -527,7 +527,12 @@ impl Daemon {
                 // which variables our agents run with.
                 let text = row["secret"].to_string();
                 if !row["secret"].is_null() {
-                    if keys::env_of(&text).is_err() {
+                    let named_for_it = keys::env_of(&text).is_ok_and(|env| {
+                        env.keys().all(|name| {
+                            llmpool_core::providers::team_env_ok(&account.provider, name)
+                        })
+                    });
+                    if !named_for_it {
                         continue;
                     }
                     if self.vault.get(&account.id)?.as_deref() != Some(text.as_str()) {

@@ -144,7 +144,7 @@ impl TeamServer {
                             && !self.settings().blocks(&name) =>
                     {
                         Ok(Reply::Session(
-                            Some(self.open_session(&name, true)),
+                            Some(self.open_session(&name, true, WEB_SESSION_SECS)),
                             "/".into(),
                         ))
                     }
@@ -227,8 +227,9 @@ impl TeamServer {
     /// What the Server page shows.
     fn overview(&self, who: &str) -> Api<Value> {
         let settings = self.settings();
-        let state = self.state();
         let t = now();
+        // The daemon's lock is taken and let go before the server's own:
+        // the order every other path uses.
         let labels: BTreeMap<AccountId, String> = {
             let g = self.daemon.lock();
             g.store
@@ -237,6 +238,7 @@ impl TeamServer {
                 .map(|a| (a.id, a.label))
                 .collect()
         };
+        let state = self.state();
         let mut members: BTreeMap<&str, (i64, bool, usize)> = BTreeMap::new();
         for m in state.members.values().filter(|m| m.expires_at > t) {
             let entry = members.entry(&m.email).or_insert((0, m.by_key, 0));
@@ -313,7 +315,11 @@ impl TeamServer {
                 .collect();
         }
         let text = serde_json::to_string_pretty(&settings)?;
-        std::fs::write(self.daemon.data_dir().join("team-settings.json"), text)?;
+        // Whole or not at all: half a file would be read as no settings.
+        let path = self.daemon.data_dir().join("team-settings.json");
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)?;
         *self.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings;
         Ok(())
     }

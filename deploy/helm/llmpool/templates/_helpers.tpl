@@ -28,6 +28,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and .Values.vaultKey (lt (len .Values.vaultKey) 32) }}
 {{- fail "vaultKey is shorter than 32 characters" }}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.ingressNamespaces) }}
+{{- fail "networkPolicy.ingressNamespaces is empty: name the namespace of your ingress controller, or turn the policy off" }}
+{{- end }}
 {{- range $name, $key := .Values.apiKeys }}
 {{- if lt (len $key) 24 }}
 {{- fail (printf "apiKeys.%s is shorter than 24 characters" $name) }}

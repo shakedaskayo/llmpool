@@ -95,6 +95,31 @@ pub fn env_name_ok(name: &str) -> bool {
             .any(|p| name.starts_with(p))
 }
 
+/// Whether a team's server may set this variable for an account of
+/// `provider` on a member's machine. Narrower than what a person may set for
+/// themselves: only the names that provider's agents read, so a server cannot
+/// hand a member, say, a different identity for their other tools.
+pub fn team_env_ok(provider: &str, name: &str) -> bool {
+    if !env_name_ok(name) {
+        return false;
+    }
+    let upper = provider.to_uppercase().replace('-', "_");
+    let own = env_of(provider).is_some_and(|names| names.contains(&name));
+    let conventional = [
+        format!("{upper}_API_KEY"),
+        format!("{upper}_BASE_URL"),
+        format!("{upper}_API_BASE"),
+    ]
+    .iter()
+    .any(|n| n == name);
+    let claude = matches!(provider, "claude" | "anthropic")
+        && matches!(
+            name,
+            "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_BASE_URL"
+        );
+    own || conventional || claude
+}
+
 /// A provider or agent name safe to file an account under.
 pub fn name_ok(name: &str) -> bool {
     !name.is_empty()
@@ -138,6 +163,20 @@ mod tests {
         }
         assert!(env_name_ok("MY_PROXY_BASE_URL"));
         assert!(env_name_ok("AWS_SESSION_TOKEN"));
+    }
+
+    #[test]
+    fn a_server_sets_only_the_variables_its_provider_reads() {
+        assert!(team_env_ok("openai", "OPENAI_API_KEY"));
+        assert!(team_env_ok("openai", "OPENAI_BASE_URL"));
+        assert!(team_env_ok("claude", "ANTHROPIC_AUTH_TOKEN"));
+        assert!(team_env_ok("bedrock", "AWS_REGION"));
+        assert!(team_env_ok("together", "TOGETHER_API_KEY"));
+        // Credential-shaped, but not this provider's to set.
+        assert!(!team_env_ok("openai", "GITHUB_TOKEN"));
+        assert!(!team_env_ok("openai", "AWS_PROFILE"));
+        assert!(!team_env_ok("xai", "OPENAI_BASE_URL"));
+        assert!(!team_env_ok("openai", "PATH"));
     }
 
     #[test]

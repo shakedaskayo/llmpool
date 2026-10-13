@@ -892,13 +892,13 @@ fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself()
         Err(ureq::Error::Status(401, _))
     ));
     assert!(matches!(
-        post("nowhere/v1/x", KEY),
+        post("nowhere/v1/messages", KEY),
         Err(ureq::Error::Status(404, _))
     ));
 
     // An answer that streams arrives as it is made, not when it is finished.
     let began = std::time::Instant::now();
-    let stream = post("openai/v1/stream", KEY).unwrap();
+    let stream = post("openai/v1/chat/completions?mode=stream", KEY).unwrap();
     assert_eq!(stream.content_type(), "text/event-stream");
     let mut lines = BufReader::new(stream.into_reader()).lines();
     assert!(lines.next().unwrap().unwrap().contains("input_tokens"));
@@ -1145,12 +1145,14 @@ fn the_gateway_carries_many_requests_at_once_and_follows_the_decision_model() {
         .map(|_| {
             let url = url.clone();
             std::thread::spawn(move || {
-                ureq::post(&format!("{url}/gateway/openai/v1/stream"))
-                    .set("Authorization", &format!("Bearer {KEY}"))
-                    .send_json(json!({"model": "m-1"}))
-                    .unwrap()
-                    .into_string()
-                    .unwrap()
+                ureq::post(&format!(
+                    "{url}/gateway/openai/v1/chat/completions?mode=stream"
+                ))
+                .set("Authorization", &format!("Bearer {KEY}"))
+                .send_json(json!({"model": "m-1"}))
+                .unwrap()
+                .into_string()
+                .unwrap()
             })
         })
         .collect();
@@ -1276,12 +1278,14 @@ fn the_server_tells_browsers_to_be_careful_slows_guessing_and_stops_gently() {
     let streaming = {
         let url = url.clone();
         std::thread::spawn(move || {
-            ureq::post(&format!("{url}/gateway/openai/v1/stream"))
-                .set("Authorization", &format!("Bearer {KEY}"))
-                .send_json(json!({"model": "m"}))
-                .unwrap()
-                .into_string()
-                .unwrap()
+            ureq::post(&format!(
+                "{url}/gateway/openai/v1/chat/completions?mode=stream"
+            ))
+            .set("Authorization", &format!("Bearer {KEY}"))
+            .send_json(json!({"model": "m"}))
+            .unwrap()
+            .into_string()
+            .unwrap()
         })
     };
     std::thread::sleep(Duration::from_millis(250));
@@ -1320,4 +1324,156 @@ fn guessing_tokens_gets_slow_for_everyone_who_is_guessing() {
     assert_eq!(*answers.last().unwrap(), 429);
     // Someone with the right token is not slowed down by the guessing.
     assert_eq!(try_token(KEY), 200);
+}
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn the_gateway_hands_out_models_and_nothing_else_and_one_member_cannot_spoil_it() {
+    use llmpool_daemon::KeyReq;
+    let provider = upstream();
+    let pool = machine(&[]);
+    pool.daemon
+        .add_key(KeyReq {
+            provider: "openai".into(),
+            label: None,
+            tags: vec![],
+            env: [
+                ("OPENAI_API_KEY".to_string(), "k-good".to_string()),
+                ("OPENAI_BASE_URL".to_string(), provider.url.clone()),
+            ]
+            .into(),
+        })
+        .unwrap();
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY},other:other-key-0123456789abcdefgh")).unwrap(),
+        gateway: true,
+        ..Config::default()
+    });
+    let send = |method: &str, path: &str, key: &str, body: Value| {
+        let request = ureq::request(method, &format!("{url}/gateway/{path}"))
+            .set("Authorization", &format!("Bearer {key}"));
+        let answer = if method == "GET" {
+            request.call()
+        } else {
+            request.send_json(body)
+        };
+        match answer {
+            Ok(r) => r.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let seen = || provider.seen.lock().unwrap().len();
+
+    // Asking a model is carried. What else the account could do at the
+    // provider (files, stored work, the account itself) never leaves here.
+    assert_eq!(
+        send(
+            "POST",
+            "openai/v1/chat/completions",
+            KEY,
+            json!({"model": "m"})
+        ),
+        200
+    );
+    assert_eq!(send("GET", "openai/v1/models", KEY, json!(null)), 200);
+    let before = seen();
+    for (method, path) in [
+        ("GET", "openai/v1/files"),
+        ("POST", "openai/v1/files"),
+        ("DELETE", "openai/v1/models/some-model"),
+        ("POST", "openai/v1/fine_tuning/jobs"),
+        ("GET", "openai/v1/organization/api_keys"),
+        ("GET", "claude/api/oauth/profile"),
+        ("POST", "openai/v1/../v1/files"),
+        ("POST", "openai/v1/chat/completions/../../files"),
+        ("POST", "openai/v1/%2e%2e/files"),
+        ("POST", "openai//evil.example/v1/messages"),
+        ("GET", "openai/v1/models/a/b"),
+    ] {
+        assert_eq!(send(method, path, KEY, json!({})), 403, "{method} {path}");
+    }
+    assert_eq!(seen(), before, "a refused request reached the provider");
+
+    // What a member writes into a request cannot bloat what the server keeps.
+    send(
+        "POST",
+        "openai/v1/chat/completions",
+        KEY,
+        json!({"model": "x".repeat(50_000)}),
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let traces = std::fs::read_to_string(pool.data.join("gateway-traces.log")).unwrap();
+    assert!(
+        traces.lines().all(|line| line.len() < 1000),
+        "a trace line grew with the request"
+    );
+
+    // One member with a great many requests in flight is told to wait; the
+    // member beside them is not.
+    let flood: Vec<_> = (0..24)
+        .map(|_| {
+            let url = url.clone();
+            std::thread::spawn(move || {
+                match ureq::post(&format!(
+                    "{url}/gateway/openai/v1/chat/completions?mode=stream"
+                ))
+                .set("Authorization", &format!("Bearer {KEY}"))
+                .send_json(json!({"model": "m"}))
+                {
+                    Ok(r) => {
+                        let status = r.status();
+                        let _ = r.into_string();
+                        status
+                    }
+                    Err(ureq::Error::Status(code, _)) => code,
+                    Err(e) => panic!("{e}"),
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        send(
+            "POST",
+            "openai/v1/chat/completions",
+            "other-key-0123456789abcdefgh",
+            json!({"model": "m"})
+        ),
+        200
+    );
+    let answers: Vec<u16> = flood.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(answers.contains(&429), "{answers:?}");
+    assert!(
+        answers.iter().filter(|a| **a == 200).count() >= 16,
+        "{answers:?}"
+    );
+    // And when theirs are done, they are welcome again.
+    assert_eq!(
+        send(
+            "POST",
+            "openai/v1/chat/completions",
+            KEY,
+            json!({"model": "m"})
+        ),
+        200
+    );
+}
+
+#[test]
+fn settings_that_cannot_be_read_stop_the_server_rather_than_loosen_it() {
+    let pool = machine(&[]);
+    std::fs::write(
+        pool.data.join("team-settings.json"),
+        "{\"share_logins\": tru",
+    )
+    .unwrap();
+    let config = Config {
+        public_url: "http://127.0.0.1:1".into(),
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        ..Config::default()
+    };
+    let refused = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0");
+    assert!(refused.is_err_and(|e| e.to_string().contains("team-settings.json")));
 }
