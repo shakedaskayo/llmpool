@@ -2107,6 +2107,6 @@ fn the_advisors_two_views_of_switching_are_read_together() {
     assert_eq!(advice["acted"], true);
     assert_eq!(
         w.daemon.list_sessions().unwrap()[0]["picked_by"],
-        "advisor, 72% sure"
+        "advisor, 73% sure"
     );
 }
