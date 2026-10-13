@@ -75,6 +75,26 @@ fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBoo
     }
 }
 
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn handle(d: &Daemon, token: &str, mut request: tiny_http::Request, stop: &AtomicBool) {
     let authorized = request
         .headers()
@@ -87,7 +107,8 @@ fn handle(d: &Daemon, token: &str, mut request: tiny_http::Request, stop: &Atomi
         let _ = request.as_reader().read_to_string(&mut text);
         let body = if text.trim().is_empty() { Ok(Value::Null) } else { serde_json::from_str(&text) };
         let url = request.url().split('?').next().unwrap_or_default().to_string();
-        let parts: Vec<&str> = url.split('/').filter(|p| !p.is_empty()).collect();
+        let decoded: Vec<String> = url.split('/').filter(|p| !p.is_empty()).map(percent_decode).collect();
+        let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         match body {
             Ok(body) => route(d, request.method().as_str(), &parts, body, stop),
             Err(e) => Err(fail(400, format!("bad request: {e}"))),
@@ -133,4 +154,17 @@ pub fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
         })
         .collect();
     Ok(Running { endpoint, workers })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn decodes_escapes_and_leaves_the_rest() {
+        assert_eq!(percent_decode("work%201%2F2"), "work 1/2");
+        assert_eq!(percent_decode("me@x.io"), "me@x.io");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
 }
