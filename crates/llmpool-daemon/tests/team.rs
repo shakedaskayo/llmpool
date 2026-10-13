@@ -769,7 +769,12 @@ fn upstream() -> Upstream {
                     )
                     .with_header(header("content-type", "application/json"))
                     .with_header(header("anthropic-ratelimit-unified-5h-utilization", used))
-                    .with_header(header("anthropic-ratelimit-unified-5h-reset", "4000000000")),
+                    // One login's answers never say when its window ends.
+                    .with_header(if auth.contains("z-1") {
+                        header("x-nothing", "0")
+                    } else {
+                        header("anthropic-ratelimit-unified-5h-reset", "4000000000")
+                    }),
                 );
             }
         }
@@ -1762,4 +1767,35 @@ fn a_gateway_replica_carries_requests_keeps_nothing_and_outlives_the_primary() {
     std::thread::sleep(Duration::from_millis(1200));
     assert!(ureq::get(&format!("{primary_url}/health")).call().is_err());
     assert_eq!(ask(KEY), 200);
+}
+
+#[test]
+fn an_answer_that_names_no_reset_does_not_hold_an_account_as_full_for_ever() {
+    let provider = upstream();
+    let pool = machine(&[("z@x.io", "z-1")]);
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        gateway: true,
+        upstreams: [("claude".to_string(), provider.url.clone())].into(),
+        ..Config::default()
+    });
+    let began = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    ureq::post(&format!("{url}/gateway/claude/v1/messages"))
+        .set("Authorization", &format!("Bearer {KEY}"))
+        .send_json(json!({"model": "m", "messages": []}))
+        .unwrap();
+    let window = accounts(&pool)["z@x.io"]["usage"]["windows"]["5h"].clone();
+    assert_eq!(window["used_percent"], 10.0);
+    // It ends one whole window from now at the latest, so it is read again.
+    let ends = window["resets_at"]
+        .as_i64()
+        .expect("a time the window ends");
+    assert!(
+        (began + 5 * 3600..=began + 5 * 3600 + 60).contains(&ends),
+        "{ends}"
+    );
 }
