@@ -8,6 +8,8 @@ const state = {
   accounts: [],
   sessions: [],
   events: [],
+  issues: [],
+  login: { state: "idle" },
   schema: { triggers: [], conditions: [], picks: [], home: "" },
   policy: { settings: {}, rule: [] },
   policyText: "",
@@ -97,26 +99,47 @@ function accountBadge(a) {
   return "";
 }
 
+// What is missing, each with the button that fixes it.
+function issuesPanel() {
+  if (state.login.state === "waiting") {
+    const url = state.login.url ? `<p class="muted">If no page opened: <a href="#" data-act="copy" data-text="${esc(state.login.url)}">copy the sign-in link</a></p>` : "";
+    return `<div class="callout" role="status"><strong>◌ Waiting for you to finish signing in in your browser…</strong>${url}
+      <div class="copy"><button data-act="login-cancel">Cancel the sign-in</button></div></div>`;
+  }
+  return state.issues
+    .map((issue, i) => {
+      const label = { add_current: "Add this login to the pool", login: issue.email ? `Sign in as ${issue.email}` : "Sign in" }[issue.action];
+      const button = label ? `<div class="copy"><button class="primary" data-act="fix" data-i="${i}">${esc(label)}</button></div>` : "";
+      const command = issue.action === "install" ? `<div class="copy"><code>llmpool install claude</code><button class="quiet" data-act="copy" data-text="llmpool install claude">Copy</button></div>` : "";
+      return `<div class="callout bad" role="alert"><strong>⚠ ${esc(issue.text)}</strong>${button}${command}</div>`;
+    })
+    .join("");
+}
+
 function addPanel() {
   const hasDefault = state.accounts.some((a) => a.is_default);
+  const waiting = state.login.state === "waiting";
   return `<div class="callout">
     <div class="steps">
       <div>
-        <h3>The login Claude Code uses now</h3>
-        <p class="muted">${hasDefault ? "Already in the pool. Press again after logging Claude Code in to a different account." : "One press. Nothing about your Claude Code setup changes."}</p>
-        <div class="copy"><button class="primary" data-act="capture">Add current login</button></div>
+        <h3>Sign in to another account</h3>
+        <p class="muted">Opens Claude's sign-in page in your browser. llmpool never sees your password; it takes the login once you are done.</p>
+        <div class="copy">
+          <input class="wide" id="login-email" type="email" placeholder="email (optional)" aria-label="Email of the account to sign in to, optional" />
+          <input class="tags" id="login-tags" placeholder="tags, e.g. work" aria-label="Tags for the new account, comma separated, optional" />
+          <button class="primary" data-act="login"${waiting ? " disabled" : ""}>Sign in…</button>
+        </div>
       </div>
       <div>
-        <h3>Another account</h3>
-        <p class="muted">Run this in a terminal. It opens Claude Code in a scratch profile; log in, then quit with <code>/exit</code>.</p>
-        <div class="copy"><code>llmpool add claude --tag work</code><button class="quiet" data-act="copy" data-text="llmpool add claude --tag work" aria-label="Copy command">Copy</button></div>
+        <h3>The login Claude Code uses now</h3>
+        <p class="muted">${hasDefault ? "Already in the pool. Press again after logging Claude Code in to a different account." : "One press. Nothing about your Claude Code setup changes."}</p>
+        <div class="copy"><button data-act="capture">Add current login</button></div>
       </div>
     </div>
   </div>`;
 }
 
 function renderPool() {
-  const dead = state.accounts.filter((a) => a.health !== "ok");
   const rows = state.accounts
     .map((a) => {
       const used = a.sessions.length ? `<div class="muted">in use by ${plural(a.sessions.length, "session")}</div>` : "";
@@ -126,16 +149,13 @@ function renderPool() {
         <td>${meter(a.usage, "5h", "5-hour window")}</td>
         <td>${meter(a.usage, "7d", "7-day window")}</td>
         <td class="actions">
+          ${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
           <button data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
           <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>
         </td></tr>`;
     })
     .join("");
-  const warning = dead.length
-    ? `<div class="callout bad" role="alert"><strong>⚠ ${esc(dead.map((a) => a.label).join(", "))} ${dead.length > 1 ? "need" : "needs"} a new login.</strong>
-        <p>Policies skip ${dead.length > 1 ? "them" : "it"} until then. Run <code>llmpool add claude</code> in a terminal and sign in with that account.</p></div>`
-    : "";
-  $("pool").innerHTML = `${warning}
+  $("pool").innerHTML = `${issuesPanel()}
     ${
       rows
         ? `<table><caption class="skip">Accounts in the pool</caption>
@@ -547,6 +567,7 @@ async function poolAction(el) {
   const account = state.accounts.find((a) => a.id === id);
   const act = el.dataset.act;
   if (act === "copy") return copy(el.dataset.text);
+  if (["login", "relogin", "fix", "login-cancel"].includes(act)) return loginAction(el, account);
   if (act === "remove" && el.dataset.armed !== "yes") {
     // Two presses, so a slip does not drop a login.
     el.dataset.armed = "yes";
@@ -564,6 +585,27 @@ async function poolAction(el) {
   );
   await refresh(true);
   return done;
+}
+
+// Signing in happens in the browser, driven by Claude Code itself; the
+// window only starts it, shows that it is waiting, and can call it off.
+async function loginAction(el, account) {
+  const act = el.dataset.act;
+  if (act === "login-cancel") {
+    await attempt(() => api("DELETE", "/logins"), "Sign-in cancelled");
+    return refresh(true);
+  }
+  const issue = act === "fix" ? state.issues[Number(el.dataset.i)] : null;
+  if (issue?.action === "add_current") {
+    await attempt(() => api("POST", "/accounts/capture", {}), "Login added to the pool");
+    return refresh(true);
+  }
+  const request =
+    act === "login"
+      ? { email: $("login-email").value.trim() || null, tags: $("login-tags").value.split(",").map((t) => t.trim()).filter(Boolean) }
+      : { email: issue?.email ?? account?.email ?? null };
+  await attempt(() => api("POST", "/logins", request), "Finish signing in in your browser");
+  return refresh(true);
 }
 
 async function sessionAction(el) {
@@ -585,7 +627,19 @@ function renderSummary() {
 
 async function refresh(force = false) {
   try {
-    [state.accounts, state.sessions, state.events] = await Promise.all([api("GET", "/accounts"), api("GET", "/sessions"), api("GET", "/events")]);
+    const before = state.login.state;
+    [state.accounts, state.sessions, state.events, state.issues, state.login] = await Promise.all([
+      api("GET", "/accounts"),
+      api("GET", "/sessions"),
+      api("GET", "/events"),
+      api("GET", "/issues"),
+      api("GET", "/logins"),
+    ]);
+    // A sign-in that just ended is news, whichever way it went.
+    if (before === "waiting" && state.login.state !== "waiting") {
+      toast(state.login.message, state.login.state === "done" ? "ok" : "error");
+      force = true;
+    }
     state.offline = null;
   } catch (e) {
     state.offline = `⚠ ${String(e).replace(/^Error: /, "")}`;
@@ -619,8 +673,13 @@ $("tabs").addEventListener("keydown", (e) => {
   selectTab(tabs[(next + tabs.length) % tabs.length]);
 });
 
-$("pool").addEventListener("click", (e) => e.target.matches("button[data-act]") && poolAction(e.target));
+$("pool").addEventListener("click", (e) => {
+  if (e.target.matches("a[data-act]")) e.preventDefault();
+  if (e.target.matches("button[data-act], a[data-act]")) poolAction(e.target);
+});
 $("pool").addEventListener("change", (e) => e.target.matches("input[data-act]") && poolAction(e.target));
+// Enter in the email field starts the sign-in.
+$("pool").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "login-email" && document.querySelector('[data-act="login"]')?.click());
 $("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
 $("policies").addEventListener("click", (e) => e.target.matches("button[data-act]") && policyAction(e.target));
 $("policies").addEventListener("change", (e) => e.target.matches("select[data-act], input[type=checkbox][data-act]") && policyAction(e.target));

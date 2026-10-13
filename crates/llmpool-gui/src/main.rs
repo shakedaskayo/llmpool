@@ -184,6 +184,13 @@ fn tray_menu(app: &AppHandle, sessions: &Value, accounts: &Value) -> tauri::Resu
     )?)?;
     menu.append(&MenuItem::with_id(
         app,
+        "add",
+        "Sign in to another account…",
+        true,
+        none,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
         "open",
         "Open llmpool",
         true,
@@ -230,6 +237,17 @@ fn on_menu(app: &AppHandle, id: &str) {
     match id.split('|').collect::<Vec<_>>().as_slice() {
         ["open"] => show_window(app),
         ["next"] => switch_next(app),
+        ["add"] => {
+            // Signing in happens in the browser; the window shows it waiting.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let started = client().and_then(|c| c.call("POST", "/logins", Some(json!({}))));
+                show_window(&app);
+                if let Err(message) = started {
+                    let _ = app.emit("llmpool-message", message);
+                }
+            });
+        }
         ["quit"] => app.exit(0),
         ["swap", session, account] => {
             let (app, session, account) = (app.clone(), session.to_string(), account.to_string());

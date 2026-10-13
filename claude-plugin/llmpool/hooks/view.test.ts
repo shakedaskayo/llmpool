@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bar, best, fullest, level, peak, resetsIn, stateMark, statusText, toSnapshot } from './view'
+import { bar, best, fullest, level, peak, resetsIn, stateMark, toSnapshot } from './view'
 
 const STATUS = {
   session: { id: 's1', account_id: 'a' },
@@ -34,8 +34,9 @@ test('status json becomes rows, with the current account marked', () => {
   expect(snap.rows[0]!.h5).toBe(91.4)
   expect(snap.rows[1]!.h5).toBe(null)
   expect(snap.rows.map(stateMark).map(m => m.icon)).toEqual(['●', '⚠', '⏸'])
+  expect(snap.issues).toEqual([])
+  expect(snap.login.state).toBe('idle')
   expect(snap.others).toEqual([{ id: 's2', label: 'default login', cwd: '/x' }])
-  expect(statusText(snap)).toBe('llmpool: work-1 · 5h 91% · 7d 12%')
   expect(peak(snap.rows[0]!)).toBe(91.4)
 })
 
@@ -43,7 +44,6 @@ test('a session llmpool did not start has no current account', () => {
   const snap = toSnapshot({ ...STATUS, session: null })
   expect(snap.session).toBe(null)
   expect(snap.rows.some(r => r.isCurrent)).toBe(false)
-  expect(statusText(snap)).toBe(undefined)
 })
 
 test('accounts are ordered: current, then switchable with the most room, then the rest', () => {

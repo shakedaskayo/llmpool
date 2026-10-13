@@ -13,6 +13,8 @@ const STATUS = {
     { id: 'e', label: 'busy', tags: [], enabled: true, health: 'ok', sessions: ['s2'], usage: null },
   ],
   sessions: [{ id: 's1', account_label: 'work-1', cwd: '/w' }],
+  issues: [{ kind: 'relogin', text: 'old needs a new sign-in.', action: 'login', email: 'old@x.io' }],
+  login: { state: 'idle' },
 }
 
 // The test stands in for the host: these are the calls the mod makes that a
@@ -41,7 +43,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'llmpool', surface, component: 'Pane', requestId: 'llmpool', props: { title: 'llmpool' } as never })
 
     // Every account is there, each with its state said in words.
-    for (const text of [/work-1/, /this session/, /work-2/, /near limit/, /91%/, /disabled/, /needs a new login/]) {
+    for (const text of [/work-1/, /this session/, /work-2/, /near limit/, /91%/, /disabled/, /needs a new sign-in/]) {
       expect(await ui.find({ type: 'Text', text })).toBeDefined()
     }
     // Only the usable, other account can be switched to.
@@ -98,4 +100,81 @@ test('`/llmpool next` switches without opening anything', async ($, on) => {
   const ran = await $.command.run({ command: 'llmpool', args: 'next' } as never)
   expect(calls.find(argv => argv[1] === 'switch')?.slice(1)).toEqual(['switch', '--next', '--session', 's1'])
   expect(JSON.stringify(ran)).toContain('now uses work-2')
+})
+
+test('what is missing sits at the top with the press that fixes it; signing in starts from the pane', async ($, on) => {
+  host(on)
+  const calls: string[][] = []
+  let status: Record<string, unknown> = STATUS
+  on('process.run', (_$, e) => {
+    calls.push([...e.argv].slice(1))
+    if (e.argv[1] === 'add' && e.argv.includes('--detach')) {
+      status = { ...STATUS, login: { state: 'waiting', message: 'Finish signing in in your browser.', url: 'https://example/login' } }
+    }
+    if (e.argv[1] === 'add' && e.argv.includes('--cancel')) {
+      status = STATUS
+    }
+
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(status) : 'ok', stderr: '' } } as never
+  })
+  await $.command.run({ command: 'llmpool', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'llmpool', surface: 'terminal', component: 'Pane', requestId: 'llmpool', props: { title: 'llmpool' } as never })
+  expect(await ui.find({ type: 'Text', text: /old needs a new sign-in/ })).toBeDefined()
+
+  // Fixing the dead login signs in as that account, in the browser.
+  await ui.press({ key: 'fix-0' })
+  expect(calls).toContainEqual(['add', 'claude', '--detach', '--email', 'old@x.io'])
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /Waiting for you to finish signing in/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /https:\/\/example\/login/ })).toBeDefined()
+  // While one sign-in waits, a second cannot be started; it can be cancelled.
+  expect(await ui.find({ key: 'add' })).toBeUndefined()
+  await ui.press({ key: 'login-cancel' })
+  expect(calls).toContainEqual(['add', 'claude', '--cancel'])
+  await ui.redraw()
+
+  // Adding a brand-new account is one key in the actions row.
+  await ui.press({ key: 'add' })
+  expect(calls.filter(argv => argv.join(' ') === 'add claude --detach').length).toBe(1)
+  await ui.unmount()
+})
+
+test('a login that is not in the pool is offered from the band, in one press', async ($, on) => {
+  host(on)
+  const calls: string[][] = []
+  const status = {
+    session: null,
+    accounts: [],
+    sessions: [],
+    issues: [{ kind: 'login_not_in_pool', text: 'The login Claude Code uses now (me@x.io) is not in the pool, so llmpool cannot switch it.', action: 'add_current', email: 'me@x.io' }],
+    login: { state: 'idle' },
+  }
+  on('process.run', (_$, e) => {
+    calls.push([...e.argv].slice(1))
+
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(status) : 'added me@x.io', stderr: '' } } as never
+  })
+  await $.command.run({ command: 'llmpool', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'llmpool', surface: 'terminal', component: 'AbovePrompt', props: {} as never })
+  expect(await ui.find({ type: 'Text', text: /is not in the pool/ })).toBeDefined()
+  await ui.press({ key: 'band-fix' })
+  expect(calls).toContainEqual(['add', 'claude', '--from-current'])
+  await ui.unmount()
+})
+
+test('the way in is a tail on the hint line, and nothing is pinned twice', async ($, on) => {
+  const pinned: unknown[] = []
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.status', (_$, e) => {
+    pinned.push(e)
+
+    return { value: undefined } as never
+  })
+  on('session.id', () => ({ value: 'agent-session-1' }) as never)
+  on('clock.now', () => ({ value: 1_700_000_000_000 }) as never)
+  on('process.run', (_$, e) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(STATUS) : '', stderr: '' } }) as never)
+  await $.command.run({ command: 'llmpool', args: '' } as never)
+  // The status line already shows the account; the mod must not pin a copy.
+  expect(pinned).toEqual([])
 })

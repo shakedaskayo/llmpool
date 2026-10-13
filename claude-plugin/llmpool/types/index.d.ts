@@ -17,12 +17,31 @@ export type Row = {
   isElsewhere: boolean
 }
 
+/** Something that stands in the way, and what fixes it. */
+export type Issue = {
+  kind: string
+  text: string
+  /** "add_current", "login", "install" or "none". */
+  action: string
+  email: string | null
+}
+
+/** A sign-in under way in the browser. */
+export type Login = {
+  /** "idle", "waiting", "done", "failed" or "cancelled". */
+  state: string
+  message: string
+  url: string | null
+}
+
 export type Snapshot = {
   /** This session's llmpool id; null when llmpool does not manage it. */
   session: string | null
   rows: Row[]
   others: { id: string; label: string; cwd: string }[]
   error: string | null
+  issues: Issue[]
+  login: Login
 }
 
 declare module 'claude-code' {

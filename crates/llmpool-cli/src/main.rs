@@ -22,6 +22,10 @@ enum Command {
         #[command(subcommand)]
         agent: AddAgent,
     },
+    /// Sign in again to an account whose login has ended
+    Login { account: String },
+    /// Check that everything is in place, and say how to fix what is not
+    Doctor,
     /// Show the accounts in the pool with their usage
     List {
         #[arg(long)]
@@ -134,6 +138,18 @@ enum AddAgent {
         label: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Pre-fill this address on the sign-in page
+        #[arg(long)]
+        email: Option<String>,
+        /// Start the sign-in and return at once, without waiting for it
+        #[arg(long)]
+        detach: bool,
+        /// Give up on the sign-in that is waiting in the browser
+        #[arg(long)]
+        cancel: bool,
+        /// Sign in inside Claude Code's own screen instead of the browser flow
+        #[arg(long)]
+        interactive: bool,
     },
 }
 

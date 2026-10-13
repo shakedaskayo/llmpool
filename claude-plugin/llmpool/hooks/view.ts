@@ -1,4 +1,4 @@
-import type { Row, Snapshot } from '../types'
+import type { Issue, Login, Row, Snapshot } from '../types'
 
 type Json = Record<string, any>
 
@@ -37,7 +37,19 @@ export const toSnapshot = (status: Json): Snapshot => {
     .filter((s: Json) => s.id !== session)
     .map((s: Json) => ({ id: s.id, label: s.account_label ?? 'default login', cwd: s.cwd }))
 
-  return { session, rows, others, error: null }
+  const issues: Issue[] = (status?.issues ?? []).map((i: Json) => ({
+    kind: String(i.kind),
+    text: String(i.text),
+    action: String(i.action ?? 'none'),
+    email: i.email ?? null,
+  }))
+  const login: Login = {
+    state: String(status?.login?.state ?? 'idle'),
+    message: String(status?.login?.message ?? ''),
+    url: status?.login?.url ?? null,
+  }
+
+  return { session, rows, others, error: null, issues, login }
 }
 
 /** A ten-cell meter. */
@@ -105,23 +117,6 @@ export const stateMark = (row: Row): { icon: string; text: string } => {
   return { icon: '⚠', text: 'needs a new login · run `llmpool add claude`' }
 }
 
-/** One line for the status area: the current account and how full it is. */
-export const statusText = (snap: Snapshot): string | undefined => {
-  const row = snap.rows.find(r => r.isCurrent)
-  if (!row) {
-    return undefined
-  }
-  const parts = [`llmpool: ${row.label}`]
-  if (row.h5 !== null) {
-    parts.push(`5h ${Math.round(row.h5)}%`)
-  }
-  if (row.d7 !== null) {
-    parts.push(`7d ${Math.round(row.d7)}%`)
-  }
-
-  return parts.join(' · ')
-}
-
 /** The account worth switching to: usable, not the current one, with clearly
  * more room. Nothing when no account is meaningfully better. */
 export const best = (snap: Snapshot): Row | undefined => {
@@ -138,3 +133,22 @@ export const fullest = (row: Row): { name: string; percent: number; resetAt: num
   (row.d7 ?? 0) > (row.h5 ?? 0)
     ? { name: '7-day', percent: row.d7 ?? 0, resetAt: row.reset7 }
     : { name: '5-hour', percent: row.h5 ?? 0, resetAt: row.reset5 }
+
+/** What a button that fixes an issue should say. */
+export const fixLabel = (issue: Issue): string =>
+  issue.action === 'add_current'
+    ? 'Add this login to the pool'
+    : issue.action === 'login'
+      ? issue.email
+        ? `Sign in as ${issue.email}`
+        : 'Sign in'
+      : ''
+
+/** The issue worth interrupting for: one about the login this session runs on. */
+export const urgent = (snap: Snapshot): Issue | undefined => {
+  const current = snap.rows.find(r => r.isCurrent)
+
+  return snap.issues.find(
+    i => i.kind === 'login_not_in_pool' || (i.kind === 'relogin' && current !== undefined && i.text.startsWith(current.label)),
+  )
+}

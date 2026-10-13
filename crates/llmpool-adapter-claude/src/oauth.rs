@@ -131,11 +131,11 @@ mod tests {
     fn renews_when_the_login_is_close_to_running_out_or_long_unused() {
         let now = 100 * DAY;
         assert!(
-            !due(&secret(now + 3600_000, now + 20 * DAY), now),
+            !due(&secret(now + 3_600_000, now + 20 * DAY), now),
             "fresh, plenty of time"
         );
         assert!(
-            due(&secret(now + 3600_000, now + 6 * DAY), now),
+            due(&secret(now + 3_600_000, now + 6 * DAY), now),
             "login runs out within a week"
         );
         assert!(
@@ -143,7 +143,7 @@ mod tests {
             "unused for two days"
         );
         assert!(
-            !due(&secret(now - 3600_000, now + 20 * DAY), now),
+            !due(&secret(now - 3_600_000, now + 20 * DAY), now),
             "expired an hour ago is normal"
         );
         let mut none = secret(now - 2 * DAY, now + DAY);

@@ -78,8 +78,22 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                     from_current,
                     label,
                     tags,
+                    email,
+                    detach,
+                    cancel,
+                    interactive,
                 },
-        } => add_claude(from_current, label, tags),
+        } => add_claude(AddOptions {
+            from_current,
+            label,
+            tags,
+            email,
+            detach,
+            cancel,
+            interactive,
+        }),
+        Command::Login { account } => login_again(&account),
+        Command::Doctor => doctor(),
         Command::List { json } => list(json),
         Command::Tag { account, tags } => retag(&account, |set| set.extend(tags.iter().cloned())),
         Command::Untag { account, tags } => {
@@ -172,14 +186,70 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> String {
 
 // ---- accounts ---------------------------------------------------------------
 
-fn add_claude(
+struct AddOptions {
     from_current: bool,
     label: Option<String>,
     tags: Vec<String>,
-) -> Result<ExitCode, String> {
+    email: Option<String>,
+    detach: bool,
+    cancel: bool,
+    interactive: bool,
+}
+
+/// Wait for the sign-in that is under way, saying where things stand.
+fn follow_login(client: &Client) -> Result<ExitCode, String> {
+    let mut shown_url = false;
+    eprintln!("Waiting for you to finish signing in in your browser. Ctrl-C stops waiting; the sign-in itself carries on.");
+    loop {
+        let status = client.call("GET", "/logins", None)?;
+        match status["state"].as_str() {
+            Some("waiting") => {
+                if let (false, Some(url)) = (shown_url, status["url"].as_str()) {
+                    eprintln!("If no page opened, go to:\n  {url}");
+                    shown_url = true;
+                }
+                std::thread::sleep(Duration::from_millis(700));
+            }
+            Some("done") => {
+                eprintln!("{TERMS_NOTICE}");
+                return done(format!(
+                    "added {}",
+                    status["account"].as_str().unwrap_or_default()
+                ));
+            }
+            _ => {
+                return Err(status["message"]
+                    .as_str()
+                    .unwrap_or("the sign-in did not finish")
+                    .to_string())
+            }
+        }
+    }
+}
+
+fn add_claude(options: AddOptions) -> Result<ExitCode, String> {
     let client = connect()?;
-    let mut request = json!({"label": label, "tags": tags});
-    if !from_current {
+    if options.cancel {
+        let status = client.call("DELETE", "/logins", None)?;
+        return done(
+            status["message"]
+                .as_str()
+                .unwrap_or("no sign-in was waiting")
+                .to_string(),
+        );
+    }
+    let mut request = json!({"label": options.label, "tags": options.tags});
+    if !options.from_current && !options.interactive {
+        // Claude Code's own sign-in, run for us by the daemon: the browser
+        // opens, and the login is taken into the pool when it finishes.
+        request["email"] = json!(options.email);
+        client.call("POST", "/logins", Some(request))?;
+        if options.detach {
+            return done("sign-in started; finish it in your browser".into());
+        }
+        return follow_login(&client);
+    }
+    if options.interactive {
         let scratch = data_dir().join(format!("login-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
         eprintln!(
@@ -209,6 +279,48 @@ fn add_claude(
         "added {}",
         account["label"].as_str().unwrap_or_default()
     ))
+}
+
+/// `llmpool login <account>`: sign in again to an account already in the pool.
+fn login_again(account: &str) -> Result<ExitCode, String> {
+    let client = connect()?;
+    let accounts = client.call("GET", "/accounts", None)?;
+    let found = accounts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| {
+            [&a["id"], &a["label"], &a["email"]]
+                .iter()
+                .any(|v| v.as_str() == Some(account))
+        })
+        .ok_or_else(|| format!("no account named `{account}`"))?;
+    client.call("POST", "/logins", Some(json!({"email": found["email"]})))?;
+    follow_login(&client)
+}
+
+/// `llmpool doctor`: what is missing, and the command that fixes each thing.
+fn doctor() -> Result<ExitCode, String> {
+    let client = connect()?;
+    let issues = client.call("GET", "/issues", None)?;
+    let issues = issues.as_array().cloned().unwrap_or_default();
+    if issues.is_empty() {
+        return done("everything is in place".into());
+    }
+    for issue in &issues {
+        let fix = match (issue["action"].as_str(), issue["email"].as_str()) {
+            (Some("add_current"), _) => "llmpool add claude --from-current".to_string(),
+            (Some("login"), Some(email)) => format!("llmpool login {email}"),
+            (Some("login"), None) => "llmpool add claude".to_string(),
+            (Some("install"), _) => "llmpool install claude".to_string(),
+            _ => String::new(),
+        };
+        println!("• {}", issue["text"].as_str().unwrap_or_default());
+        if !fix.is_empty() {
+            println!("    fix: {fix}");
+        }
+    }
+    Ok(ExitCode::FAILURE)
 }
 
 fn list(as_json: bool) -> Result<ExitCode, String> {
@@ -504,7 +616,17 @@ fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, Stri
         })
         .cloned();
     if as_json {
-        return done(json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions}).to_string());
+        // Everything a surface needs to draw itself, in one call.
+        let issues = client
+            .call("GET", "/issues", None)
+            .unwrap_or_else(|_| json!([]));
+        let login = client
+            .call("GET", "/logins", None)
+            .unwrap_or_else(|_| json!({"state": "idle"}));
+        return done(
+            json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions, "issues": issues, "login": login})
+                .to_string(),
+        );
     }
     match session {
         Some(s) => done(format!(
@@ -759,6 +881,17 @@ fn install_claude(shim: bool) -> Result<ExitCode, String> {
     let settings = claude_settings();
     std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
     write_mod(&mod_dir(), &exe).map_err(|e| e.to_string())?;
+    // The daemon is often started without the shell's path; tell it where
+    // Claude Code is while we can still see it.
+    let claude = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|dir| dir.join("claude"))
+        .find(|path| path.is_file());
+    match claude {
+        Some(path) => std::fs::write(data_dir().join("claude-bin"), path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?,
+        None => eprintln!("note: `claude` is not on your PATH; signing in from llmpool will not work until it is."),
+    }
     let changed = install::install(&settings, &exe, &previous_status_path(), &mod_dir())
         .map_err(|e| e.to_string())?;
     println!(
