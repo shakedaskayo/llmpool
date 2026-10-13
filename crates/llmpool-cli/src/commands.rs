@@ -96,6 +96,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Switch {
             account, session, ..
         } => switch(account, session),
+        Command::Repair { session } => repair(session),
         Command::Status {
             json,
             agent_session,
@@ -450,6 +451,16 @@ fn target_session(client: &Client, named: Option<String>) -> Result<String, Stri
             "several sessions are running; pick one with --session (see `llmpool sessions`)".into(),
         ),
     }
+}
+
+fn repair(session: Option<String>) -> Result<ExitCode, String> {
+    let client = connect()?;
+    let sid = target_session(&client, session)?;
+    let reply = client.call("POST", &format!("/sessions/{sid}/reseat"), None)?;
+    done(format!(
+        "wrote the login of {} afresh for session {sid}",
+        reply["label"].as_str().unwrap_or_default()
+    ))
 }
 
 fn switch(account: Option<String>, session: Option<String>) -> Result<ExitCode, String> {

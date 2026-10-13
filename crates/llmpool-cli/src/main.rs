@@ -66,6 +66,12 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Write a session's own login into its profile afresh, without changing account
+    Repair {
+        /// Session id; defaults to the current or only session
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Show the current session's account and usage
     Status {
         #[arg(long)]

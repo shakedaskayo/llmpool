@@ -1199,6 +1199,56 @@ impl Daemon {
         Ok(())
     }
 
+    /// Write a session's own login into its profile afresh: save what is
+    /// there, then put it back the way a switch would. Changes no account. It
+    /// repairs a profile whose stored login Claude Code can no longer use, and
+    /// it is the smallest real exercise of the path every switch takes.
+    pub fn reseat(&self, sid: &str) -> Api<Value> {
+        let mut g = self.lock();
+        let m =
+            g.p.sessions
+                .get(sid)
+                .cloned()
+                .ok_or_else(|| fail(404, "no such session"))?;
+        let store_id = m
+            .store
+            .clone()
+            .ok_or_else(|| fail(409, "this session's login is not in the pool"))?;
+        let profile = self
+            .profile_of(&g, &store_id)
+            .ok_or_else(|| fail(500, "session profile is missing"))?;
+        let accounts = self.accounts(&g)?;
+        let account = {
+            let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
+            let actual = profile.identity();
+            let account = accounts
+                .iter()
+                .find(|a| {
+                    actual
+                        .as_ref()
+                        .is_some_and(|(email, org)| same_login(a, email, org.as_deref()))
+                })
+                .ok_or_else(|| {
+                    fail(
+                        409,
+                        "this profile is logged in to an account that is not in the pool",
+                    )
+                })?;
+            // Saved first, so what is written back is the newest login there is.
+            self.read_back(&accounts, &profile)?;
+            profile.write(&*self.keychain, &self.secret_of(&account.id)?)?;
+            account.clone()
+        };
+        self.log(
+            &mut g,
+            "repair",
+            Some(sid),
+            format!("login of {} written afresh", account.label),
+        );
+        self.save(&g);
+        Ok(json!({"session_id": sid, "account": account.id, "label": account.label}))
+    }
+
     pub fn swap_session(&self, sid: &str, name: &str) -> Api<Value> {
         let mut g = self.lock();
         let accounts = self.accounts(&g)?;

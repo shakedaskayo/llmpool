@@ -1161,3 +1161,34 @@ fn accounts_come_over_from_claude_swap() {
         404
     );
 }
+
+#[test]
+fn repair_rewrites_the_same_login_and_keeps_the_newest_token() {
+    let w = world();
+    let payload = json!({"session_id": "agent-1", "cwd": "/x"});
+    w.daemon.hook("-", "SessionStart", "", &payload);
+    let sid = w.daemon.list_sessions().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let default = Profile::default_in(&w.home);
+    // Claude Code rotated the token and keeps other logins beside it.
+    default
+        .write(&NoKeychain, &secret("home@x.io", "home-rotated"))
+        .unwrap();
+    let path = default.config_dir.join(".credentials.json");
+    let mut raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    raw["mcpOAuth"] = json!({"server": "kept"});
+    std::fs::write(&path, raw.to_string()).unwrap();
+
+    let reply = w.daemon.reseat(&sid).unwrap();
+    assert_eq!(reply["label"], "home@x.io");
+    assert_eq!(default_token(&w), "home-rotated");
+    assert_eq!(vault_token(&w, "home@x.io"), "home-rotated");
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(after["mcpOAuth"]["server"], "kept");
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "home@x.io"
+    );
+}

@@ -108,6 +108,7 @@ fn route(
             d.set_pid(id, pid as u32)
         }
         ("POST", ["sessions", id, "next"]) => d.swap_next(id),
+        ("POST", ["sessions", id, "reseat"]) => d.reseat(id),
         ("POST", ["sessions", id, "swap"]) => d.swap_session(id, text(&body, "account")?),
         ("DELETE", ["sessions", id]) => Ok(d.end_session(id)),
         ("GET", ["policies"]) => Ok(d.policy_text()),
