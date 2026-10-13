@@ -1,10 +1,8 @@
-use crate::client::{data_dir, home, Client};
+use llmpool_daemon::client::{data_dir, home, Client};
 use crate::{AddAgent, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent};
 use llmpool_adapter_claude::install;
-use llmpool_adapter_claude::profile::{Keychain, MacKeychain, NoKeychain};
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
-use llmpool_core::vault::{FileVault, KeychainVault, Vault};
 use llmpool_daemon::{http, Daemon};
 use serde_json::{json, Value};
 use std::io::{IsTerminal, Read, Write};
@@ -21,6 +19,37 @@ note: subscription logins are licensed per person by their provider. Use
 llmpool with your own accounts, and check the provider's terms before
 sharing a pool with other people.";
 
+/// A client for the daemon, starting it in the background if needed.
+fn connect() -> Result<Client, String> {
+    let timeout = Duration::from_secs(15);
+    if let Some(client) = Client::existing(timeout) {
+        return Ok(client);
+    }
+    let data = data_dir();
+    std::fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data.join("daemon.log"))
+        .map_err(|e| format!("daemon log: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("could not start the daemon: {e}"))?;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Some(client) = Client::existing(timeout) {
+            return Ok(client);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(format!("the daemon did not start; see {}", data.join("daemon.log").display()))
+}
+
 pub fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
         Command::Add { agent: AddAgent::Claude { from_current, label, tags } } => add_claude(from_current, label, tags),
@@ -30,7 +59,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Enable { account } => patch(&account, json!({"enabled": true})),
         Command::Disable { account } => patch(&account, json!({"enabled": false})),
         Command::Remove { account } => {
-            Client::connect()?.call("DELETE", &format!("/accounts/{}", encode(&account)), None)?;
+            connect()?.call("DELETE", &format!("/accounts/{}", encode(&account)), None)?;
             done(format!("removed {account}"))
         }
         Command::Run { account, tag, args } => run_agent(account, tag, args),
@@ -90,7 +119,7 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> String {
 // ---- accounts ---------------------------------------------------------------
 
 fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> Result<ExitCode, String> {
-    let client = Client::connect()?;
+    let client = connect()?;
     let mut request = json!({"label": label, "tags": tags});
     if !from_current {
         let scratch = data_dir().join(format!("login-{}", std::process::id()));
@@ -113,7 +142,7 @@ fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> R
 }
 
 fn list(as_json: bool) -> Result<ExitCode, String> {
-    let accounts = Client::connect()?.call("GET", "/accounts", None)?;
+    let accounts = connect()?.call("GET", "/accounts", None)?;
     if as_json {
         return done(json!({"schemaVersion": 1, "accounts": accounts}).to_string());
     }
@@ -146,12 +175,12 @@ fn list(as_json: bool) -> Result<ExitCode, String> {
 }
 
 fn patch(account: &str, body: Value) -> Result<ExitCode, String> {
-    let updated = Client::connect()?.call("PATCH", &format!("/accounts/{}", encode(account)), Some(body))?;
+    let updated = connect()?.call("PATCH", &format!("/accounts/{}", encode(account)), Some(body))?;
     done(format!("updated {}", updated["label"].as_str().unwrap_or(account)))
 }
 
 fn retag(account: &str, change: impl FnOnce(&mut std::collections::BTreeSet<String>)) -> Result<ExitCode, String> {
-    let client = Client::connect()?;
+    let client = connect()?;
     let accounts = client.call("GET", "/accounts", None)?;
     let current = accounts
         .as_array()
@@ -197,7 +226,7 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
     });
 
     // Without a daemon the agent still has to start; it runs on its own login.
-    let started = Client::connect().and_then(|client| {
+    let started = connect().and_then(|client| {
         let mut reply = client.call("POST", "/sessions", Some(request))?;
         let sid = reply["session_id"].as_str().unwrap_or_default().to_string();
         if let Some(candidates) = reply["ask"].as_array().filter(|c| !c.is_empty()) {
@@ -238,7 +267,7 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
 }
 
 fn sessions(as_json: bool) -> Result<ExitCode, String> {
-    let sessions = Client::connect()?.call("GET", "/sessions", None)?;
+    let sessions = connect()?.call("GET", "/sessions", None)?;
     if as_json {
         return done(json!({"schemaVersion": 1, "sessions": sessions}).to_string());
     }
@@ -276,14 +305,14 @@ fn target_session(client: &Client, named: Option<String>) -> Result<String, Stri
 }
 
 fn switch(account: &str, session: Option<String>) -> Result<ExitCode, String> {
-    let client = Client::connect()?;
+    let client = connect()?;
     let sid = target_session(&client, session)?;
     client.call("POST", &format!("/sessions/{sid}/swap"), Some(json!({"account": account})))?;
     done(format!("session {sid} now uses {account}; it takes effect within about a minute"))
 }
 
 fn status(as_json: bool) -> Result<ExitCode, String> {
-    let client = Client::connect()?;
+    let client = connect()?;
     let sessions = client.call("GET", "/sessions", None)?;
     let accounts = client.call("GET", "/accounts", None)?;
     let current = std::env::var("LLMPOOL_SESSION").ok();
@@ -446,17 +475,7 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     if existing.is_some() {
         return Err("the daemon is already running".into());
     }
-    let data = data_dir();
-    let vault: Box<dyn Vault> = match std::env::var_os("LLMPOOL_FILE_VAULT") {
-        Some(_) => Box::new(FileVault(data.join("vault"))),
-        None => Box::new(KeychainVault),
-    };
-    let keychain: Box<dyn Keychain> = if cfg!(target_os = "macos") && std::env::var_os("LLMPOOL_NO_CLAUDE_KEYCHAIN").is_none() {
-        Box::new(MacKeychain)
-    } else {
-        Box::new(NoKeychain)
-    };
-    let daemon = Daemon::open(&data, &home(), vault, keychain).map_err(|e| e.message)?;
+    let daemon = Daemon::open_default().map_err(|e| e.message)?;
     http::start(Arc::new(daemon)).map_err(|e| e.to_string())?.wait();
     Ok(ExitCode::SUCCESS)
 }

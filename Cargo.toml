@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/llmpool-core", "crates/llmpool-adapter-claude", "crates/llmpool-daemon", "crates/llmpool-cli"]
+members = ["crates/llmpool-core", "crates/llmpool-adapter-claude", "crates/llmpool-daemon", "crates/llmpool-cli", "crates/llmpool-gui"]
 
 [workspace.package]
 version = "0.1.0"

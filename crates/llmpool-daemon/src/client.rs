@@ -1,9 +1,9 @@
-//! Talking to the daemon, and starting it when it is not running.
+//! Talking to a running daemon over its local HTTP API.
 
-use llmpool_daemon::http::Endpoint;
+use crate::http::Endpoint;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -42,37 +42,6 @@ impl Client {
     pub fn existing(timeout: Duration) -> Option<Self> {
         let client = Self::to(&Endpoint::read(&data_dir())?, timeout);
         client.call("GET", "/health", None).ok().map(|_| client)
-    }
-
-    /// A client for the daemon, starting it in the background if needed.
-    pub fn connect() -> Result<Self, String> {
-        let timeout = Duration::from_secs(15);
-        if let Some(client) = Self::existing(timeout) {
-            return Ok(client);
-        }
-        let data = data_dir();
-        std::fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(data.join("daemon.log"))
-            .map_err(|e| format!("daemon log: {e}"))?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        std::process::Command::new(exe)
-            .arg("daemon")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(log)
-            .spawn()
-            .map_err(|e| format!("could not start the daemon: {e}"))?;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            if let Some(client) = Self::existing(timeout) {
-                return Ok(client);
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Err(format!("the daemon did not start; see {}", data.join("daemon.log").display()))
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {

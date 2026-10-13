@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>llmpool</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>llmpool</h1>
+      <nav role="tablist">
+        <button role="tab" data-tab="pool" aria-selected="true">Pool</button>
+        <button role="tab" data-tab="sessions" aria-selected="false">Sessions</button>
+        <button role="tab" data-tab="policies" aria-selected="false">Policies</button>
+      </nav>
+      <span id="health" aria-live="polite"></span>
+    </header>
+    <main>
+      <section id="pool" role="tabpanel"></section>
+      <section id="sessions" role="tabpanel" hidden></section>
+      <section id="policies" role="tabpanel" hidden></section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,10 +1,11 @@
 //! The llmpool daemon: owns the account pool, the vault, the live sessions and
 //! the policy file, and decides which login each session's profile holds.
 
+pub mod client;
 pub mod http;
 
 use chrono::{Datelike, Local, Timelike};
-use llmpool_adapter_claude::profile::{Keychain, Profile, Secret};
+use llmpool_adapter_claude::profile::{Keychain, MacKeychain, NoKeychain, Profile, Secret};
 use llmpool_adapter_claude::{lock, short_hash, statusline};
 use llmpool_core::model::{Account, AccountId, Health, Kind, Session};
 use llmpool_core::policy::context::{Context, Event};
@@ -12,7 +13,7 @@ use llmpool_core::policy::engine::{self, Decision, Outcome};
 use llmpool_core::policy::rule::{Pick, PolicyFile, Target};
 use llmpool_core::policy::{file, select, triggers};
 use llmpool_core::store::Store;
-use llmpool_core::vault::Vault;
+use llmpool_core::vault::{FileVault, KeychainVault, Vault};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -176,6 +177,24 @@ impl Daemon {
         };
         daemon.reap(&mut daemon.lock());
         Ok(daemon)
+    }
+
+    /// Open the daemon on the user's real data directory, secrets in the OS
+    /// keychain. `LLMPOOL_FILE_VAULT` and `LLMPOOL_NO_CLAUDE_KEYCHAIN` switch
+    /// to plain files, for tests and machines without a keychain.
+    pub fn open_default() -> Api<Self> {
+        let data = client::data_dir();
+        let vault: Box<dyn Vault> = match std::env::var_os("LLMPOOL_FILE_VAULT") {
+            Some(_) => Box::new(FileVault(data.join("vault"))),
+            None => Box::new(KeychainVault),
+        };
+        let keychain: Box<dyn Keychain> =
+            if cfg!(target_os = "macos") && std::env::var_os("LLMPOOL_NO_CLAUDE_KEYCHAIN").is_none() {
+                Box::new(MacKeychain)
+            } else {
+                Box::new(NoKeychain)
+            };
+        Self::open(&data, &client::home(), vault, keychain)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -733,9 +752,24 @@ impl Daemon {
 
     // ---- policies ---------------------------------------------------------
 
+    /// The policy as text, and parsed for editors (`null` when the file on
+    /// disk does not parse).
     pub fn policy_text(&self) -> Value {
         let path = self.policy_path();
-        json!({"text": std::fs::read_to_string(&path).unwrap_or_default(), "path": path})
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        json!({"policy": PolicyFile::parse(&text).ok(), "text": text, "path": path})
+    }
+
+    /// Structured form of policy text an editor holds, validated but not saved.
+    pub fn parse_policy(&self, text: &str) -> Api<Value> {
+        let policy = file::checked(text).map_err(|e| fail(400, e.to_string()))?;
+        Ok(json!({"policy": policy}))
+    }
+
+    /// TOML for a policy an editor holds as structured data.
+    pub fn render_policy(&self, policy: Value) -> Api<Value> {
+        let policy: PolicyFile = serde_json::from_value(policy).map_err(|e| fail(400, e.to_string()))?;
+        Ok(json!({"text": policy.to_toml()}))
     }
 
     pub fn put_policy(&self, text: &str) -> Api<Value> {

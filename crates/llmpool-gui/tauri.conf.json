@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "llmpool",
+  "version": "0.1.0",
+  "identifier": "dev.llmpool.app",
+  "build": { "frontendDist": "./ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "llmpool", "width": 1000, "height": 700, "minWidth": 760, "minHeight": 480 }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.png"] }
+}

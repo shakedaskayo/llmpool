@@ -65,6 +65,8 @@ fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBoo
         ("DELETE", ["sessions", id]) => Ok(d.end_session(id)),
         ("GET", ["policies"]) => Ok(d.policy_text()),
         ("PUT", ["policies"]) => d.put_policy(text(&body, "text")?),
+        ("POST", ["policies", "parse"]) => d.parse_policy(text(&body, "text")?),
+        ("POST", ["policies", "render"]) => d.render_policy(body["policy"].clone()),
         ("POST", ["policies", "dry-run"]) => d.dry_run(parse(body)?),
         ("GET", ["policies", "schema"]) => Ok(d.schema()),
         ("POST", ["hooks", "claude", sid, event]) => Ok(d.hook(sid, event, "", &body)),

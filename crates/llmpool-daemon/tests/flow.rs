@@ -259,6 +259,13 @@ fn policies_are_validated_on_save_and_can_be_dry_run() {
     assert_eq!(out["decision"]["rule"], "work repos");
     let id = out["decision"]["outcome"]["assign"].as_str().unwrap();
     assert!(out["labels"][id].as_str().unwrap().ends_with("@x.io"));
+    // An editor can go from text to structure and back without saving.
+    let parsed = w.daemon.parse_policy(POLICY).unwrap();
+    assert_eq!(parsed["policy"]["rule"][1]["on"]["usage_above"]["percent"], 90);
+    let text = w.daemon.render_policy(parsed["policy"].clone()).unwrap();
+    assert_eq!(w.daemon.parse_policy(text["text"].as_str().unwrap()).unwrap(), parsed);
+    assert_eq!(w.daemon.parse_policy("[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n").unwrap_err().status, 400);
+    assert_eq!(w.daemon.policy_text()["text"], "", "parsing must not save");
     assert!(w.daemon.schema()["triggers"].as_array().unwrap().iter().any(|t| t["kind"] == "usage_above"));
 }
 
