@@ -1,11 +1,11 @@
-# llmbank core design
+# llmpool core design
 
 Date: 2026-10-13
 Status: awaiting review
 
 ## Purpose
 
-llmbank is a local bank of LLM provider credentials for coding agents. It holds
+llmpool is a local pool of LLM provider credentials for coding agents. It holds
 several logins and keys (subscription OAuth logins, API keys, cloud
 credentials), assigns one to each agent session, and swaps the credential of a
 running session when a policy says so, without restarting the agent.
@@ -45,12 +45,12 @@ Out of this spec, each a later spec:
 ## Approach
 
 Native-path broker. The agent keeps its own login path and talks to the
-provider directly. llmbank only decides which credential sits in the store the
-agent reads, and keeps that credential fresh. llmbank makes no model requests.
+provider directly. llmpool only decides which credential sits in the store the
+agent reads, and keeps that credential fresh. llmpool makes no model requests.
 The only provider calls it makes with a subscription token are token refresh
 and the usage read.
 
-A proxy was rejected as the default because it puts llmbank between the agent
+A proxy was rejected as the default because it puts llmpool between the agent
 and the provider, disables Claude Code features that depend on the first-party
 host, and requires tracking every provider's wire format. The adapter trait is
 shaped so a proxy adapter can be added later.
@@ -60,7 +60,7 @@ shaped so a proxy adapter can be added later.
 Provider terms restrict third-party handling of subscription credentials and
 sharing one login between people. This shapes the design:
 
-- llmbank never implements a provider login flow. Accounts are added by running
+- llmpool never implements a provider login flow. Accounts are added by running
   the agent's own login and capturing the result.
 - Local mode manages one person's own accounts.
 - The team server spec will default to API keys, cloud credentials and
@@ -74,18 +74,18 @@ Cargo workspace:
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `llmbank-core` | Pool model, vault, policy engine, adapter and trigger traits | none of the others |
-| `llmbank-adapter-claude` | Everything that knows Claude Code's files, Keychain items, locks, endpoints | core |
-| `llmbank-daemon` | Process wiring: HTTP API, scheduler, session registry | core, adapters |
-| `llmbank-cli` | `llmbank` binary, thin client of the daemon API | core (types only) |
-| `llmbank-gui` | Tauri 2 app, thin client; can host the daemon in-process | daemon |
+| `llmpool-core` | Pool model, vault, policy engine, adapter and trigger traits | none of the others |
+| `llmpool-adapter-claude` | Everything that knows Claude Code's files, Keychain items, locks, endpoints | core |
+| `llmpool-daemon` | Process wiring: HTTP API, scheduler, session registry | core, adapters |
+| `llmpool-cli` | `llmpool` binary, thin client of the daemon API | core (types only) |
+| `llmpool-gui` | Tauri 2 app, thin client; can host the daemon in-process | daemon |
 
 One daemon per user. If the GUI starts and no daemon is running, it runs the
 daemon in-process; if the CLI needs a daemon and none runs, it starts one
 detached. A lock file in the data dir guarantees a single daemon.
 
-Data dir: `~/Library/Application Support/llmbank` on macOS, XDG data dir
-elsewhere. Contents: `llmbank.db` (SQLite), `policies.toml`, `sessions/`,
+Data dir: `~/Library/Application Support/llmpool` on macOS, XDG data dir
+elsewhere. Contents: `llmpool.db` (SQLite), `policies.toml`, `sessions/`,
 `daemon.lock`, `daemon.token`.
 
 ### Daemon API
@@ -114,7 +114,7 @@ Account fields: `id`, `provider`, `kind` (`oauth`, `api_key`, `cloud`),
 `quarantined`), `usage` (last reading with timestamp), `login_expires_at`.
 
 Secrets are stored in the OS keychain through the `keyring` crate under service
-`llmbank`, one item per account. Metadata lives in SQLite. Secrets never enter
+`llmpool`, one item per account. Metadata lives in SQLite. Secrets never enter
 SQLite, logs, or API responses.
 
 Export and import use a single file encrypted with a passphrase (`age` crate).
@@ -141,7 +141,7 @@ raises a notification. Network failures keep the last state and back off.
 
 ### Adding and re-adding accounts
 
-`llmbank add claude` launches Claude Code's own `/login` in a scratch profile
+`llmpool add claude` launches Claude Code's own `/login` in a scratch profile
 (a temporary config dir and secure-storage dir), waits for a credential to
 appear, reads identity, stores the secret, and removes the scratch profile
 without logging out, because logout revokes the refresh token.
@@ -150,22 +150,22 @@ If the identity matches an existing account, its secret is replaced and health
 returns to `ok`. This is the re-login path; the GUI's "Sign in again" button
 runs the same flow.
 
-`llmbank add claude --from-current` captures the default login already present
+`llmpool add claude --from-current` captures the default login already present
 on the machine.
 
-`llmbank import claude-swap` reads the accounts claude-swap has stored and adds
+`llmpool import claude-swap` reads the accounts claude-swap has stored and adds
 them. Accounts whose tokens are dead are imported with
 `health = relogin_required`.
 
 ## Sessions and assignment
 
-A session is one agent process launched through llmbank. Fields: `id`,
+A session is one agent process launched through llmpool. Fields: `id`,
 `agent`, `pid`, `cwd`, `git_remote`, `account_id`, `store_id`, `started_at`,
 `agent_session_id` (filled by the first hook call).
 
-Launch path: `llmbank run [--account <label>] [--tag <tag>] [-- <agent args>]`.
-`llmbank install claude --shim` also adds a shell function so plain `claude`
-goes through `llmbank run`.
+Launch path: `llmpool run [--account <label>] [--tag <tag>] [-- <agent args>]`.
+`llmpool install claude --shim` also adds a shell function so plain `claude`
+goes through `llmpool run`.
 
 Steps at launch:
 
@@ -200,17 +200,17 @@ Sources the daemon learns from:
 | Source | Carries | Used for |
 |---|---|---|
 | Statusline wrapper | `rate_limits` five-hour and seven-day percent and reset times, model, cwd, agent session id | Usage of active accounts, free |
-| `SessionStart` hook | agent session id, cwd, source | Bind agent session to llmbank session |
+| `SessionStart` hook | agent session id, cwd, source | Bind agent session to llmpool session |
 | `UserPromptSubmit` hook | agent session id | Deliver pending notices |
 | `StopFailure` hook | error kind (`rate_limit`, `authentication_failed`, `billing_error`) | `rate_limited`, `auth_failed` triggers |
 | `CwdChanged` hook | new cwd | `cwd_changed` trigger |
 | `SessionEnd` hook | agent session id | Cleanup fallback if the CLI died |
 | Usage poll | Usage of accounts with no live session | Ranking candidates |
 
-The statusline wrapper is `llmbank statusline`. It reads the JSON on stdin,
+The statusline wrapper is `llmpool statusline`. It reads the JSON on stdin,
 posts it to the daemon with a 200 ms timeout, then runs the user's previous
 statusline command with the same stdin and prints its output. If there was no
-previous command it prints a short llmbank line. A daemon that is down must
+previous command it prints a short llmpool line. A daemon that is down must
 never break the statusline.
 
 Hooks are `http` hooks pointing at the loopback listener. A daemon that is down
@@ -265,7 +265,7 @@ pub trait Trigger: Send + Sync {
 }
 ```
 
-Triggers are registered in one table in `llmbank-core`. Adding one means
+Triggers are registered in one table in `llmpool-core`. Adding one means
 writing a struct and one registration line; the GUI picks up its editor from
 `schema()`.
 
@@ -321,7 +321,7 @@ be restarted onto its own account.
 
 An `ask` action fired by a running session is shown as a GUI picker. If the
 GUI is not running it degrades to `notify`, naming the candidates and the
-`llmbank switch` command.
+`llmpool switch` command.
 
 If step 3 or 4 fails, the outgoing credential is left in place and the swap is
 reported as failed. The store is never left empty.
@@ -332,7 +332,7 @@ credential until then.
 
 Notification: the daemon queues a notice for the session. The next
 `UserPromptSubmit` hook response carries it as `systemMessage` for the user and
-`additionalContext` for the model, for example: `llmbank: this session moved
+`additionalContext` for the model, for example: `llmpool: this session moved
 from work-1 to work-2 because the 5-hour window reached 91%.` An OS
 notification is sent at swap time. Notices that are never collected expire
 when the session ends.
@@ -343,18 +343,18 @@ costs more than usual. The notice says so.
 ## CLI
 
 ```
-llmbank add claude [--from-current] [--label L] [--tag T]...
-llmbank list [--json]
-llmbank tag <account> <tag>... | untag <account> <tag>...
-llmbank enable | disable | remove <account>
-llmbank run [--account A | --tag T] [-- <agent args>]
-llmbank sessions [--json]
-llmbank switch [<session>] [<account>]
-llmbank policy check | edit | dry-run <event-json>
-llmbank install claude [--shim] | uninstall claude
-llmbank import claude-swap
-llmbank export <file> | import <file>
-llmbank daemon [--foreground] | status | stop
+llmpool add claude [--from-current] [--label L] [--tag T]...
+llmpool list [--json]
+llmpool tag <account> <tag>... | untag <account> <tag>...
+llmpool enable | disable | remove <account>
+llmpool run [--account A | --tag T] [-- <agent args>]
+llmpool sessions [--json]
+llmpool switch [<session>] [<account>]
+llmpool policy check | edit | dry-run <event-json>
+llmpool install claude [--shim] | uninstall claude
+llmpool import claude-swap
+llmpool export <file> | import <file>
+llmpool daemon [--foreground] | status | stop
 ```
 
 `--json` output carries a `schemaVersion` field.
@@ -365,7 +365,7 @@ Tauri 2, web frontend in React and TypeScript. Plain and dense, no scroll
 animations, light and dark following the system.
 
 Tray menu: one row per live session with account label and five-hour bar;
-click a row to choose another account; "Open llmbank"; "Pause all policies".
+click a row to choose another account; "Open llmpool"; "Pause all policies".
 
 Window with three tabs:
 
@@ -387,23 +387,23 @@ terminal.
 
 ## Installer
 
-`llmbank install claude`:
+`llmpool install claude`:
 
 1. Back up the user's `settings.json` next to it with a timestamp.
 2. Add `http` hooks for the events listed under Signals, pointing at the
    loopback listener, tagged so they can be found again.
-3. Record the existing `statusLine` command in llmbank's settings and replace
-   it with `llmbank statusline`.
+3. Record the existing `statusLine` command in llmpool's settings and replace
+   it with `llmpool statusline`.
 4. With `--shim`, append a marked block to the user's shell rc file.
 
-`llmbank uninstall claude` removes exactly what was added and restores the
+`llmpool uninstall claude` removes exactly what was added and restores the
 previous statusline command. Running install twice changes nothing.
 
 ## Error handling
 
 | Situation | Behaviour |
 |---|---|
-| Daemon down at `llmbank run` | CLI starts it; if that fails, run the agent on its default login and print one warning |
+| Daemon down at `llmpool run` | CLI starts it; if that fails, run the agent on its default login and print one warning |
 | Daemon down during a session | Hooks and statusline fail open; session continues on its current credential |
 | Refresh fails, network | Keep state, back off, retry |
 | Refresh fails, `invalid_grant` | `relogin_required`, notify, exclude from candidates |
@@ -437,7 +437,7 @@ previous statusline command. Running install twice changes nothing.
   `--resume`, and the notice tells the user to do so.
 - Claude Code's storage, lock and endpoint details are not a public contract
   and can change between versions. All of it is confined to
-  `llmbank-adapter-claude`, which checks the installed version and refuses to
+  `llmpool-adapter-claude`, which checks the installed version and refuses to
   write to a store it does not recognise.
 - `rate_limits` appears in statusline input only for subscription plans and
   only after the first response. Until then the daemon uses its last polled
