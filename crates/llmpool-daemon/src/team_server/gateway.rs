@@ -619,7 +619,12 @@ impl TeamServer {
                 Window {
                     // Sent as a fraction of the window.
                     used_percent: if used <= 1.5 { used * 100.0 } else { used },
-                    resets_at: read("reset").and_then(|v| v.parse().ok()),
+                    // An answer that does not say when the window ends must
+                    // not pin the account as full for ever: it ends, at the
+                    // latest, one whole window from now.
+                    resets_at: read("reset").and_then(|v| v.parse().ok()).or(Some(
+                        now() + if window == "5h" { 5 * 3600 } else { 7 * 86400 },
+                    )),
                 },
             );
         }

@@ -1258,11 +1258,14 @@ const busy = () => {
   if (state.adding && state.addKind === "machine") return false;
   return (
     document.querySelector("dialog[open]") ||
-    (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName) && active.type !== "checkbox") ||
+    // A select that only kept focus after its choice was made holds nothing up.
+    (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName) && active.type !== "checkbox" && active.dataset.settled !== "yes") ||
     document.querySelector('main [data-armed="yes"]') ||
     // Something typed and not yet saved. The rules page keeps its own state
     // and is never redrawn from here, so what is unsaved there holds nothing up.
-    [...document.querySelectorAll("main > section:not(#policies) :is(input:not([type=checkbox]):not([type=file]), textarea)")].some((el) => el.value !== el.defaultValue && !el.closest("dialog:not([open])"))
+    // A secret counts only while someone is typing it: a password manager
+    // filling one in must not stop the page for good.
+    [...document.querySelectorAll("main > section:not(#policies) :is(input:not([type=checkbox]):not([type=file]), textarea)")].some((el) => el.value !== el.defaultValue && !el.closest("dialog:not([open])") && (el.type !== "password" || Date.now() - Number(el.dataset.typed ?? 0) < 120000))
   );
 };
 let redrawing = false;
@@ -1294,9 +1297,14 @@ for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
         const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
         for (const row of table.tBodies[0]?.rows ?? []) [...row.cells].forEach((cell, i) => heads[i] && (cell.dataset.label = heads[i]));
       }
-      // A button or a switch gets its focus back. A select does not: its
-      // choice is made, and focus left there would hold the next refresh up.
-      if (had?.dataset.act && (had.tagName === "BUTTON" || had.type === "checkbox")) [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
+      // The control that was in use is in use again in the new drawing.
+      const again = had?.dataset.act && [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key);
+      if (again) {
+        // A select keeps the keyboard where it was, marked as done with so
+        // that its focus alone does not hold the next refresh up.
+        if (again.tagName === "SELECT") again.dataset.settled = "yes";
+        again.focus();
+      }
     },
   });
 }
@@ -1311,6 +1319,13 @@ document.addEventListener(
   },
   true,
 );
+// Using a select again makes it one being used; typing a secret is noted.
+for (const kind of ["mousedown", "keydown"]) {
+  $("main").addEventListener(kind, (e) => {
+    if (e.target.tagName === "SELECT") delete e.target.dataset.settled;
+    if (kind === "keydown" && e.target.type === "password") e.target.dataset.typed = String(Date.now());
+  });
+}
 // A second press for what cannot be taken back with one.
 document.addEventListener(
   "click",
