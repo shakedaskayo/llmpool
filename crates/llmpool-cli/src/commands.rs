@@ -1,4 +1,4 @@
-use crate::{AddAgent, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent};
+use crate::{AddAgent, AdvisorCommand, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent};
 use llmpool_adapter_claude::install;
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
@@ -96,6 +96,15 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         }),
         Command::Login { account } => login_again(&account),
         Command::Doctor => doctor(),
+        Command::Advisor { command } => advisor(command),
+        Command::PreferOwn { state } => {
+            let on = state == "on";
+            connect()?.call("PUT", "/config", Some(json!({"prefer_own": on})))?;
+            done(format!(
+                "your own account is {} the rest of the pool",
+                if on { "preferred over" } else { "treated like" }
+            ))
+        }
         Command::List { json } => list(json),
         Command::Tag { account, tags } => retag(&account, |set| set.extend(tags.iter().cloned())),
         Command::Untag { account, tags } => {
@@ -331,6 +340,81 @@ fn login_again(account: &str) -> Result<ExitCode, String> {
         .ok_or_else(|| format!("no account named `{account}`"))?;
     client.call("POST", "/logins", Some(json!({"email": found["email"]})))?;
     follow_login(&client)
+}
+
+/// `llmpool advisor`: the optional decision layer.
+fn advisor(command: Option<AdvisorCommand>) -> Result<ExitCode, String> {
+    let client = connect()?;
+    let show = |status: &Value| {
+        format!(
+            "advisor ({}): {}, key {}, acts at {:.0}% sure, {} of {} questions used today",
+            status["provider"].as_str().unwrap_or("jev"),
+            if status["enabled"] == true {
+                "on"
+            } else {
+                "off"
+            },
+            if status["has_key"] == true {
+                "stored"
+            } else {
+                "not set"
+            },
+            status["switch_above"].as_f64().unwrap_or(0.7) * 100.0,
+            status["calls_today"],
+            status["max_calls_per_day"],
+        )
+    };
+    match command {
+        None => done(show(&client.call("GET", "/advisor", None)?)),
+        Some(AdvisorCommand::On) | Some(AdvisorCommand::Off) => {
+            let on = matches!(command, Some(AdvisorCommand::On));
+            client.call("PUT", "/config", Some(json!({"advisor_enabled": on})))?;
+            let status = client.call("GET", "/advisor", None)?;
+            if on && status["has_key"] != true {
+                eprintln!(
+                    "note: the advisor has no key yet; store one with `llmpool advisor key`."
+                );
+            }
+            done(show(&status))
+        }
+        Some(AdvisorCommand::Key { clear: true }) => {
+            done(show(&client.call("DELETE", "/advisor/key", None)?))
+        }
+        Some(AdvisorCommand::Key { clear: false }) => {
+            // Typed without echo, or piped in; a key on the command line
+            // would sit in the shell history and the process list.
+            let key = if std::io::stdin().is_terminal() {
+                rpassword::prompt_password("Advisor API key: ").map_err(|e| e.to_string())?
+            } else {
+                stdin_text()
+            };
+            if key.trim().is_empty() {
+                return Err("no key was given".into());
+            }
+            done(show(&client.call(
+                "PUT",
+                "/advisor/key",
+                Some(json!({"key": key.trim()})),
+            )?))
+        }
+        Some(AdvisorCommand::Ask { session }) => {
+            let sid = target_session(&client, session)?;
+            let advice = client.call("POST", &format!("/sessions/{sid}/advise"), None)?;
+            if let Some(error) = advice["error"].as_str() {
+                return Err(error.to_string());
+            }
+            done(format!(
+                "switch: {:.0}% · best: {} · {}",
+                advice["switch"].as_f64().unwrap_or(0.0) * 100.0,
+                advice["target"].as_str().unwrap_or("stay"),
+                if advice["acted"] == true {
+                    "switched"
+                } else {
+                    "left as it is"
+                },
+            ))
+        }
+    }
 }
 
 /// `llmpool doctor`: what is missing, and the command that fixes each thing.

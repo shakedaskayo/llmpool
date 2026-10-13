@@ -26,6 +26,16 @@ enum Command {
     Login { account: String },
     /// Check that everything is in place, and say how to fix what is not
     Doctor,
+    /// The optional decision layer: show it, turn it on or off, set its key
+    Advisor {
+        #[command(subcommand)]
+        command: Option<AdvisorCommand>,
+    },
+    /// Prefer your own account (tagged `own`) whenever it has room: on or off
+    PreferOwn {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// Show the accounts in the pool with their usage
     List {
         #[arg(long)]
@@ -125,6 +135,25 @@ enum Command {
     /// Called as the agent's status line; not for direct use
     #[command(hide = true)]
     Statusline { agent: String },
+}
+
+#[derive(Subcommand)]
+enum AdvisorCommand {
+    /// Let the advisor suggest and make switches
+    On,
+    /// Rules alone decide
+    Off,
+    /// Store the advisor's API key in the keychain (typed or piped, never an argument)
+    Key {
+        /// Forget the stored key
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Ask the advisor about a session right now and show what it says
+    Ask {
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

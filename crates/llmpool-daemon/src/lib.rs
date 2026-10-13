@@ -798,6 +798,19 @@ impl Daemon {
             account.label = label;
         }
         account.tags.extend(req.tags);
+        // The login a person's own Claude Code runs on is their own account,
+        // unless they have already said which one is.
+        if profile.is_default
+            && !g
+                .store
+                .list()?
+                .iter()
+                .any(|a| a.tags.contains(llmpool_core::policy::select::OWN))
+        {
+            account
+                .tags
+                .insert(llmpool_core::policy::select::OWN.to_string());
+        }
         self.vault.put(&id, &serde_json::to_string(&secret)?)?;
         g.store.put(&account)?;
 

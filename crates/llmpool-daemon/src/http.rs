@@ -280,7 +280,7 @@ pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running
             // The advisor is asked off the main path, a few times a minute
             // at most; it does nothing when it is switched off.
             beats += 1;
-            if beats % 20 == 0 {
+            if beats.is_multiple_of(20) {
                 daemon.advise_due();
             }
         }
