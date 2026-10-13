@@ -37,7 +37,12 @@ built="$root/target/release/bundle/macos/llmpool.app"
 [ -x "$built/Contents/MacOS/llmpool" ] || { echo "the build did not produce the app with its command line tool" >&2; exit 1; }
 
 say "Installing the app"
-[ -x "$cli" ] && "$cli" daemon --stop >/dev/null 2>&1 || true
+# Whatever llmpool daemon is running was started by an older copy; it must not
+# outlive the copy that replaces it.
+for old in "$cli" "$HOME/.local/bin/llmpool"; do
+    [ -x "$old" ] && "$old" daemon --stop >/dev/null 2>&1 || true
+done
+pkill -f "llmpool daemon" >/dev/null 2>&1 || true
 quit_app
 rm -rf "$app"
 cp -R "$built" "$app"

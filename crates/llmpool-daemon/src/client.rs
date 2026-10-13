@@ -23,6 +23,9 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// Which build of llmpool this is. Shared by everything built together.
+pub const BUILD: &str = env!("LLMPOOL_BUILD");
+
 pub struct Client {
     base: String,
     auth: String,
@@ -39,9 +42,25 @@ impl Client {
     }
 
     /// A client for the running daemon, or `None` if there is none.
+    ///
+    /// A daemon left running by an earlier version of llmpool is asked to
+    /// stop and reported as absent, so the caller starts the current one: an
+    /// old daemon does not know what a new client asks for, and one unknown
+    /// route is enough to leave a whole window empty.
     pub fn existing(timeout: Duration) -> Option<Self> {
         let client = Self::to(&Endpoint::read(&data_dir())?, timeout);
-        client.call("GET", "/health", None).ok().map(|_| client)
+        let health = client.call("GET", "/health", None).ok()?;
+        if health["build"].as_str() == Some(BUILD) {
+            return Some(client);
+        }
+        let _ = client.call("POST", "/shutdown", None);
+        for _ in 0..60 {
+            if Endpoint::read(&data_dir()).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {

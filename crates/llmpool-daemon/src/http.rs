@@ -80,9 +80,9 @@ fn route(
     stop: &AtomicBool,
 ) -> Result<Value, ApiError> {
     match (method, parts) {
-        ("GET", ["health"]) => {
-            Ok(json!({"ok": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION")}))
-        }
+        ("GET", ["health"]) => Ok(
+            json!({"ok": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION"), "build": crate::client::BUILD}),
+        ),
         ("POST", ["shutdown"]) => {
             stop.store(true, Ordering::SeqCst);
             Ok(json!({}))

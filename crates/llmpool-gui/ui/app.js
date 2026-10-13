@@ -767,15 +767,23 @@ function renderSummary() {
 async function refresh(force = false) {
   try {
     const before = state.login.state;
-    [state.accounts, state.sessions, state.events, state.issues, state.login, state.stats] = await Promise.all([
-      api("GET", "/accounts"),
-      api("GET", "/sessions"),
-      api("GET", "/events"),
-      api("GET", "/issues"),
-      api("GET", "/logins"),
-      api("GET", "/stats"),
+    // The two lists are the heart of the window; anything else that fails
+    // keeps its last value and the rest of the window still draws.
+    [state.accounts, state.sessions] = await Promise.all([api("GET", "/accounts"), api("GET", "/sessions")]);
+    const optional = async (key, path) => {
+      try {
+        state[key] = await api("GET", path);
+      } catch (e) {
+        console.warn(path, e);
+      }
+    };
+    await Promise.all([
+      optional("events", "/events"),
+      optional("issues", "/issues"),
+      optional("login", "/logins"),
+      optional("stats", "/stats"),
+      optional("config", "/config"),
     ]);
-    state.config = await api("GET", "/config");
     if (state.loginItem === null) {
       state.loginItem = await invoke("login_item", { state: "status" }).then((text) => /starts at login/.test(text) && !/does not/.test(text), () => false);
     }
