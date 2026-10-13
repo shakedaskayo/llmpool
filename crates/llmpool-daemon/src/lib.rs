@@ -1036,6 +1036,36 @@ impl Daemon {
         Ok(json!({"session_id": sid, "account": id}))
     }
 
+    /// Switch a session to the usable account with the most quota left, for a
+    /// hotkey or a command that should not need a name.
+    pub fn swap_next(&self, sid: &str) -> Api<Value> {
+        let mut g = self.lock();
+        let m =
+            g.p.sessions
+                .get(sid)
+                .cloned()
+                .ok_or_else(|| fail(404, "no such session"))?;
+        let accounts = self.accounts(&g)?;
+        let next = accounts
+            .iter()
+            .filter(|a| a.usable() && m.session.account_id.as_ref() != Some(&a.id))
+            // Not one that is live in another session's profile.
+            .filter(|a| {
+                self.holders(&g, a)
+                    .iter()
+                    .all(|held| Some(held) == m.store.as_ref())
+            })
+            .min_by(|a, b| {
+                a.peak_used()
+                    .total_cmp(&b.peak_used())
+                    .then(a.id.cmp(&b.id))
+            })
+            .cloned()
+            .ok_or_else(|| fail(409, "no other account is available to switch to"))?;
+        self.swap(&mut g, sid, &next.id, "switched by hand")?;
+        Ok(json!({"session_id": sid, "account": next.id, "label": next.label}))
+    }
+
     /// Point a session at its agent's process once that has started.
     pub fn set_pid(&self, sid: &str, pid: u32) -> Api<Value> {
         let mut g = self.lock();

@@ -65,13 +65,29 @@ const use = async ($: EngineInterface, session: string, row: Row) => {
   await refresh($)
 }
 
-const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE })
+// Opened with the focus, so a number key switches straight away.
+const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
+
+/** `/llmpool next`, `/llmpool <account>`: switch without opening the pane. */
+const switchByCommand = async ($: EngineInterface, wanted: string): Promise<string> => {
+  await refresh($)
+  const snap = await read($, snapshot)
+  if (snap.session === null) {
+    return snap.error ?? "This session's login is not in the pool. Add it with `llmpool add claude --from-current`."
+  }
+  const target = wanted === 'next' ? ['--next'] : [wanted]
+  const ran = await llmpool($, ['switch', ...target, '--session', snap.session])
+  await refresh($)
+
+  return ran.exitCode === 0 ? ran.stdout.trim() : `Could not switch: ${ran.stderr.replace(/^llmpool: /, '').trim()}`
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'llmpool',
       description: 'Show llmpool accounts and usage, and switch this session to another account',
+      argumentHint: '[next | <account>]',
     })
     void refresh($)
     $.clock.every(REFRESH_MS, () => refresh($))
@@ -79,11 +95,15 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'llmpool' }, async $ => {
+  on('command.run', { command: 'llmpool' }, async ($, e) => {
+    const wanted = e.args.trim()
+    if (wanted !== '') {
+      return { text: await switchByCommand($, wanted) }
+    }
     await refresh($)
     await openPane($)
 
-    return { text: 'llmpool accounts pane opened.' }
+    return { text: 'llmpool accounts pane opened. Press a number to switch, r to refresh.' }
   })
 
   // Usage moves when a turn ends; show it without waiting for the timer.
@@ -238,7 +258,7 @@ export const register: Register = on => {
         )}
         <Box marginTop={1} gap={2}>
           <Button key="refresh" plain hotkey="r" label="Refresh" onPress={() => refresh($)} />
-          {hotkeys.size > 0 && canSwitch && <Text dimColor>Press a number to switch.</Text>}
+          {hotkeys.size > 0 && canSwitch && <Text dimColor>Press a number to switch · or type /llmpool next</Text>}
         </Box>
       </Box>
     )

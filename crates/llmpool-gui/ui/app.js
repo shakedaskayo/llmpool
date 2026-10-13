@@ -606,6 +606,28 @@ $("policies").addEventListener("click", (e) => e.target.matches("button[data-act
 $("policies").addEventListener("change", (e) => e.target.matches("select[data-act], input[type=checkbox][data-act]") && policyAction(e.target));
 $("policies").addEventListener("input", (e) => e.target.matches("textarea[data-act], input[data-act]:not([type=checkbox])") && policyAction(e.target));
 
+// Keys inside the window: ⌘1–3 sections, ⌘S save rules, ⌘R refresh.
+window.addEventListener("keydown", (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  const tab = { 1: tabs[0], 2: tabs[1], 3: tabs[2] }[e.key];
+  if (tab) {
+    e.preventDefault();
+    selectTab(tab);
+  } else if (e.key === "s" && state.dirty) {
+    e.preventDefault();
+    savePolicy();
+  } else if (e.key === "r") {
+    e.preventDefault();
+    refresh(true).then(() => toast("Refreshed"));
+  }
+});
+
+// Messages from the tray and the global hotkeys.
+window.__TAURI__.event.listen("llmpool-message", (event) => {
+  selectTab(tabs[1]);
+  toast(event.payload, "error");
+});
+
 // Leaving with unsaved rules would silently drop them.
 window.addEventListener("beforeunload", (e) => state.dirty && e.preventDefault());
 

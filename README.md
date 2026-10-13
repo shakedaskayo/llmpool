@@ -56,6 +56,20 @@ rules read as sentences and each has a Test button. Its tray menu lists
 running sessions; each opens onto the accounts it can switch to. Closing the
 window leaves it in the tray.
 
+### Switching quickly
+
+| Where | How |
+|---|---|
+| Inside Claude Code | `/llmpool`, then a number key; or `/llmpool next`, or `/llmpool <account>` |
+| Any terminal | `llmpool switch --next`, or `llmpool switch <account>` |
+| Anywhere, with the app running | ⌃⌥⌘N switches to the account with the most quota; ⌃⌥⌘L opens the window |
+| Tray menu | each session opens onto the accounts it can switch to |
+| In the app window | ⌘1–⌘3 sections, ⌘S save rules, ⌘R refresh |
+
+The global key acts on the only running session, or on the login plain
+`claude` sessions share; with several separately managed sessions it opens the
+window so you can choose.
+
 ### Moving to another machine
 
 ```bash

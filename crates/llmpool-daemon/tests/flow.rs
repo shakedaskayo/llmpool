@@ -870,3 +870,22 @@ fn a_weak_passphrase_is_refused() {
     let w = world();
     assert_eq!(w.daemon.export("short").unwrap_err().status, 400);
 }
+
+#[test]
+fn next_switches_to_the_free_account_with_the_most_room() {
+    let w = world();
+    let one = start(&w, "/x", Some("home@x.io"));
+    let sid = one["session_id"].as_str().unwrap();
+    // b is busy in another session, so `next` must not pick it.
+    start(&w, "/y", Some("b@x.io"));
+    let reply = w.daemon.swap_next(sid).unwrap();
+    assert_eq!(reply["label"], "a@x.io");
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "a@x.io"
+    );
+    // Now home is free again and is the only other choice.
+    assert_eq!(w.daemon.swap_next(sid).unwrap()["label"], "home@x.io");
+    w.daemon.remove_account("a@x.io").unwrap();
+    assert_eq!(w.daemon.swap_next(sid).unwrap_err().status, 409);
+}

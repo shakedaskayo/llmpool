@@ -84,7 +84,9 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Command::Run { account, tag, args } => run_agent(account, tag, args),
         Command::Sessions { json } => sessions(json),
-        Command::Switch { account, session } => switch(&account, session),
+        Command::Switch {
+            account, session, ..
+        } => switch(account, session),
         Command::Status {
             json,
             agent_session,
@@ -441,16 +443,25 @@ fn target_session(client: &Client, named: Option<String>) -> Result<String, Stri
     }
 }
 
-fn switch(account: &str, session: Option<String>) -> Result<ExitCode, String> {
+fn switch(account: Option<String>, session: Option<String>) -> Result<ExitCode, String> {
     let client = connect()?;
     let sid = target_session(&client, session)?;
-    client.call(
-        "POST",
-        &format!("/sessions/{sid}/swap"),
-        Some(json!({"account": account})),
-    )?;
+    let label = match account {
+        Some(account) => {
+            client.call(
+                "POST",
+                &format!("/sessions/{sid}/swap"),
+                Some(json!({"account": account})),
+            )?;
+            account
+        }
+        None => {
+            let reply = client.call("POST", &format!("/sessions/{sid}/next"), None)?;
+            reply["label"].as_str().unwrap_or_default().to_string()
+        }
+    };
     done(format!(
-        "session {sid} now uses {account}; it takes effect within about a minute"
+        "session {sid} now uses {label}; it takes effect within about a minute"
     ))
 }
 

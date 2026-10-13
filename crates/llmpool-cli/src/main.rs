@@ -56,7 +56,12 @@ enum Command {
     },
     /// Move a running session to another account
     Switch {
-        account: String,
+        /// Account to switch to
+        #[arg(required_unless_present = "next")]
+        account: Option<String>,
+        /// Switch to the usable account with the most quota left
+        #[arg(long, conflicts_with = "account")]
+        next: bool,
         /// Session id; defaults to the current or only session
         #[arg(long)]
         session: Option<String>,

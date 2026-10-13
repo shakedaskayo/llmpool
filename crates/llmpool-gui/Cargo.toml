@@ -10,3 +10,4 @@ tauri-build = { version = "2", features = [] }
 llmpool-daemon = { path = "../llmpool-daemon" }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
