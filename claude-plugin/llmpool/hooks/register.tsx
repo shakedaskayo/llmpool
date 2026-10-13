@@ -17,31 +17,35 @@ const WARN_AT = 80
 const EMPTY: Snapshot = { session: null, rows: [], others: [], error: null }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
-const llmpool = async ($: EngineInterface, args: string[]) => {
-  const session = (await $.env.get('LLMPOOL_SESSION')) ?? null
-  const env: Record<string, string> = session ? { LLMPOOL_SESSION: session } : {}
-  const ran = await $.process.run([BIN, ...args], { timeoutMs: 8000, env })
+// Claude Code's id for this session, which is how llmpool finds a session it
+// did not launch. Set when the session starts.
+let agentSession = ''
+let isAnnounced = false
 
-  return { session, ran }
-}
+const llmpool = ($: EngineInterface, args: string[]) => $.process.run([BIN, ...args], { timeoutMs: 8000 })
 
 const refresh = async ($: EngineInterface) => {
   let next: Snapshot
   try {
-    const { session, ran } = await llmpool($, ['status', '--json'])
+    const ran = await llmpool($, ['status', '--json', '--agent-session', agentSession])
     next =
       ran.exitCode === 0
-        ? toSnapshot(JSON.parse(ran.stdout), session)
+        ? toSnapshot(JSON.parse(ran.stdout))
         : { ...EMPTY, error: ran.stderr.trim() || 'llmpool status failed' }
   } catch (error) {
     next = { ...EMPTY, error: `could not run ${BIN}: ${String(error)}` }
   }
   await update($, snapshot, () => next)
-  $.ui.status(statusText(next))
+  const text = statusText(next)
+  $.ui.status(text)
+  if (text !== undefined && !isAnnounced) {
+    isAnnounced = true
+    $.ui.toast(`${text} · /llmpool to switch`)
+  }
 }
 
-const use = async ($: EngineInterface, id: string, label: string) => {
-  const { ran } = await llmpool($, ['switch', id])
+const use = async ($: EngineInterface, session: string, id: string, label: string) => {
+  const ran = await llmpool($, ['switch', id, '--session', session])
   $.ui.toast(ran.exitCode === 0 ? `Switching to ${label}; takes effect within a minute` : ran.stderr.trim())
   await refresh($)
 }
@@ -52,6 +56,7 @@ export const register: Register = on => {
       name: 'llmpool',
       description: 'Show llmpool accounts and usage, and switch this session to another account',
     })
+    agentSession = e.session_id
     void refresh($)
     $.clock.every(REFRESH_MS, () => refresh($))
 
@@ -99,7 +104,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {snap.error !== null && <Text color="red">{snap.error}</Text>}
         {snap.error === null && snap.session === null && (
-          <Text dimColor>This session was not started with `llmpool run`, so its account cannot be switched here.</Text>
+          <Text dimColor>llmpool does not manage this session: its login is not in the pool. Add it with `llmpool add claude --from-current`.</Text>
         )}
         {snap.error === null && snap.rows.length === 0 && (
           <Text dimColor>No accounts yet. Add one with `llmpool add claude --from-current`.</Text>
@@ -118,7 +123,7 @@ export const register: Register = on => {
                 {'  '}
               </Text>
               {snap.session !== null && !row.isCurrent && row.state === 'ok' && (
-                <Button key={`use-${row.id}`} label="Switch" onPress={() => use($, row.id, row.label)} />
+                <Button key={`use-${row.id}`} label="Switch" onPress={() => use($, snap.session ?? '', row.id, row.label)} />
               )}
             </Box>
             <Text>

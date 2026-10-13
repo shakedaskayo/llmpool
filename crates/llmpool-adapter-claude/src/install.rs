@@ -6,9 +6,10 @@ use std::io;
 use std::path::Path;
 
 /// (event, matcher, argument passed to `llmpool hook claude`).
-const HOOKS: [(&str, Option<&str>, &str); 5] = [
+const HOOKS: [(&str, Option<&str>, &str); 6] = [
     ("SessionStart", None, "SessionStart"),
     ("UserPromptSubmit", None, "UserPromptSubmit"),
+    ("SessionEnd", None, "SessionEnd"),
     ("CwdChanged", None, "CwdChanged"),
     ("StopFailure", Some("rate_limit"), "StopFailure rate_limit"),
     ("StopFailure", Some("authentication_failed"), "StopFailure authentication_failed"),

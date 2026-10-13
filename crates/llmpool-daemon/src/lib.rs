@@ -32,6 +32,11 @@ const MAX_EVENTS: usize = 200;
 const BRIEF_LOCK: Duration = Duration::from_millis(250);
 /// How often the login in `~/.claude` is copied to the vault.
 const SYNC_SECS: i64 = 60;
+/// Session id the agent's hooks use when llmpool did not launch the agent.
+pub const NATIVE: &str = "-";
+/// A session llmpool did not launch has no process to watch; it is over when
+/// it has been silent this long (and comes back if it speaks again).
+const NATIVE_IDLE_SECS: i64 = 1800;
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 #[derive(Debug)]
@@ -70,6 +75,12 @@ pub struct Managed {
     /// Last notice queued, so a rule that keeps firing says it once.
     #[serde(default)]
     pub last_notice: Option<String>,
+    /// Started as plain `claude`, not by `llmpool run`: it runs in the
+    /// user's own profile and shares its login with every other such session.
+    #[serde(default)]
+    pub native: bool,
+    #[serde(default)]
+    pub last_seen: i64,
 }
 
 /// A profile llmpool created, and the account whose login it holds. One
@@ -334,8 +345,9 @@ impl Daemon {
 
     /// End sessions whose agent process is gone, and tidy up after them.
     fn reap(&self, g: &mut Inner) {
+        let t = now();
         let dead: Vec<String> =
-            g.p.sessions.iter().filter(|(_, m)| !pid_alive(m.pid)).map(|(id, _)| id.clone()).collect();
+            g.p.sessions.iter().filter(|(_, m)| if m.native { t - m.last_seen > NATIVE_IDLE_SECS } else { !pid_alive(m.pid) }).map(|(id, _)| id.clone()).collect();
         for id in dead {
             self.end(g, &id);
         }
@@ -555,7 +567,17 @@ impl Daemon {
 
         g.p.sessions.insert(
             sid.clone(),
-            Managed { session, pid: req.pid, store: None, agent_session_id: None, started_at: now(), notices: Vec::new(), last_notice: None },
+            Managed {
+                session,
+                pid: req.pid,
+                store: None,
+                agent_session_id: None,
+                started_at: now(),
+                notices: Vec::new(),
+                last_notice: None,
+                native: false,
+                last_seen: now(),
+            },
         );
         let env = match &chosen {
             Some(account) => match self.attach(&mut g, &sid, account) {
@@ -657,9 +679,10 @@ impl Daemon {
         }
 
         let from = m.session.account_id.as_ref().and_then(|id| accounts.iter().find(|a| &a.id == id));
+        let shared = if store_id == DEFAULT_STORE { " Every plain `claude` session shares this login and moved with it." } else { "" };
         let text = format!(
             "llmpool: this session moved from {} to {} ({reason}). The switch takes effect within about a minute. \
-             The first message on the new account rebuilds the prompt cache and costs more than usual.",
+             The first message on the new account rebuilds the prompt cache and costs more than usual.{shared}",
             from.map_or("its previous account", |a| a.label.as_str()),
             to.label,
         );
@@ -758,16 +781,103 @@ impl Daemon {
 
     // ---- signals from the agent -----------------------------------------
 
+    /// The llmpool session a signal from the agent belongs to. A session that
+    /// was started as plain `claude` is adopted on its first signal, provided
+    /// the login in `~/.claude` is one the pool holds.
+    fn resolve(&self, g: &mut Inner, sid: &str, payload: &Value) -> Option<String> {
+        if sid != NATIVE {
+            return g.p.sessions.contains_key(sid).then(|| sid.to_string());
+        }
+        let agent_id = payload["session_id"].as_str()?;
+        let t = now();
+        if let Some((id, m)) = g.p.sessions.iter_mut().find(|(_, m)| m.agent_session_id.as_deref() == Some(agent_id)) {
+            m.last_seen = t;
+            return Some(id.clone());
+        }
+        let accounts = self.accounts(g).ok()?;
+        let (email, organization) = self.default_profile().identity()?;
+        let account = accounts.iter().find(|a| same_login(a, &email, organization.as_deref()))?.clone();
+        g.p.next += 1;
+        let id = format!("s{}", g.p.next);
+        let cwd = payload["cwd"].as_str().or(payload["workspace"]["current_dir"].as_str()).unwrap_or_default();
+        let session = Session {
+            id: id.clone(),
+            agent: "claude-code".into(),
+            provider: "claude".into(),
+            cwd: cwd.to_string(),
+            git_remote: None,
+            model: None,
+            account_id: Some(account.id.clone()),
+            last_swap_at: None,
+        };
+        g.p.sessions.insert(
+            id.clone(),
+            Managed {
+                session,
+                pid: 0,
+                store: Some(DEFAULT_STORE.to_string()),
+                agent_session_id: Some(agent_id.to_string()),
+                started_at: t,
+                notices: Vec::new(),
+                last_notice: None,
+                native: true,
+                last_seen: t,
+            },
+        );
+        self.log(g, "adopt", Some(&id), format!("plain Claude Code session adopted, running as {}", account.label));
+        self.suggest(g, &id, &accounts, &account);
+        self.save(g);
+        Some(id)
+    }
+
+    /// A plain session cannot be started on another login, so where a
+    /// `session_start` rule would have chosen one, say so instead.
+    fn suggest(&self, g: &mut Inner, sid: &str, accounts: &[Account], current: &Account) {
+        let (Ok(policy), Some(m)) = (file::load(&self.policy_path()), g.p.sessions.get(sid)) else {
+            return;
+        };
+        // Evaluated as a session with no account yet, as `llmpool run` would.
+        let fresh = Session { account_id: None, ..m.session.clone() };
+        let decision = self.decide(g, &policy, Event::SessionStart, &fresh, accounts);
+        let label = |id: &String| accounts.iter().find(|a| &a.id == id).map_or(id.clone(), |a| a.label.clone());
+        let wanted = match &decision.outcome {
+            Outcome::Assign(id) if *id != current.id => label(id),
+            Outcome::Ask(ids) if ids.iter().any(|id| *id != current.id) => {
+                format!("one of {}", ids.iter().map(label).collect::<Vec<_>>().join(", "))
+            }
+            _ => return,
+        };
+        let text = format!(
+            "llmpool: rule \"{}\" would use {wanted} here. This session runs as {}, the login plain `claude` uses. \
+             Use /llmpool to switch (every plain session moves with it), or start with `llmpool run` for a separate login.",
+            decision.rule.unwrap_or_default(),
+            current.label,
+        );
+        if let Some(m) = g.p.sessions.get_mut(sid) {
+            m.notices.push(text.clone());
+            m.last_notice = Some(text);
+        }
+    }
+
     /// Handle a Claude Code hook. The return value is printed by the hook
     /// command as its JSON output.
     pub fn hook(&self, sid: &str, event: &str, argument: &str, payload: &Value) -> Value {
         let mut g = self.lock();
+        let Some(sid) = self.resolve(&mut g, sid, payload) else {
+            return json!({});
+        };
+        let sid = sid.as_str();
         let Some(m) = g.p.sessions.get_mut(sid) else {
             return json!({});
         };
         match (event, argument) {
+            ("SessionEnd", _) if m.native => self.end(&mut g, sid),
             ("SessionStart", _) => {
-                m.agent_session_id = payload["session_id"].as_str().map(str::to_string);
+                if !m.native {
+                    m.agent_session_id = payload["session_id"].as_str().map(str::to_string);
+                }
+                let source = payload["source"].as_str().unwrap_or("startup").to_string();
+                self.log(&mut g, "agent", Some(sid), format!("Claude Code reported in ({source})"));
                 self.save(&g);
             }
             ("UserPromptSubmit", _) => {
@@ -798,6 +908,10 @@ impl Daemon {
     pub fn statusline(&self, sid: &str, payload: &Value) -> Value {
         let mut g = self.lock();
         let t = now();
+        let Some(sid) = self.resolve(&mut g, sid, payload) else {
+            return json!({});
+        };
+        let sid = sid.as_str();
         let Some(m) = g.p.sessions.get_mut(sid) else {
             return json!({});
         };

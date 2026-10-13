@@ -3,7 +3,7 @@ use crate::{AddAgent, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent}
 use llmpool_adapter_claude::install;
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
-use llmpool_daemon::{http, Daemon};
+use llmpool_daemon::{http, Daemon, NATIVE};
 use serde_json::{json, Value};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -65,7 +65,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Run { account, tag, args } => run_agent(account, tag, args),
         Command::Sessions { json } => sessions(json),
         Command::Switch { account, session } => switch(&account, session),
-        Command::Status { json } => status(json),
+        Command::Status { json, agent_session } => status(json, agent_session),
         Command::Policy { command } => done(policy(command)?),
         Command::Install { agent: InstallAgent::Claude { shim } } => install_claude(shim),
         Command::Uninstall { agent: UninstallAgent::Claude } => uninstall_claude(),
@@ -325,12 +325,21 @@ fn switch(account: &str, session: Option<String>) -> Result<ExitCode, String> {
     done(format!("session {sid} now uses {account}; it takes effect within about a minute"))
 }
 
-fn status(as_json: bool) -> Result<ExitCode, String> {
+fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, String> {
     let client = connect()?;
     let sessions = client.call("GET", "/sessions", None)?;
     let accounts = client.call("GET", "/accounts", None)?;
+    // This terminal's session, or the one Claude Code itself names.
     let current = std::env::var("LLMPOOL_SESSION").ok();
-    let session = sessions.as_array().into_iter().flatten().find(|s| s["id"].as_str() == current.as_deref()).cloned();
+    let session = sessions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| match &current {
+            Some(id) => s["id"].as_str() == Some(id),
+            None => agent_session.is_some() && s["agent_session_id"].as_str() == agent_session.as_deref(),
+        })
+        .cloned();
     if as_json {
         return done(json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions}).to_string());
     }
@@ -508,9 +517,12 @@ fn stdin_text() -> String {
 /// the exit code is always zero.
 fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
     let input = stdin_text();
-    let (Ok(sid), "claude") = (std::env::var("LLMPOOL_SESSION"), agent) else {
+    if agent != "claude" {
         return ExitCode::SUCCESS;
-    };
+    }
+    // Without the variable this Claude Code was started on its own; the
+    // daemon recognises it by the session id in the payload.
+    let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
     let Some(client) = Client::existing(Duration::from_secs(2)) else {
         return ExitCode::SUCCESS;
     };
@@ -532,7 +544,8 @@ fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
 fn statusline(agent: &str) -> ExitCode {
     let input = stdin_text();
     let mut line = None;
-    if let (Ok(sid), "claude") = (std::env::var("LLMPOOL_SESSION"), agent) {
+    if agent == "claude" {
+        let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
         if let Some(client) = Client::existing(Duration::from_millis(300)) {
             let payload = serde_json::from_str(&input).unwrap_or(Value::Null);
             line = client

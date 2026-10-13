@@ -418,3 +418,48 @@ fn only_one_daemon_can_serve_a_data_directory() {
     drop(first);
     assert!(http::instance_lock(&w.data).is_ok());
 }
+
+// ---- sessions started as plain `claude` -------------------------------------
+
+#[test]
+fn a_plain_claude_session_is_adopted_and_can_be_switched() {
+    let w = world();
+    w.daemon.put_policy(POLICY).unwrap();
+    let payload = json!({"session_id": "agent-xyz", "cwd": "/work/api"});
+
+    assert_eq!(w.daemon.hook("-", "SessionStart", "", &payload), json!({}));
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions[0]["account_label"], "home@x.io");
+    assert_eq!(sessions[0]["native"], true);
+    assert_eq!(sessions[0]["cwd"], "/work/api");
+
+    // The directory's rule wanted a work account; a plain session says so.
+    let out = w.daemon.hook("-", "UserPromptSubmit", "", &payload);
+    let message = out["systemMessage"].as_str().unwrap();
+    assert!(message.contains("rule \"work repos\" would use"), "{message}");
+    assert!(message.contains("runs as home@x.io"), "{message}");
+
+    // The same Claude Code session is recognised again, not adopted twice.
+    w.daemon.statusline("-", &json!({"session_id": "agent-xyz", "rate_limits": {"five_hour": {"used_percentage": 30}}}));
+    assert_eq!(w.daemon.list_sessions().unwrap().as_array().unwrap().len(), 1);
+
+    let sid = sessions[0]["id"].as_str().unwrap();
+    w.daemon.swap_session(sid, "a@x.io").unwrap();
+    assert_eq!(Profile::default_in(&w.home).identity().unwrap().0, "a@x.io");
+    assert_eq!(vault_token(&w, "home@x.io"), "home-1");
+    let out = w.daemon.hook("-", "UserPromptSubmit", "", &payload);
+    assert!(out["systemMessage"].as_str().unwrap().contains("Every plain `claude` session shares this login"));
+
+    w.daemon.hook("-", "SessionEnd", "", &payload);
+    assert_eq!(w.daemon.list_sessions().unwrap(), json!([]));
+}
+
+#[test]
+fn a_plain_session_on_a_login_outside_the_pool_is_left_alone() {
+    let w = world();
+    Profile::default_in(&w.home).write(&NoKeychain, &secret("stranger@x.io", "s-1")).unwrap();
+    assert_eq!(w.daemon.hook("-", "SessionStart", "", &json!({"session_id": "agent-1", "cwd": "/x"})), json!({}));
+    assert_eq!(w.daemon.list_sessions().unwrap(), json!([]));
+    // A signal with no session id at all is ignored too.
+    assert_eq!(w.daemon.statusline("-", &json!({})), json!({}));
+}

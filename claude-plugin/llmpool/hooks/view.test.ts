@@ -24,7 +24,7 @@ const STATUS = {
 }
 
 test('status json becomes rows, with the current account marked', () => {
-  const snap = toSnapshot(STATUS, 's1')
+  const snap = toSnapshot(STATUS)
   expect(snap.session).toBe('s1')
   expect(snap.rows.map(r => [r.label, r.isCurrent, r.state])).toEqual([
     ['work-1', true, 'ok'],
@@ -39,7 +39,7 @@ test('status json becomes rows, with the current account marked', () => {
 })
 
 test('a session llmpool did not start has no current account', () => {
-  const snap = toSnapshot({ ...STATUS, session: null }, null)
+  const snap = toSnapshot({ ...STATUS, session: null })
   expect(snap.session).toBe(null)
   expect(snap.rows.some(r => r.isCurrent)).toBe(false)
   expect(statusText(snap)).toBe(undefined)

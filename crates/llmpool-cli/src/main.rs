@@ -61,6 +61,9 @@ enum Command {
     Status {
         #[arg(long)]
         json: bool,
+        /// Claude Code's own session id, for a session `llmpool run` did not start
+        #[arg(long)]
+        agent_session: Option<String>,
     },
     /// Inspect and test policies
     Policy {

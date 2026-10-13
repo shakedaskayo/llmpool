@@ -16,7 +16,7 @@ export type Row = {
 }
 
 export type Snapshot = {
-  /** This session's llmpool id; null when it was not started by `llmpool run`. */
+  /** This session's llmpool id; null when llmpool does not manage it. */
   session: string | null
   rows: Row[]
   others: { id: string; label: string; cwd: string }[]

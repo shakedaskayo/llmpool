@@ -5,7 +5,8 @@ type Json = Record<string, any>
 const windowOf = (row: Json, name: string): Json | undefined => row?.usage?.windows?.[name]
 
 /** Reduce `llmpool status --json` to what the pane draws. */
-export const toSnapshot = (status: Json, session: string | null): Snapshot => {
+export const toSnapshot = (status: Json): Snapshot => {
+  const session: string | null = status?.session?.id ?? null
   const current: string | null = status?.session?.account_id ?? null
   const rows: Row[] = (status?.accounts ?? []).map((a: Json) => ({
     id: a.id,
@@ -23,7 +24,7 @@ export const toSnapshot = (status: Json, session: string | null): Snapshot => {
     .filter((s: Json) => s.id !== session)
     .map((s: Json) => ({ id: s.id, label: s.account_label ?? 'default login', cwd: s.cwd }))
 
-  return { session: status?.session ? session : null, rows, others, error: null }
+  return { session, rows, others, error: null }
 }
 
 /** A ten-cell meter. */
