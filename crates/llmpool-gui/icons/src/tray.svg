@@ -1,8 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
   <!-- Black with alpha only: macOS tints a template image for the menu bar. -->
-  <circle cx="22" cy="22" r="15" fill="none" stroke="#000" stroke-opacity="0.35" stroke-width="4"/>
-  <circle cx="22" cy="22" r="15" fill="none" stroke="#000" stroke-width="4" stroke-linecap="round" stroke-dasharray="66 95" transform="rotate(144 22 22)"/>
-  <circle cx="22" cy="18" r="4.2" fill="#000"/>
-  <circle cx="16.5" cy="26.5" r="3" fill="#000" fill-opacity="0.55"/>
-  <circle cx="27.5" cy="26.5" r="3" fill="#000" fill-opacity="0.55"/>
+  <circle cx="22" cy="22" r="14" fill="none" stroke="#000" stroke-width="4"/>
+  <circle cx="22" cy="22" r="6" fill="#000"/>
 </svg>

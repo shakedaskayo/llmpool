@@ -1,32 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- A plain mark: a ring and what it holds. Drawn on the macOS icon grid
+       (824 square, rounded), light on near-black. -->
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1d2733"/>
-      <stop offset="1" stop-color="#0d1218"/>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2c30"/>
+      <stop offset="1" stop-color="#101113"/>
     </linearGradient>
-    <linearGradient id="ring" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#2fbf9b"/>
-      <stop offset="1" stop-color="#7be3c3"/>
-    </linearGradient>
-    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9dbe0"/>
     </linearGradient>
   </defs>
-  <!-- The tile, on Apple's icon grid: 824 square, rounded, centred. -->
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)"/>
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#sheen)"/>
-  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
-
-  <!-- A gauge: the track, and how much of the window is left. -->
-  <circle cx="512" cy="512" r="250" fill="none" stroke="#2a3644" stroke-width="64"/>
-  <circle cx="512" cy="512" r="250" fill="none" stroke="url(#ring)" stroke-width="64" stroke-linecap="round"
-          stroke-dasharray="1100 1571" transform="rotate(144 512 512)"/>
-
-  <!-- Inside it, the pool: three accounts, one of them in use. -->
-  <circle cx="512" cy="430" r="58" fill="#7be3c3"/>
-  <circle cx="424" cy="570" r="46" fill="#3d4c5c"/>
-  <circle cx="600" cy="570" r="46" fill="#3d4c5c"/>
-  <!-- The switch between them. -->
-  <path d="M452 500 L 432 532 M 572 500 L 592 532 M 480 574 L 544 574" fill="none" stroke="#5b6b7c" stroke-width="14" stroke-linecap="round"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#plate)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.09" stroke-width="3"/>
+  <circle cx="512" cy="512" r="212" fill="none" stroke="url(#ink)" stroke-width="58"/>
+  <circle cx="512" cy="512" r="92" fill="url(#ink)"/>
 </svg>
