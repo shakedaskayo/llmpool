@@ -11,8 +11,16 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 const LOGIN_PATIENCE_SECS: i64 = 600;
 /// A renewal that did not work is not tried again sooner than this.
 const RENEW_RETRY_SECS: i64 = 6 * 3600;
-/// A server renews an access token this long before it runs out.
-const FRESH_MARGIN_MS: i64 = 30 * 60 * 1000;
+/// A server renews an access token this long before it runs out:
+/// half an hour, or `LLMPOOL_FRESH_MARGIN_SECS`.
+fn fresh_margin_ms() -> i64 {
+    std::env::var("LLMPOOL_FRESH_MARGIN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(30 * 60)
+        * 1000
+}
 /// With renewal working, a login this close to its end means something is wrong.
 const EXPIRY_WARN_SECS: i64 = 3 * 24 * 3600;
 
@@ -416,7 +424,7 @@ impl Daemon {
                         .is_some_and(|r| !r.is_empty())
                     && secret.oauth["expiresAt"]
                         .as_i64()
-                        .is_some_and(|at| at - t * 1000 < FRESH_MARGIN_MS);
+                        .is_some_and(|at| at - t * 1000 < fresh_margin_ms());
                 (stale || oauth::due(&secret, t * 1000)).then_some((account, secret))
             });
             if let Some((account, _)) = &due {

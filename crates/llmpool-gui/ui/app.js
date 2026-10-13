@@ -122,7 +122,7 @@ const avatar = (label, key) => {
   const inner = mark
     ? `<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" fill-rule="evenodd"><path d="${mark}"/></svg>`
     : esc((String(label).replace(/^[a-z-]+:/, "")[0] ?? "?").toUpperCase());
-  return `<span class="avatar${mark ? " mark" : ""}" style="--h:${hue(key)}" aria-hidden="true">${inner}</span>`;
+  return `<span class="avatar${mark ? " brand" : ""}" style="--h:${hue(key)}" aria-hidden="true">${inner}</span>`;
 };
 
 // One usage window with its name in front, for cards that show two.
