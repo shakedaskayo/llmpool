@@ -3,7 +3,11 @@
 
 pub mod advisor;
 pub mod client;
+mod harness;
 pub mod http;
+mod keys;
+pub use harness::FilesReq;
+pub use keys::KeyReq;
 mod onboarding;
 mod team;
 pub mod team_server;
@@ -48,6 +52,8 @@ pub const NATIVE: &str = "-";
 const NATIVE_IDLE_SECS: i64 = 1800;
 /// Said when someone tries to change what the team's server provides.
 const TEAM_OWNED: &str = "this account comes from your team's server; it can only be changed there";
+/// The provider of Claude Code's own logins.
+const CLAUDE: &str = "claude";
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 #[derive(Debug)]
@@ -145,6 +151,8 @@ struct Persisted {
     events: VecDeque<LogEvent>,
     rr_cursor: Option<String>,
     next: u64,
+    /// Directories made for sessions of agents that keep a login in files.
+    file_stores: BTreeMap<String, harness::FileStore>,
     /// Accounts that come from the team's server: its to change, not ours.
     shared: BTreeSet<AccountId>,
     /// Sessions teammates run on each shared account, as the server last said.
@@ -177,13 +185,20 @@ pub struct PatchReq {
     pub enabled: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct StartReq {
     pub cwd: String,
     pub git_remote: Option<String>,
     pub pid: u32,
     pub account: Option<String>,
     pub tag: Option<String>,
+    /// Whose accounts this session runs on. `None`: Claude Code's logins, or
+    /// the provider of the account that is named.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The command that is about to run, for display. `None`: Claude Code.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -387,7 +402,10 @@ fn os_notify(text: &str) {
 }
 
 fn same_login(account: &Account, email: &str, organization: Option<&str>) -> bool {
-    account.email.as_deref() == Some(email) && account.organization.as_deref() == organization
+    // Only a Claude login can be what a Claude profile holds.
+    account.provider == CLAUDE
+        && account.email.as_deref() == Some(email)
+        && account.organization.as_deref() == organization
 }
 
 impl Daemon {
@@ -661,6 +679,7 @@ impl Daemon {
     /// refreshing it, or the vault is locked) is kept and tried again later,
     /// because it may hold the only current copy.
     fn sweep(&self, g: &mut Inner) {
+        self.sweep_files(g);
         let Ok(accounts) = self.accounts(g) else {
             return;
         };
@@ -957,6 +976,40 @@ impl Daemon {
         let g = self.lock();
         let (mut added, mut replaced, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
         for transfer::Entry { account, secret } in entries {
+            if account.kind != Kind::Oauth || account.provider != CLAUDE {
+                // A key or another agent's login says little about whose it
+                // is; it is checked to be one and filed as the file names it.
+                if keys::env_of(&secret).is_err() && !harness::is_login(&secret) {
+                    return Err(damaged());
+                }
+                if account.id != keys::id_of(&account.provider, &account.label) {
+                    return Err(damaged());
+                }
+                let exists = g.store.get(&account.id)?.is_some();
+                let in_use =
+                    g.p.sessions
+                        .values()
+                        .any(|m| m.session.account_id.as_ref() == Some(&account.id));
+                if exists && (!replace || in_use) {
+                    skipped.push(account.label);
+                    continue;
+                }
+                self.vault.put(&account.id, &secret)?;
+                g.store.put(&Account {
+                    email: None,
+                    organization: None,
+                    health: Health::Ok,
+                    usage: None,
+                    login_expires_at: None,
+                    ..account.clone()
+                })?;
+                if exists {
+                    replaced.push(account.label)
+                } else {
+                    added.push(account.label)
+                }
+                continue;
+            }
             let secret: Secret = serde_json::from_str(&secret).map_err(|_| damaged())?;
             let email = secret.email().ok_or_else(damaged)?.to_string();
             let organization = secret.organization().map(str::to_string);
@@ -1214,10 +1267,45 @@ impl Daemon {
         let accounts = self.accounts(&g)?;
         g.p.next += 1;
         let sid = format!("s{}", g.p.next);
+        // A named account settles the provider; otherwise the caller says,
+        // and saying nothing means Claude Code.
+        let named = req
+            .account
+            .as_ref()
+            .and_then(|name| find(&accounts, name).ok())
+            .map(|a| a.provider.clone());
+        // An agent named without a provider runs on its own login if the
+        // pool has one, and otherwise on the key it reads.
+        let by_agent = req.agent.as_ref().and_then(|command| {
+            let name = command.rsplit('/').next().unwrap_or(command);
+            let harness = self
+                .harness_list()
+                .into_iter()
+                .find(|h| h.name == name || h.command == *command)?;
+            let has_login = accounts
+                .iter()
+                .any(|a| a.usable() && a.provider == harness.name);
+            if has_login {
+                Some(harness.name)
+            } else {
+                harness.provider
+            }
+        });
+        let provider = match named.or(req.provider.clone()).or(by_agent) {
+            Some(provider) => provider,
+            None if req.agent.is_some() => {
+                return Err(fail(
+                    400,
+                    "llmpool cannot tell which provider this agent uses; say so with --provider or --account",
+                ))
+            }
+            None => CLAUDE.into(),
+        };
+        let keyed = provider != CLAUDE;
         let session = Session {
             id: sid.clone(),
-            agent: "claude-code".into(),
-            provider: "claude".into(),
+            agent: req.agent.clone().unwrap_or_else(|| "claude-code".into()),
+            provider: provider.clone(),
             cwd: req.cwd,
             git_remote: req.git_remote,
             model: None,
@@ -1290,6 +1378,40 @@ impl Daemon {
                 _ => None,
             }
         };
+        // An agent that runs on a key cannot start without one: with no rule
+        // to say which, it gets the usable key the fewest sessions run on.
+        let chosen = match chosen {
+            None if keyed && ask.is_empty() => {
+                let load = busy(&g);
+                let home = self.home.to_string_lossy();
+                let ctx = Context {
+                    session: &session,
+                    accounts: &accounts,
+                    now: now(),
+                    weekday: "mon",
+                    hour: 0,
+                    minute: 0,
+                    home: &home,
+                    rr_cursor: None,
+                    busy: &load,
+                };
+                let picked = select::pick(
+                    Pick::LeastBusy,
+                    select::candidates(&Target::default(), &ctx, None),
+                    None,
+                    &load,
+                    None,
+                )
+                .cloned();
+                Some(picked.ok_or_else(|| {
+                    fail(
+                        409,
+                        format!("no usable {provider} account in the pool; add one with `llmpool add key {provider}`"),
+                    )
+                })?)
+            }
+            other => other,
+        };
 
         g.p.sessions.insert(
             sid.clone(),
@@ -1359,6 +1481,24 @@ impl Daemon {
                 format!("{} is disabled or needs a new login", account.label),
             ));
         }
+        let provider = g.p.sessions.get(sid).map(|m| m.session.provider.clone());
+        if provider.as_deref() != Some(account.provider.as_str()) {
+            return Err(fail(
+                409,
+                format!(
+                    "{} is a {} account and this session runs on {}",
+                    account.label,
+                    account.provider,
+                    provider.as_deref().unwrap_or(CLAUDE)
+                ),
+            ));
+        }
+        if account.kind != Kind::Oauth {
+            return self.attach_key(g, sid, account);
+        }
+        if account.provider != CLAUDE {
+            return self.attach_files(g, sid, account);
+        }
         if g.renewing.contains(&account.id) {
             return Err(fail(
                 409,
@@ -1425,6 +1565,15 @@ impl Daemon {
         }
         let accounts = self.accounts(g)?;
         let to = find(&accounts, to_id)?;
+        if to.provider != m.session.provider || to.kind != Kind::Oauth || to.provider != CLAUDE {
+            return Err(fail(
+                409,
+                format!(
+                    "{} is a {} account; this session cannot move to it",
+                    to.label, to.provider
+                ),
+            ));
+        }
         if !to.usable() {
             return Err(fail(
                 409,
@@ -1594,6 +1743,7 @@ impl Daemon {
         let next = accounts
             .iter()
             .filter(|a| a.usable() && m.session.account_id.as_ref() != Some(&a.id))
+            .filter(|a| a.provider == m.session.provider)
             // Not one that is live in another session's profile.
             .filter(|a| {
                 self.holders_given(&g, a, &default)
@@ -2019,7 +2169,11 @@ impl Daemon {
     pub fn stats(&self) -> Api<Value> {
         let g = self.lock();
         let accounts = self.accounts(&g)?;
-        let usable: Vec<&Account> = accounts.iter().filter(|a| a.usable()).collect();
+        // Only logins have an allowance llmpool can read.
+        let usable: Vec<&Account> = accounts
+            .iter()
+            .filter(|a| a.usable() && a.kind == Kind::Oauth)
+            .collect();
         // How much of the pool's combined allowance is still unused.
         let headroom = |window: &str| {
             (!usable.is_empty()).then(|| {

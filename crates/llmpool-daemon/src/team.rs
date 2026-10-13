@@ -434,7 +434,19 @@ impl Daemon {
                     account.usage = Some(have);
                 }
             }
-            if let Ok(secret) = serde_json::from_value::<Secret>(row["secret"].clone()) {
+            if account.kind != Kind::Oauth {
+                // Checked here too: the server is not trusted to choose
+                // which variables our agents run with.
+                let text = row["secret"].to_string();
+                if !row["secret"].is_null() {
+                    if keys::env_of(&text).is_err() {
+                        continue;
+                    }
+                    if self.vault.get(&account.id)?.as_deref() != Some(text.as_str()) {
+                        self.vault.put(&account.id, &text)?;
+                    }
+                }
+            } else if let Ok(secret) = serde_json::from_value::<Secret>(row["secret"].clone()) {
                 let text = serde_json::to_string(&secret)?;
                 if self.vault.get(&account.id)?.as_deref() != Some(text.as_str()) {
                     self.vault.put(&account.id, &text)?;

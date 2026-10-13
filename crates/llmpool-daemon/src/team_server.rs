@@ -538,6 +538,11 @@ impl TeamServer {
             if !account.usable() || g.renewing.contains(&account.id) {
                 continue;
             }
+            // Another agent's own login renews itself wherever it runs, so a
+            // copy on every member's machine would end it: it is not lent.
+            if account.kind == Kind::Oauth && account.provider != "claude" {
+                continue;
+            }
             let holders = state.seats.entry(account.id.clone()).or_default();
             let others: usize = holders.values().map(|(_, n)| n).sum();
             let exclusive = account.kind == Kind::Oauth && !self.config.share_logins;
@@ -560,6 +565,14 @@ impl TeamServer {
             }
             let secret = if held {
                 Value::Null
+            } else if account.kind != Kind::Oauth {
+                // A key is lent whole: there is nothing shorter-lived to give.
+                match d.vault.get(&account.id)? {
+                    Some(text) if crate::keys::env_of(&text).is_ok() => {
+                        serde_json::from_str(&text)?
+                    }
+                    _ => continue,
+                }
             } else {
                 match d.secret_of(&account.id) {
                     Ok(mut secret) => {

@@ -89,6 +89,10 @@ fn route(
         }
         ("GET", ["accounts"]) => d.list_accounts(),
         ("POST", ["accounts", "capture"]) => d.capture(parse(body)?),
+        ("POST", ["accounts", "key"]) => d.add_key(parse(body)?),
+        ("GET", ["providers"]) => Ok(d.providers()),
+        ("POST", ["accounts", "files"]) => d.capture_files(parse(body)?),
+        ("GET", ["harnesses"]) => d.harnesses(),
         ("PATCH", ["accounts", id]) => d.patch_account(id, parse(body)?),
         ("DELETE", ["accounts", id]) => d.remove_account(id),
         ("POST", ["export"]) => d.export(text(&body, "passphrase")?),

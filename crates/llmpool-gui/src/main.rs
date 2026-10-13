@@ -157,8 +157,14 @@ fn percent(usage: &Value, window: &str) -> Option<String> {
 fn session_title(session: &Value) -> String {
     let cwd = session["cwd"].as_str().unwrap_or_default();
     let folder = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd);
+    // Which agent, when it is not the one most sessions are.
+    let agent = session["agent"]
+        .as_str()
+        .filter(|a| *a != "claude-code")
+        .map(|a| format!("{} · ", a.rsplit('/').next().unwrap_or(a)))
+        .unwrap_or_default();
     let mut parts = vec![
-        folder.to_string(),
+        format!("{agent}{folder}"),
         session["account_label"]
             .as_str()
             .unwrap_or("your own login")
@@ -189,6 +195,10 @@ fn tray_menu(app: &AppHandle, sessions: &Value, accounts: &Value) -> tauri::Resu
         }
         let submenu = Submenu::new(app, session_title(session), true)?;
         for account in accounts.as_array().into_iter().flatten() {
+            // An agent only ever runs on accounts of its own provider.
+            if account["provider"] != session["provider"] {
+                continue;
+            }
             let id = account["id"].as_str().unwrap_or_default();
             let current = session["account_id"].as_str() == Some(id);
             // An account live in another profile cannot be put in this one too.

@@ -12,6 +12,10 @@ const state = {
   stats: {},
   config: {},
   team: { state: "off" },
+  agents: { harnesses: [] },
+  providers: [],
+  addKind: "claude", // which kind of account the add panel shows: claude, agent or key
+  keyProvider: "openai",
   remotePolicy: {},
   loginItem: null, // true, false, or null while unknown
   setupLog: "",
@@ -141,11 +145,14 @@ function issuesPanel() {
     .join("");
 }
 
-function addPanel() {
+const AGENT_NAMES = { claude: "Claude Code" };
+const agentTitle = (name) => AGENT_NAMES[name] ?? state.agents.harnesses.find((h) => h.name === name)?.title ?? state.providers.find((p) => p.name === name)?.title ?? name;
+const SECRET_VAR = /(_KEY|_TOKEN|_ACCESS_KEY_ID)$/;
+
+function addClaude() {
   const hasDefault = state.accounts.some((a) => a.is_default);
   const waiting = state.login.state === "waiting";
-  return `<div class="callout">
-    <div class="steps">
+  return `<div class="steps">
       <div>
         <h3>Sign in to another account</h3>
         <p class="muted">Opens Claude's sign-in page in your browser. llmpool never sees your password; it takes the login once you are done.</p>
@@ -160,7 +167,60 @@ function addPanel() {
         <p class="muted">${hasDefault ? "Already in the pool. Press again after logging Claude Code in to a different account." : "One press. Nothing about your Claude Code setup changes."}</p>
         <div class="copy"><button data-act="capture">Add current login</button></div>
       </div>
+    </div>`;
+}
+
+// Agents that keep a login of their own: take the one each has now.
+function addAgent() {
+  const rows = state.agents.harnesses
+    .filter((h) => h.has_login)
+    .map((h) => {
+      const who = h.login_as ? ` as <strong>${esc(h.login_as)}</strong>` : "";
+      const status = !h.logged_in
+        ? `<span class="muted">${h.installed ? "not signed in" : "not found on this Mac"}</span>`
+        : h.login_in_pool
+          ? `<span class="ok" aria-hidden="true">✓</span> signed in${who}, in the pool`
+          : `signed in${who} <button class="primary" data-act="add-agent" data-name="${esc(h.name)}">Add this login</button>`;
+      const more = h.installed ? `<a href="#" class="muted" data-act="copy" data-text="llmpool add login ${esc(h.name)} --new">copy the command for a second account</a>` : "";
+      return `<tr><td><strong>${esc(h.title)}</strong></td><td>${status}</td><td class="actions">${more}</td></tr>`;
+    })
+    .join("");
+  return `<p class="muted">Agents that sign in themselves keep that login in their own files. llmpool takes a copy, and starts each session on the account you or your rules pick, with the rest of the agent's settings and history shared.</p>
+    <table><caption class="skip">Agents with a login of their own</caption><tbody>${rows}</tbody></table>
+    <p class="muted">An agent that is not listed: describe it in <code>harnesses.toml</code> (see <code>llmpool agents</code>), or give it an API key.</p>`;
+}
+
+// A key for any provider; the agent reads it from its environment.
+function addKey() {
+  const known = state.providers.find((p) => p.name === state.keyProvider);
+  const options = state.providers.map((p) => `<option value="${esc(p.name)}"${p.name === state.keyProvider ? " selected" : ""}>${esc(p.title)}</option>`).join("");
+  const fields = known
+    ? known.env.map((name) => `<input class="wide keyvar" data-var="${esc(name)}" type="${SECRET_VAR.test(name) ? "password" : "text"}" autocomplete="off" placeholder="${esc(name)}" aria-label="${esc(name)}" />`).join("")
+    : `<input class="tags" id="key-provider" placeholder="provider, e.g. together" aria-label="Provider name, short and lowercase" />
+       <input class="wide" id="key-var" placeholder="variable, e.g. TOGETHER_API_KEY" aria-label="The environment variable the agent reads the key from" />
+       <input class="wide" id="key-value" type="password" autocomplete="off" placeholder="key" aria-label="The key" />`;
+  return `<p class="muted">Works with any agent that reads its key from the environment (Codex CLI, OpenCode, Gemini CLI, Grok, Aider, your own scripts). The key is stored in your keychain and handed to the agent llmpool starts.</p>
+    <div class="copy">
+      <select data-act="key-provider" aria-label="Provider">${options}<option value=""${known ? "" : " selected"}>Another provider…</option></select>
+      ${fields}
     </div>
+    <div class="copy">
+      <input class="tags" id="key-label" placeholder="name (optional)" aria-label="Name for this account, optional" />
+      <input class="tags" id="key-tags" placeholder="tags, e.g. work" aria-label="Tags, comma separated, optional" />
+      <button class="primary" data-act="add-key">Add key</button>
+    </div>`;
+}
+
+function addPanel() {
+  const kinds = [
+    ["claude", "Claude Code login"],
+    ["agent", "Another agent's login"],
+    ["key", "API key · any provider"],
+  ];
+  const body = { claude: addClaude, agent: addAgent, key: addKey }[state.addKind]();
+  return `<div class="callout">
+    <div role="group" aria-label="Kind of account" class="seg">${kinds.map(([kind, label]) => `<button data-act="add-kind" data-kind="${kind}" aria-pressed="${state.addKind === kind}">${label}</button>`).join("")}</div>
+    ${body}
   </div>`;
 }
 
@@ -169,11 +229,15 @@ function renderPool() {
     .map((a) => {
       const used = a.sessions.length ? `<div class="muted">in use by ${plural(a.sessions.length, "session")}</div>` : "";
       return `<tr>
-        <td><strong>${esc(a.label)}</strong> ${accountBadge(a)} ${expiryBadge(a)}${used}</td>
+        <td><strong>${esc(a.label)}</strong> <span class="badge provider">${esc(agentTitle(a.provider))}</span> ${accountBadge(a)} ${expiryBadge(a)}${used}</td>
         <td>${a.shared ? `<span class="muted">${esc(a.tags.join(", "))}</span>` : `<input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" />`}</td>
-        <td>${meter(a.usage, "5h", "5-hour window")}</td>
+        ${
+          a.provider === "claude"
+            ? `<td>${meter(a.usage, "5h", "5-hour window")}</td>
         <td>${meter(a.usage, "7d", "7-day window")}</td>
-        <td>${sparkline(a.history, `5-hour usage of ${a.label}`)}</td>
+        <td>${sparkline(a.history, `5-hour usage of ${a.label}`)}</td>`
+            : `<td colspan="3" class="muted">${a.kind === "oauth" ? "a login of " + esc(agentTitle(a.provider)) : "a key"}; its usage is not reported to llmpool</td>`
+        }
         <td class="actions">${
           a.shared
             ? `<span class="muted">managed by your team</span>`
@@ -189,8 +253,8 @@ function renderPool() {
         ? `<table><caption class="skip">Accounts in the pool</caption>
             <thead><tr><th scope="col">Account</th><th scope="col">Tags</th><th scope="col">5-hour window</th><th scope="col">7-day window</th><th scope="col">Trend (5h)</th><th scope="col"><span class="skip">Actions</span></th></tr></thead>
             <tbody>${rows}</tbody></table>
-           <p class="muted">Tags group accounts for policies, e.g. “use an account tagged work in ~/work”.</p>`
-        : `<p class="empty">No accounts yet. Add the login Claude Code is using now to start the pool.</p>`
+           <p class="muted">Tags group accounts for policies, e.g. “use an account tagged work in ~/work”. Each agent only ever runs on accounts of its own provider.</p>`
+        : `<p class="empty">No accounts yet. Add a login your coding agent already has, or a key, to start the pool.</p>`
     }
     <h2>Add an account</h2>${addPanel()}`;
 }
@@ -200,9 +264,11 @@ function renderPool() {
 const EVENT_ICONS = { swap: "⇄", assign: "▶", adopt: "▶", end: "■", notice: "ℹ", login: "⚠", policy_error: "⚠", agent: "·" };
 
 function renderSessions() {
-  const usable = state.accounts.filter((a) => a.enabled && a.health === "ok");
+  const everyone = state.accounts.filter((a) => a.enabled && a.health === "ok");
   const rows = state.sessions
     .map((s) => {
+      const usable = everyone.filter((a) => a.provider === s.provider);
+      const isClaude = s.provider === "claude";
       // An account live in another session's profile cannot be put in this one too.
       const picker = s.store
         ? `<select data-act="swap" data-id="${esc(s.id)}" aria-label="Account for the session in ${esc(short(s.cwd))}">${usable
@@ -213,7 +279,9 @@ function renderSessions() {
               return `<option value="${esc(a.id)}"${a.id === s.account_id ? " selected" : ""}${elsewhere ? " disabled" : ""}>${esc(a.label)}${elsewhere ? " (in use)" : ""}</option>`;
             })
             .join("")}</select>`
-        : `<span class="muted">your own login, not managed</span>`;
+        : !isClaude
+          ? `<strong>${esc(s.account_label ?? "")}</strong> <span class="badge" title="This agent reads its account when it starts. Start it again to run on another one.">set at start</span>`
+          : `<span class="muted">your own login, not managed</span>`;
       const why = s.picked_by ? `<div class="muted">${esc(s.picked_by)}</div>` : "";
       const a = s.advice;
       const verdict = !a
@@ -225,8 +293,11 @@ function renderSessions() {
             : `<div class="muted">advisor: ${Math.round(a.switch * 100)}% for switching${a.target ? ` to ${esc(a.target)}` : ""}${a.acted ? " · switched" : ""}</div>`;
       const ask = state.config.advisor_enabled && state.config.has_key && s.store ? ` <button class="quiet" data-act="advise" data-id="${esc(s.id)}">Ask advisor</button>` : "";
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
-      return `<tr><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${ask}${why}${verdict}</td>
-        <td>${meter(s.usage, "5h", "5-hour window")}</td><td>${meter(s.usage, "7d", "7-day window")}</td></tr>`;
+      const agent = isClaude ? "Claude Code" : agentTitle(s.agent);
+      const usage = isClaude
+        ? `<td>${meter(s.usage, "5h", "5-hour window")}</td><td>${meter(s.usage, "7d", "7-day window")}</td>`
+        : `<td colspan="2" class="muted">usage is not reported to llmpool</td>`;
+      return `<tr><td>${esc(agent)}</td><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${ask}${why}${verdict}</td>${usage}</tr>`;
     })
     .join("");
   const events = state.events
@@ -239,9 +310,9 @@ function renderSessions() {
     ${
       rows
         ? `<table><caption class="skip">Running sessions</caption>
-            <thead><tr><th scope="col">Directory</th><th scope="col">Account</th><th scope="col">5-hour window</th><th scope="col">7-day window</th></tr></thead><tbody>${rows}</tbody></table>
-           <p class="muted">Choosing another account switches the running session. It takes effect within about a minute.</p>`
-        : `<p class="empty">No sessions running. Start Claude Code, or run <code>llmpool run</code> to start one on the account your policies pick.</p>`
+            <thead><tr><th scope="col">Agent</th><th scope="col">Directory</th><th scope="col">Account</th><th scope="col">5-hour window</th><th scope="col">7-day window</th></tr></thead><tbody>${rows}</tbody></table>
+           <p class="muted">Choosing another account switches a running Claude Code session within about a minute. Other agents read their account when they start.</p>`
+        : `<p class="empty">No sessions running. Start Claude Code as usual, or any other agent with <code>llmpool exec -- codex</code> (or opencode, gemini, grok, …) to run it on the account your policies pick.</p>`
     }
     <h2>Recent activity</h2>
     ${events ? `<ul class="events">${events}</ul>` : `<p class="muted">Nothing yet.</p>`}`;
@@ -629,6 +700,33 @@ async function loadPolicy() {
 
 // ---- settings ---------------------------------------------------------------
 
+// Every agent llmpool can start, what it runs on and how to start it.
+function agentsPanel(claude, hooked) {
+  const row = (title, runsOn, status, how) => `<tr><td><strong>${esc(title)}</strong></td><td class="muted">${runsOn}</td><td>${status}</td><td class="actions">${how}</td></tr>`;
+  const command = (text) => `<a href="#" data-act="copy" data-text="${esc(text)}" title="Copy"><code>${esc(text)}</code></a>`;
+  const rows = [
+    row(
+      "Claude Code",
+      "its own logins",
+      claude ? (hooked ? `<span class="ok" aria-hidden="true">✓</span> connected: live switching, usage, <code>/llmpool</code>` : `<span class="warnmark" aria-hidden="true">⚠</span> installed, not connected yet`) : `<span class="muted">not found on this Mac</span>`,
+      command("claude"),
+    ),
+    ...state.agents.harnesses.map((h) => {
+      const runsOn = [h.has_login ? "its own logins" : "", h.provider ? `${esc(agentTitle(h.provider))} keys` : h.has_login ? "any key" : "any key, by provider"].filter(Boolean).join(", ");
+      const status = !h.installed
+        ? `<span class="muted">not found on this Mac</span>`
+        : h.accounts > 0
+          ? `<span class="ok" aria-hidden="true">✓</span> ${plural(h.accounts, "account")} in the pool`
+          : `<span class="warnmark" aria-hidden="true">⚠</span> no account in the pool yet <button class="quiet" data-act="goto-add" data-kind="${h.logged_in && !h.login_in_pool ? "agent" : "key"}">Add one</button>`;
+      return row(h.title, runsOn, status, h.installed ? command(`llmpool exec -- ${h.command}`) : "");
+    }),
+  ].join("");
+  return `<table><caption class="skip">Coding agents</caption>
+      <thead><tr><th scope="col">Agent</th><th scope="col">Runs on</th><th scope="col">On this Mac</th><th scope="col">Start it with</th></tr></thead><tbody>${rows}</tbody></table>
+    ${state.agents.error ? `<p class="warnmark" role="alert">⚠ ${esc(state.agents.error)}</p>` : ""}
+    <p class="muted">To type <code>codex</code> or <code>opencode</code> as usual and still go through the pool: ${command("llmpool install agents")}. Any other agent or script: ${command("llmpool exec --provider openai -- your-command")}, or describe it once in <code>harnesses.toml</code>.</p>`;
+}
+
 // Joining a team's shared pool: by signing in at its server, or with a key.
 function teamPanel() {
   const t = state.team;
@@ -687,6 +785,9 @@ function renderSettings() {
       </div>
     </div>
 
+    <h2>Coding agents</h2>
+    <div class="callout">${agentsPanel(claude, hooked)}</div>
+
     <h2>This Mac</h2>
     <div class="callout">
       <ul class="checks">
@@ -716,6 +817,11 @@ async function settingsAction(el) {
   }
   if (act === "key-clear") await attempt(() => api("DELETE", "/advisor/key"), "Key forgotten");
   if (act === "copy") return copy(el.dataset.text);
+  if (act === "goto-add") {
+    state.addKind = el.dataset.kind;
+    selectTab(tabs[0]);
+    return renderPool();
+  }
   if (act === "team-signin" || act === "team-key" || act === "team-again") {
     const url = act === "team-again" ? state.team.url : $("team-url").value.trim();
     const key = act === "team-key" ? $("team-key").value.trim() : null;
@@ -752,6 +858,30 @@ async function poolAction(el) {
   const act = el.dataset.act;
   if (act === "copy") return copy(el.dataset.text);
   if (act === "goto-setup") return selectTab(tabs[3]);
+  if (act === "add-kind") {
+    state.addKind = el.dataset.kind;
+    return renderPool();
+  }
+  if (act === "key-provider") {
+    state.keyProvider = el.value;
+    return renderPool();
+  }
+  if (act === "add-agent") {
+    await attempt(() => api("POST", "/accounts/files", { harness: el.dataset.name }), "Login added to the pool");
+    return refresh(true);
+  }
+  if (act === "add-key") {
+    const known = state.providers.find((p) => p.name === state.keyProvider);
+    const env = {};
+    if (known) document.querySelectorAll("#pool .keyvar").forEach((input) => input.value.trim() && (env[input.dataset.var] = input.value.trim()));
+    else if ($("key-var").value.trim()) env[$("key-var").value.trim()] = $("key-value").value.trim();
+    const provider = known ? known.name : $("key-provider").value.trim().toLowerCase();
+    if (!provider) return toast("Name the provider first", "error");
+    if (!Object.keys(env).length || (known && Object.keys(env).length < known.env.length)) return toast("Fill in the key first", "error");
+    const tags = $("key-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+    const added = await attempt(() => api("POST", "/accounts/key", { provider, label: $("key-label").value.trim() || null, tags, env }), "Key added to the pool");
+    return added === false ? undefined : refresh(true);
+  }
   if (["login", "relogin", "fix", "login-cancel", "login-code"].includes(act)) return loginAction(el, account);
   if (act === "remove" && el.dataset.armed !== "yes") {
     // Two presses, so a slip does not drop a login.
@@ -838,6 +968,8 @@ async function refresh(force = false) {
       optional("stats", "/stats"),
       optional("config", "/config"),
       optional("team", "/team"),
+      optional("agents", "/harnesses"),
+      state.providers.length ? null : optional("providers", "/providers"),
       optional("remotePolicy", "/policies"),
     ]);
     if (state.loginItem === null) {
@@ -886,7 +1018,7 @@ $("pool").addEventListener("click", (e) => {
   if (e.target.matches("a[data-act]")) e.preventDefault();
   if (e.target.matches("button[data-act], a[data-act]")) poolAction(e.target);
 });
-$("pool").addEventListener("change", (e) => e.target.matches("input[data-act]") && poolAction(e.target));
+$("pool").addEventListener("change", (e) => e.target.matches("input[data-act], select[data-act]") && poolAction(e.target));
 // Enter in the email field starts the sign-in.
 $("pool").addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;

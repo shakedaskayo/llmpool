@@ -73,6 +73,7 @@ fn start(w: &World, cwd: &str, account: Option<&str>) -> Value {
         pid: std::process::id(),
         account: account.map(Into::into),
         tag: None,
+        ..StartReq::default()
     };
     w.daemon.start_session(req).unwrap()
 }
@@ -357,6 +358,7 @@ fn sessions_of_dead_launchers_are_cleaned_up_and_state_survives_restart() {
         pid: 999_999_999,
         account: Some("a@x.io".into()),
         tag: None,
+        ..StartReq::default()
     };
     let reply = w.daemon.start_session(req).unwrap();
     let dir = PathBuf::from(reply["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap());
@@ -637,6 +639,7 @@ fn a_session_lives_as_long_as_its_agent_not_its_launcher() {
         pid: 999_999_999,
         account: Some("a@x.io".into()),
         tag: None,
+        ..StartReq::default()
     };
     // Registered and re-pointed at the agent before anything reaps it.
     let reply = w.daemon.start_session(req).unwrap();
@@ -1140,6 +1143,7 @@ fn accounts_come_over_from_claude_swap() {
         pid: std::process::id(),
         account: Some("two@x.io".into()),
         tag: None,
+        ..StartReq::default()
     };
     let reply = daemon.start_session(req).unwrap();
     let profile = Profile::at(&PathBuf::from(
@@ -1513,6 +1517,7 @@ fn a_login_in_a_running_session_is_not_renewed_behind_its_back() {
         pid: std::process::id(),
         account: Some("idle@x.io".into()),
         tag: None,
+        ..StartReq::default()
     };
     daemon.start_session(req).unwrap();
     daemon.renew_idle();
@@ -2109,4 +2114,142 @@ fn the_advisors_two_views_of_switching_are_read_together() {
         w.daemon.list_sessions().unwrap()[0]["picked_by"],
         "advisor, 73% sure"
     );
+}
+
+// ---- agents other than Claude Code ------------------------------------------
+
+fn id_token(email: &str) -> String {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(json!({ "email": email }).to_string());
+    format!("h.{payload}.s")
+}
+
+fn codex_login(dir: &Path, email: &str, refresh: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let auth = json!({"tokens": {"id_token": id_token(email), "refresh_token": refresh}});
+    std::fs::write(dir.join("auth.json"), auth.to_string()).unwrap();
+}
+
+fn exec_req(agent: &str, account: Option<&str>) -> StartReq {
+    StartReq {
+        cwd: "/w".into(),
+        pid: std::process::id(),
+        account: account.map(Into::into),
+        agent: Some(agent.into()),
+        ..StartReq::default()
+    }
+}
+
+#[test]
+fn another_agents_logins_are_pooled_and_each_session_gets_its_own() {
+    use llmpool_daemon::FilesReq;
+    let w = world();
+    let codex = w.home.join(".codex");
+    // Two logins: one captured and then replaced by the other, as a person
+    // signing in to a second account would leave things.
+    codex_login(&codex, "work@x.io", "r-work");
+    std::fs::write(codex.join("config.toml"), "model = 'x'").unwrap();
+    let files = |label: Option<&str>| FilesReq {
+        harness: "codex".into(),
+        label: label.map(Into::into),
+        ..FilesReq::default()
+    };
+    let work = w.daemon.capture_files(files(None)).unwrap();
+    assert_eq!(work["label"], "work@x.io");
+    assert_eq!(work["provider"], "codex");
+    codex_login(&codex, "home@x.io", "r-home");
+    // Claude Code is logged in under the same address; this one says whose it is.
+    let home = w.daemon.capture_files(files(None)).unwrap();
+    assert_eq!(home["label"], "codex:home@x.io");
+
+    // The login codex has now runs where codex always runs.
+    let own = w
+        .daemon
+        .start_session(exec_req("codex", Some("codex:home@x.io")))
+        .unwrap();
+    assert!(own["env"].get("CODEX_HOME").is_none());
+
+    // The other one gets a directory of its own: its login, and links to
+    // everything else codex keeps.
+    let other = w
+        .daemon
+        .start_session(exec_req("codex", Some("work@x.io")))
+        .unwrap();
+    let dir = PathBuf::from(other["env"]["CODEX_HOME"].as_str().unwrap());
+    let auth: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(auth["tokens"]["refresh_token"], "r-work");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+        "model = 'x'"
+    );
+    assert!(dir.join("config.toml").is_symlink());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(dir.join("auth.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    // A second session on it shares that directory rather than copying a
+    // login that renews itself.
+    let again = w
+        .daemon
+        .start_session(exec_req("codex", Some("work@x.io")))
+        .unwrap();
+    assert_eq!(again["env"]["CODEX_HOME"], other["env"]["CODEX_HOME"]);
+
+    // The agent renews its token while it runs; when the last session ends
+    // the new one is kept and the directory goes.
+    codex_login(&dir, "work@x.io", "r-work-2");
+    w.daemon.end_session(other["session_id"].as_str().unwrap());
+    assert!(dir.exists());
+    w.daemon.end_session(again["session_id"].as_str().unwrap());
+    assert!(!dir.exists());
+    let kept = FileVault(w.data.join("vault"))
+        .get(work["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(kept.contains("r-work-2"));
+
+    // With no account named, an agent with logins in the pool runs on one of
+    // them; one without runs on the key it reads, or says what is missing.
+    let any = w.daemon.start_session(exec_req("codex", None)).unwrap();
+    assert_eq!(any["account"]["provider"], "codex");
+    assert_eq!(
+        w.daemon
+            .start_session(exec_req("grok", None))
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert_eq!(
+        w.daemon
+            .start_session(exec_req("some-unknown-agent", None))
+            .unwrap_err()
+            .status,
+        400
+    );
+
+    // Claude Code's bookkeeping never mistakes these for its own logins.
+    let claude = start(&w, "/w", Some("a@x.io"));
+    let sid = claude["session_id"].as_str().unwrap();
+    assert_eq!(
+        w.daemon.swap_session(sid, "work@x.io").unwrap_err().status,
+        409
+    );
+    let listed = w.daemon.harnesses().unwrap();
+    let row = listed["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "codex")
+        .unwrap()
+        .clone();
+    assert_eq!(row["login_as"], "home@x.io");
+    assert_eq!(row["login_in_pool"], true);
 }

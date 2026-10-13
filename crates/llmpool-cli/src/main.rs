@@ -63,6 +63,27 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Run any agent (codex, gemini, grok, opencode, aider, ...) on a key
+    /// from the pool
+    Exec {
+        /// Use this account
+        #[arg(long, conflicts_with = "tag")]
+        account: Option<String>,
+        /// Use the least busy account with this tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Whose key the agent needs, when its name does not say
+        #[arg(long)]
+        provider: Option<String>,
+        /// The command to run and its arguments
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// The coding agents llmpool can start, and what it found of each
+    Agents {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show running sessions
     Sessions {
         #[arg(long)]
@@ -226,6 +247,31 @@ enum AddAgent {
         #[arg(long)]
         interactive: bool,
     },
+    /// The login another agent (codex, opencode, ...) has now
+    Login {
+        agent: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Sign the agent in to another account first, without touching the
+        /// login it has now
+        #[arg(long)]
+        new: bool,
+    },
+    /// A key for any provider (openai, xai, gemini, anthropic, openrouter,
+    /// bedrock, ...): typed or piped, never an argument
+    Key {
+        provider: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// The variable the agent reads the key from, for a provider llmpool
+        /// does not know; repeat for several
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -235,11 +281,15 @@ enum InstallAgent {
         #[arg(long)]
         shim: bool,
     },
+    /// Make the plain command of every other agent with an account in the
+    /// pool (codex, opencode, ...) start through the pool
+    Agents,
 }
 
 #[derive(Subcommand)]
 enum UninstallAgent {
     Claude,
+    Agents,
 }
 
 #[derive(Subcommand)]

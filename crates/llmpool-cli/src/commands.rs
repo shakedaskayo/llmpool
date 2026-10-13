@@ -97,6 +97,37 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             interactive,
             code,
         }),
+        Command::Add {
+            agent:
+                AddAgent::Key {
+                    provider,
+                    label,
+                    tags,
+                    env,
+                },
+        } => add_key(&provider, label, tags, env),
+        Command::Add {
+            agent:
+                AddAgent::Login {
+                    agent,
+                    label,
+                    tags,
+                    new,
+                },
+        } => add_login(&agent, label, tags, new),
+        Command::Agents { json } => agents(json),
+        Command::Install {
+            agent: InstallAgent::Agents,
+        } => shim_agents(true),
+        Command::Uninstall {
+            agent: UninstallAgent::Agents,
+        } => shim_agents(false),
+        Command::Exec {
+            account,
+            tag,
+            provider,
+            command,
+        } => exec(account, tag, provider, command),
         Command::Login { account } => login_again(&account),
         Command::Doctor => doctor(),
         Command::Advisor { command } => advisor(command),
@@ -487,7 +518,7 @@ fn list(as_json: bool) -> Result<ExitCode, String> {
         })
         .collect();
     if rows.is_empty() {
-        return done("no accounts yet; add one with `llmpool add claude --from-current`".into());
+        return done("no accounts yet; add one with `llmpool add claude --from-current`, `llmpool add login <agent>` or `llmpool add key <provider>`".into());
     }
     done(table(
         &["ACCOUNT", "TAGS", "5H", "7D", "STATE", "SESSIONS"],
@@ -642,6 +673,281 @@ fn run_agent(
     }
     let status = status.map_err(|e| format!("could not run `{}`: {e}", agent_bin()))?;
     Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+/// Add a key account: the key is typed without echo or piped, one line per
+/// variable, never an argument.
+fn add_key(
+    provider: &str,
+    label: Option<String>,
+    tags: Vec<String>,
+    names: Vec<String>,
+) -> Result<ExitCode, String> {
+    let names: Vec<String> = if names.is_empty() {
+        llmpool_core::providers::env_of(provider)
+            .ok_or_else(|| {
+                format!(
+                    "llmpool does not know which variables `{provider}` reads; name them with --env, e.g. --env {}_API_KEY",
+                    provider.to_uppercase().replace('-', "_")
+                )
+            })?
+            .iter()
+            .map(|n| n.to_string())
+            .collect()
+    } else {
+        names
+    };
+    let typed = std::io::stdin().is_terminal();
+    let piped = if typed { String::new() } else { stdin_text() };
+    let mut lines = piped.lines();
+    let mut env = serde_json::Map::new();
+    for name in names {
+        let value = if typed {
+            rpassword::prompt_password(format!("{name}: ")).map_err(|e| e.to_string())?
+        } else {
+            lines.next().unwrap_or_default().to_string()
+        };
+        if value.trim().is_empty() {
+            return Err(format!("no value was given for {name}"));
+        }
+        env.insert(name, json!(value.trim()));
+    }
+    let account = connect()?.call(
+        "POST",
+        "/accounts/key",
+        Some(json!({"provider": provider, "label": label, "tags": tags, "env": env})),
+    )?;
+    done(format!(
+        "added {} ({provider}). Start an agent on it with `llmpool exec --provider {provider} -- <command>`.",
+        account["label"].as_str().unwrap_or(provider)
+    ))
+}
+
+/// Run any agent on a key from the pool.
+fn exec(
+    account: Option<String>,
+    tag: Option<String>,
+    provider: Option<String>,
+    command: Vec<String>,
+) -> Result<ExitCode, String> {
+    let program = command
+        .first()
+        .ok_or("say which command to run, after `--`")?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let client = connect()?;
+    let reply = client.call(
+        "POST",
+        "/sessions",
+        Some(json!({
+            "cwd": cwd, "git_remote": git_remote(&cwd), "pid": std::process::id(),
+            "account": account, "tag": tag, "provider": provider, "agent": program,
+        })),
+    )?;
+    let sid = reply["session_id"].as_str().unwrap_or_default().to_string();
+    let end = |client: &Client| {
+        let _ = client.call("DELETE", &format!("/sessions/{sid}"), None);
+    };
+    let Some(label) = reply["account"]["label"].as_str() else {
+        end(&client);
+        return Err("no account was chosen for this session; name one with --account".into());
+    };
+    let rule = reply["rule"]
+        .as_str()
+        .map(|r| format!(" (rule \"{r}\")"))
+        .unwrap_or_default();
+    eprintln!("llmpool: running {program} on {label}{rule}");
+    let mut child = std::process::Command::new(program);
+    child.args(&command[1..]);
+    for (key, value) in reply["env"].as_object().into_iter().flatten() {
+        child.env(key, value.as_str().unwrap_or_default());
+    }
+    let status = child.spawn().and_then(|mut child| {
+        let _ = client.call(
+            "POST",
+            &format!("/sessions/{sid}/pid"),
+            Some(json!({"pid": child.id()})),
+        );
+        child.wait()
+    });
+    end(&client);
+    let status = status.map_err(|e| format!("could not run `{program}`: {e}"))?;
+    Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+/// Add the login another agent has, or sign that agent in to a new account
+/// in a directory of its own and take the login from there.
+fn add_login(
+    agent: &str,
+    label: Option<String>,
+    tags: Vec<String>,
+    new: bool,
+) -> Result<ExitCode, String> {
+    let client = connect()?;
+    let mut request = json!({"harness": agent, "label": label, "tags": tags});
+    let mut scratch = None;
+    if new {
+        let listed = client.call("GET", "/harnesses", None)?;
+        let harness =
+            llmpool_core::harness::load(Path::new(listed["file"].as_str().unwrap_or_default()))?
+                .into_iter()
+                .find(|h| h.name == agent)
+                .ok_or_else(|| format!("llmpool knows no agent called `{agent}`"))?;
+        let login = harness.login.ok_or_else(|| {
+            format!(
+                "{} has no login of its own; use `llmpool add key`",
+                harness.title
+            )
+        })?;
+        if login.login_args.is_empty() {
+            return Err(format!(
+                "llmpool does not know how {} signs in; sign in with it, then run this without --new",
+                harness.title
+            ));
+        }
+        let dir = data_dir().join(format!("login-{agent}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        eprintln!(
+            "Signing in with {}. Finish in your browser or in the prompts below.",
+            harness.title
+        );
+        let status = std::process::Command::new(&harness.command)
+            .args(&login.login_args)
+            .env(&login.home_env, &dir)
+            .status()
+            .map_err(|e| format!("could not run `{}`: {e}", harness.command));
+        if !matches!(&status, Ok(s) if s.success()) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(status
+                .err()
+                .unwrap_or_else(|| "the sign-in did not finish".into()));
+        }
+        request["home"] = json!(dir);
+        scratch = Some(dir);
+    }
+    let added = client.call("POST", "/accounts/files", Some(request));
+    if let Some(dir) = scratch {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let added = added?;
+    eprintln!("{TERMS_NOTICE}");
+    done(format!(
+        "added {}. Start {agent} on it with `llmpool exec --account '{}' -- {agent}`.",
+        added["label"].as_str().unwrap_or(agent),
+        added["label"].as_str().unwrap_or(agent),
+    ))
+}
+
+fn agents(as_json: bool) -> Result<ExitCode, String> {
+    let listed = connect()?.call("GET", "/harnesses", None)?;
+    if as_json {
+        return done(listed.to_string());
+    }
+    if let Some(error) = listed["error"].as_str() {
+        eprintln!("llmpool: {error}; only the built-in agents are listed");
+    }
+    let mut rows = vec![vec![
+        "claude".to_string(),
+        "Claude Code".to_string(),
+        "its own logins".to_string(),
+        "live switching, usage, hooks; `llmpool run`".to_string(),
+    ]];
+    for h in listed["harnesses"].as_array().into_iter().flatten() {
+        let text = |name: &str| h[name].as_str().unwrap_or_default();
+        let runs_on = match (h["has_login"] == true, text("provider")) {
+            (true, "") => "its own logins, any key".to_string(),
+            (true, provider) => format!("its own logins, {provider} keys"),
+            (false, "") => "any key (--provider)".to_string(),
+            (false, provider) => format!("{provider} keys"),
+        };
+        let state = match (
+            h["installed"] == true,
+            h["logged_in"] == true,
+            h["login_in_pool"] == true,
+        ) {
+            (false, ..) => "not installed".to_string(),
+            (true, true, false) => format!(
+                "signed in{}, not in the pool: `llmpool add login {}`",
+                h["login_as"]
+                    .as_str()
+                    .map(|a| format!(" as {a}"))
+                    .unwrap_or_default(),
+                text("name")
+            ),
+            _ => format!(
+                "{} account(s); `llmpool exec -- {}`",
+                h["accounts"],
+                text("command")
+            ),
+        };
+        rows.push(vec![
+            text("name").into(),
+            text("title").into(),
+            runs_on,
+            state,
+        ]);
+    }
+    println!(
+        "{}",
+        table(&["AGENT", "", "RUNS ON", "ON THIS MACHINE"], rows)
+    );
+    done(format!(
+        "Another agent: describe it in {}",
+        listed["file"].as_str().unwrap_or_default()
+    ))
+}
+
+const AGENTS_BEGIN: &str = "# >>> llmpool agents >>>";
+const AGENTS_END: &str = "# <<< llmpool agents <<<";
+
+/// Make the plain command of every agent that has an account in the pool go
+/// through the pool, or take that back out.
+fn shim_agents(install: bool) -> Result<ExitCode, String> {
+    let rc = shell_rc()?;
+    let text = without_block(
+        &std::fs::read_to_string(&rc).unwrap_or_default(),
+        AGENTS_BEGIN,
+        AGENTS_END,
+    );
+    if !install {
+        std::fs::write(&rc, text).map_err(|e| format!("{}: {e}", rc.display()))?;
+        return done(format!(
+            "removed llmpool's agent functions from {}",
+            rc.display()
+        ));
+    }
+    let listed = connect()?.call("GET", "/harnesses", None)?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = exe.to_string_lossy().replace('\'', "'\\''");
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    let names: Vec<&str> = listed["harnesses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|h| h["installed"] == true && h["accounts"].as_u64().unwrap_or(0) > 0)
+        .filter_map(|h| h["command"].as_str())
+        .filter(|c| plain(c))
+        .collect();
+    if names.is_empty() {
+        return Err("no agent other than Claude Code has an account in the pool yet; add one with `llmpool add key` or `llmpool add login`".into());
+    }
+    let functions: String = names
+        .iter()
+        .map(|name| format!("{name}() {{ '{exe}' exec -- {name} \"$@\"; }}\n"))
+        .collect();
+    std::fs::write(
+        &rc,
+        format!("{text}{AGENTS_BEGIN}\n{functions}{AGENTS_END}\n"),
+    )
+    .map_err(|e| format!("{}: {e}", rc.display()))?;
+    done(format!(
+        "{} now start through the pool; open a new terminal to use them ({})",
+        names.join(", "),
+        rc.display()
+    ))
 }
 
 fn sessions(as_json: bool) -> Result<ExitCode, String> {
@@ -986,12 +1292,16 @@ fn shell_rc() -> Result<PathBuf, String> {
 
 /// The rc file's text with llmpool's block removed.
 fn without_shim(text: &str) -> String {
+    without_block(text, SHIM_BEGIN, SHIM_END)
+}
+
+fn without_block(text: &str, begin_mark: &str, end_mark: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let begin = lines.iter().position(|l| l.trim() == SHIM_BEGIN);
+    let begin = lines.iter().position(|l| l.trim() == begin_mark);
     let end = begin.and_then(|b| {
         lines[b..]
             .iter()
-            .position(|l| l.trim() == SHIM_END)
+            .position(|l| l.trim() == end_mark)
             .map(|e| b + e)
     });
     // A begin marker with no end is not our block; touching it could eat the

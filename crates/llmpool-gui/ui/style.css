@@ -176,3 +176,8 @@ pre.log { margin: 10px 0 0; padding: 10px; background: var(--bg); border: 1px so
 
 ol.teamrules { margin: 6px 0 0; padding-left: 22px; }
 ol.teamrules li { padding: 2px 0; }
+
+.seg { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.badge.provider { border-color: transparent; background: var(--bg); }
+.callout table td, .callout table th { border-bottom-color: transparent; padding-top: 4px; padding-bottom: 4px; }
+.callout select { max-width: 200px; }

@@ -180,6 +180,7 @@ fn start_on(m: &Machine, account: &str) -> Value {
         pid: std::process::id(),
         account: Some(account.into()),
         tag: None,
+        ..StartReq::default()
     };
     m.daemon.start_session(req).unwrap()
 }
@@ -350,6 +351,7 @@ fn a_key_connects_and_a_login_in_use_is_not_lent_twice() {
             pid: std::process::id(),
             account: Some("a@x.io".into()),
             tag: None,
+            ..StartReq::default()
         })
         .is_err());
     // Ann herself keeps it, and cannot leave while she runs on it.
@@ -396,4 +398,83 @@ fn a_persons_own_login_is_never_replaced_by_a_lent_one() {
     )
     .unwrap();
     assert_eq!(kept.oauth["refreshToken"], "r-mine-1");
+}
+
+#[test]
+fn keys_for_other_providers_are_lent_and_run_any_agent() {
+    use llmpool_daemon::KeyReq;
+    let pool = machine(&[]);
+    let key = |provider: &str, env: &[(&str, &str)]| KeyReq {
+        provider: provider.into(),
+        label: None,
+        tags: vec![],
+        env: env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    };
+    pool.daemon
+        .add_key(key("xai", &[("XAI_API_KEY", "xai-secret")]))
+        .unwrap();
+    // An account may not set variables that change what the agent runs.
+    for bad in [
+        "PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        assert_eq!(
+            pool.daemon
+                .add_key(key("evil", &[(bad, "x")]))
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert!(pool
+        .daemon
+        .add_key(key("claude", &[("X_API_KEY", "x")]))
+        .is_err());
+
+    let idp = provider();
+    let (_serving, url) = serve(&pool, &idp, false);
+    let ann = machine(&[("ann@x.io", "ann-1")]);
+    ann.daemon.team_connect(&url, Some(KEY)).unwrap();
+    assert_eq!(accounts(&ann)["xai"]["shared"], true);
+
+    // Any agent on that provider starts with the key in its environment.
+    let req = StartReq {
+        cwd: "/w".into(),
+        pid: std::process::id(),
+        provider: Some("xai".into()),
+        agent: Some("grok".into()),
+        ..StartReq::default()
+    };
+    let started = ann.daemon.start_session(req).unwrap();
+    assert_eq!(started["env"]["XAI_API_KEY"], "xai-secret");
+    assert_eq!(started["account"]["label"], "xai");
+    assert!(started["env"].get("CLAUDE_CONFIG_DIR").is_none());
+
+    // A Claude Code session never lands on a key, and a key session cannot
+    // be moved under the running agent.
+    let claude = start_on(&ann, "ann@x.io");
+    let sid = claude["session_id"].as_str().unwrap();
+    assert_eq!(ann.daemon.swap_session(sid, "xai").unwrap_err().status, 409);
+    let keyed = started["session_id"].as_str().unwrap();
+    assert_eq!(
+        ann.daemon
+            .swap_session(keyed, "ann@x.io")
+            .unwrap_err()
+            .status,
+        409
+    );
+
+    // Without any account of the provider there is nothing to start on.
+    let none = StartReq {
+        cwd: "/w".into(),
+        pid: std::process::id(),
+        provider: Some("openai".into()),
+        ..StartReq::default()
+    };
+    assert_eq!(ann.daemon.start_session(none).unwrap_err().status, 409);
 }

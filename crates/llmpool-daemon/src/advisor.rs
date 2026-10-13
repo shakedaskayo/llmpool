@@ -203,7 +203,10 @@ impl Daemon {
         accounts
             .iter()
             .filter(|a| {
-                a.usable() && m.session.account_id.as_ref() != Some(&a.id) && a.peak_used() < 100.0
+                a.usable()
+                    && a.provider == m.session.provider
+                    && m.session.account_id.as_ref() != Some(&a.id)
+                    && a.peak_used() < 100.0
             })
             .filter(|a| {
                 self.holders_given(g, a, &default)
