@@ -311,6 +311,22 @@ impl TeamServer {
                 };
                 (token.to_string(), default_base.clone())
             } else {
+                // A key goes where keys of its own provider go, which is not
+                // always where the provider asked for lives.
+                let default_base = if account.provider == provider {
+                    default_base.clone()
+                } else {
+                    match self
+                        .config
+                        .upstreams
+                        .get(&account.provider)
+                        .cloned()
+                        .or_else(|| providers::upstream_of(&account.provider).map(str::to_string))
+                    {
+                        Some(base) => base,
+                        None => continue,
+                    }
+                };
                 // One entry that cannot be read is that account's trouble only.
                 let Some(env) = d
                     .vault
@@ -329,9 +345,15 @@ impl TeamServer {
                 let Some(key) = ends(&["_API_KEY", "_KEY", "_TOKEN"]) else {
                     continue;
                 };
+                let moved = ends(&["_BASE_URL", "_API_BASE", "_ENDPOINT"]);
+                // A key with an address of its own may be another vendor's:
+                // a Claude session is not sent there unasked.
+                if account.provider != provider && moved.is_some() {
+                    continue;
+                }
                 (
                     key,
-                    ends(&["_BASE_URL", "_API_BASE", "_ENDPOINT"]).map_or_else(
+                    moved.map_or_else(
                         || default_base.clone(),
                         |b| b.trim_end_matches('/').to_string(),
                     ),
@@ -515,7 +537,9 @@ impl TeamServer {
                 .as_ref()
                 .and_then(|id| candidates.iter().find(|a| &a.id == id))
                 .is_none_or(|a| a.peak_used() >= ASK_ABOVE);
-            if candidates.len() < 2 || !busy || !d.spend_call(&mut g, &policy) {
+            // With nowhere roomier to send them there is nothing to ask.
+            let room = candidates.iter().any(|a| a.peak_used() < CEILING);
+            if candidates.len() < 2 || !busy || !room || !d.spend_call(&mut g, &policy) {
                 return;
             }
             state.asked.insert(pair.clone(), t);
@@ -721,9 +745,18 @@ impl TeamServer {
                 }
                 ("anthropic", _) => {
                     let call = call.set("x-api-key", &upstream.credential);
-                    match &beta {
-                        Some(beta) => call.set("anthropic-beta", beta),
-                        None => call,
+                    // What only a subscription login may ask for stays behind.
+                    let betas: Vec<&str> = beta
+                        .as_deref()
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|b| !b.is_empty() && !b.starts_with("oauth-"))
+                        .collect();
+                    if betas.is_empty() {
+                        call
+                    } else {
+                        call.set("anthropic-beta", &betas.join(","))
                     }
                 }
                 ("gemini", _) => call.set("x-goog-api-key", &upstream.credential),

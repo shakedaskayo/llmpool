@@ -1572,6 +1572,8 @@ fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() 
     use llmpool_daemon::team_server::otlp::Otlp;
     use llmpool_daemon::KeyReq;
     let provider = upstream();
+    // Keys go through another door than subscriptions do.
+    let key_door = upstream();
     // A collector that keeps what it is sent.
     let collector = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let collector_url = format!(
@@ -1613,7 +1615,7 @@ fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() 
         gateway: true,
         upstreams: [
             ("claude".to_string(), provider.url.clone()),
-            ("anthropic".to_string(), provider.url.clone()),
+            ("anthropic".to_string(), key_door.url.clone()),
         ]
         .into(),
         otlp: Some(Otlp {
@@ -1625,6 +1627,7 @@ fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() 
     let ask = || {
         ureq::post(&format!("{url}/gateway/claude/v1/messages"))
             .set("Authorization", &format!("Bearer {KEY}"))
+            .set("anthropic-beta", "oauth-2025-04-20,tools-1")
             .send_json(json!({"model": "m-9", "messages": []}))
             .unwrap()
             .status()
@@ -1634,10 +1637,16 @@ fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() 
     assert_eq!(ask(), 200);
     assert_eq!(ask(), 200);
     let seen = provider.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the key was shown to the subscriptions' door"
+    );
     assert_eq!(seen[0]["authorization"], "Bearer a-1");
-    assert_eq!(seen[1]["x-api-key"], "sk-over");
-    assert!(!seen[1].contains_key("authorization"));
-    assert!(!seen[1]
+    let seen = key_door.seen.lock().unwrap().clone();
+    assert_eq!(seen[0]["x-api-key"], "sk-over");
+    assert!(!seen[0].contains_key("authorization"));
+    assert!(!seen[0]
         .get("anthropic-beta")
         .is_some_and(|b| b.contains("oauth")));
 

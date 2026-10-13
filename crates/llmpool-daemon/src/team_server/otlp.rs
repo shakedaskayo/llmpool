@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where spans go, and the headers the collector asks for.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -27,7 +27,11 @@ impl Otlp {
             .split(',')
             .filter_map(|pair| {
                 let (name, value) = pair.split_once('=')?;
-                Some((name.trim().to_string(), value.trim().to_string()))
+                // Values are written percent-encoded, as the convention has it.
+                Some((
+                    name.trim().to_string(),
+                    crate::http::percent_decode(value.trim()),
+                ))
             })
             .filter(|(name, _)| !name.is_empty())
             .collect();
@@ -71,16 +75,20 @@ pub(super) fn span(line: &Value) -> Value {
 /// retry queue if spans must survive a collector restart.
 pub(super) fn start(to: Otlp) -> SyncSender<Value> {
     let (send, receive) = sync_channel::<Value>(4096);
+    eprintln!("llmpool: gateway spans go to {}/v1/traces", to.endpoint);
     std::thread::spawn(move || {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
             .build();
         let mut spans = Vec::new();
+        let every = Duration::from_secs(2);
+        let mut sent = Instant::now();
         loop {
-            let closed = match receive.recv_timeout(Duration::from_secs(2)) {
+            let closed = match receive.recv_timeout(every.saturating_sub(sent.elapsed())) {
                 Ok(line) => {
                     spans.push(span(&line));
-                    if spans.len() < 200 {
+                    // Under steady traffic too: the clock, not a lull, sends.
+                    if spans.len() < 200 && sent.elapsed() < every {
                         continue;
                     }
                     false
@@ -88,6 +96,7 @@ pub(super) fn start(to: Otlp) -> SyncSender<Value> {
                 Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => true,
             };
+            sent = Instant::now();
             if !spans.is_empty() {
                 let mut call = agent.post(&format!("{}/v1/traces", to.endpoint));
                 for (name, value) in &to.headers {
@@ -120,7 +129,7 @@ mod tests {
     fn the_standard_variables_say_where_spans_go() {
         let var = |name: &str| match name {
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(" https://otel.example/ ".to_string()),
-            "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer x, x-team=a".to_string()),
+            "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer%20x, x-team=a".to_string()),
             _ => None,
         };
         let to = Otlp::from_env(var).unwrap();

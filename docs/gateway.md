@@ -62,7 +62,7 @@ Who, which account, which model, how long, how many tokens. Never what was said:
 
 ### To your own tracing
 
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` (the chart's `gateway.otlp.endpoint`) and every request is also sent to your OpenTelemetry collector as a span, over OTLP/HTTP, a batch every couple of seconds. `OTEL_EXPORTER_OTLP_HEADERS` (`name=value,name=value`; the chart's `gateway.otlp.headers`) carries whatever the collector asks for. A span is named `chat <model>` and carries `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `http.response.status_code`, `llmpool.member`, `llmpool.account` and `llmpool.attempts`. A collector that is slow or away loses spans and slows no request; the file on the server still has every line.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (the chart's `gateway.otlp.endpoint`) and every request is also sent to your OpenTelemetry collector as a span, over OTLP/HTTP, a batch every couple of seconds. `OTEL_EXPORTER_OTLP_HEADERS` (`name=value,name=value`; the chart's `gateway.otlp.headers`) carries whatever the collector asks for, values percent-encoded as that variable always is (`authorization=Bearer%20...`). A span is named `chat <model>` and carries `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `http.response.status_code`, `llmpool.member`, `llmpool.account` and `llmpool.attempts`. A collector that is slow or away loses spans and slows no request; the file on the server still has every line.
 
 ## How much it carries
 
@@ -72,7 +72,7 @@ The server is one process, on purpose. A subscription login has a refresh token 
 
 ## Subscriptions first, a key when they are full
 
-Add an Anthropic API key to the pool beside the subscription logins (`llmpool add key anthropic --to-team`, or the server's page) and Claude sessions overflow to it: requests run on subscriptions while one has room, and on the key only when every subscription is past 90% or cooling. A pool with nothing but a key carries Claude sessions on the key.
+Add an Anthropic API key to the pool beside the subscription logins (`llmpool add key anthropic --to-team`, or the server's page) and Claude sessions overflow to it: requests run on subscriptions while one has room, and on the key only when every subscription is past 90% or cooling. A pool with nothing but a key carries Claude sessions on the key. The key is sent where Anthropic keys go (`LLMPOOL_UPSTREAM_ANTHROPIC` if you moved it), never to the subscriptions' address; a key stored with an address of its own is left out, since it may be another vendor's.
 
 ## What changes for Claude Code
 
