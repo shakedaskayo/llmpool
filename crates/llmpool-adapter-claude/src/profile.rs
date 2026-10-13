@@ -35,6 +35,11 @@ pub trait Keychain: Send + Sync {
     fn get_for(&self, _service: &str, _account: &str) -> io::Result<Option<String>> {
         Ok(None)
     }
+    /// Store an item's text. `Ok(false)` means this Keychain does not take
+    /// writes (or not one this large), and the caller should use the file.
+    fn put(&self, _service: &str, _text: &str) -> io::Result<bool> {
+        Ok(false)
+    }
     fn delete(&self, service: &str);
 }
 
@@ -53,6 +58,8 @@ pub struct MacKeychain;
 
 /// `security`'s exit code for "no such item".
 const NOT_FOUND: i32 = 44;
+/// `security -i` reads each command into a buffer of about this size.
+const MAX_LINE: usize = 4000;
 /// A locked Keychain asks the user; nothing here may wait on that forever.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -103,6 +110,48 @@ impl Keychain for MacKeychain {
 
     fn get_for(&self, service: &str, account: &str) -> io::Result<Option<String>> {
         Self::find(&["-s", service, "-a", account])
+    }
+
+    /// Written the way Claude Code writes it: through `security`, under the
+    /// user's own name, the text on standard input so it is never an argument.
+    fn put(&self, service: &str, text: &str) -> io::Result<bool> {
+        use std::io::Write;
+        let user = std::env::var("USER").unwrap_or_default();
+        let plain = |t: &str| {
+            !t.is_empty()
+                && t.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c))
+        };
+        let hex: String = text.bytes().map(|b| format!("{b:02x}")).collect();
+        let line = format!("add-generic-password -U -a \"{user}\" -s \"{service}\" -X {hex}\n");
+        // `security -i` reads a command into a fixed buffer; a credential with
+        // many MCP logins can outgrow it, and then the file is the safe place.
+        if !plain(&user) || !plain(service) || line.len() > MAX_LINE {
+            return Ok(false);
+        }
+        let mut child = std::process::Command::new("/usr/bin/security")
+            .arg("-i")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(line.as_bytes());
+        }
+        let start = std::time::Instant::now();
+        while child.try_wait()?.is_none() {
+            if start.elapsed() > PATIENCE {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the Keychain did not answer; unlock it and try again",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Interactive mode reports nothing; only reading it back tells.
+        Ok(self.get(service)?.as_deref() == Some(text))
     }
 
     fn delete(&self, service: &str) {
@@ -255,20 +304,37 @@ impl Profile {
 
         let mut credentials = object_or_empty(self.raw_credentials(keychain)?);
         credentials["claudeAiOauth"] = secret.oauth.clone();
-        let previous = std::fs::read(self.credentials_path()).ok();
-        write_private(&self.credentials_path(), &credentials)?;
+        let before = (
+            keychain.get(&self.service)?,
+            std::fs::read(self.credentials_path()).ok(),
+        );
+
+        // The login goes where Claude Code itself keeps it: the Keychain when
+        // there is one, the file otherwise. Never both, or one shadows the other.
+        let in_keychain = keychain.put(&self.service, &serde_json::to_string(&credentials)?)?;
+        if in_keychain {
+            let _ = std::fs::remove_file(self.credentials_path());
+        } else {
+            write_private(&self.credentials_path(), &credentials)?;
+            keychain.delete(&self.service);
+        }
         if let Err(e) = self.write_identity(secret) {
             // One account's token beside another's identity is worse than no
-            // change at all: put the credential file back as it was.
-            match previous {
+            // change at all: put the login back exactly as it was.
+            match &before.0 {
+                Some(text) => {
+                    keychain.put(&self.service, text)?;
+                }
+                None => keychain.delete(&self.service),
+            }
+            match before.1 {
                 Some(bytes) => std::fs::write(self.credentials_path(), bytes)?,
-                None => std::fs::remove_file(self.credentials_path())?,
+                None => {
+                    let _ = std::fs::remove_file(self.credentials_path());
+                }
             }
             return Err(e);
         }
-        // A Keychain item would shadow the file we just wrote. Claude Code
-        // recreates the item itself the next time it saves this login.
-        keychain.delete(&self.service);
         Ok(())
     }
 
@@ -475,6 +541,56 @@ pub(crate) mod tests {
 
         std::fs::write(profile.credentials_path(), "{ damaged").unwrap();
         assert!(profile.read(&NoKeychain).is_err());
+    }
+
+    /// A Keychain that takes writes, as the real one does.
+    #[derive(Default)]
+    struct WritableKeychain(Mutex<HashMap<String, String>>);
+
+    impl Keychain for WritableKeychain {
+        fn get(&self, service: &str) -> io::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(service).cloned())
+        }
+        fn put(&self, service: &str, text: &str) -> io::Result<bool> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(service.to_string(), text.to_string());
+            Ok(true)
+        }
+        fn delete(&self, service: &str) {
+            self.0.lock().unwrap().remove(service);
+        }
+    }
+
+    #[test]
+    fn with_a_keychain_the_login_stays_in_the_keychain_and_no_file_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = Profile::default_in(dir.path());
+        let keychain = WritableKeychain::default();
+        // An earlier version left the login in a file; that must not linger.
+        profile
+            .write(&NoKeychain, &secret("old@x.io", "old"))
+            .unwrap();
+        assert!(profile.credentials_path().exists());
+
+        profile.write(&keychain, &secret("a@x.io", "a-1")).unwrap();
+        assert!(
+            !profile.credentials_path().exists(),
+            "a second, stale copy on disk"
+        );
+        assert_eq!(
+            profile.read(&keychain).unwrap(),
+            Some(secret("a@x.io", "a-1"))
+        );
+
+        // A write that cannot finish puts the Keychain item back as it was.
+        std::fs::remove_file(&profile.global_config).unwrap();
+        std::fs::create_dir(&profile.global_config).unwrap();
+        assert!(profile.write(&keychain, &secret("b@x.io", "b-1")).is_err());
+        let item: Value =
+            serde_json::from_str(&keychain.get(&profile.service).unwrap().unwrap()).unwrap();
+        assert_eq!(item["claudeAiOauth"]["accessToken"], "a-1");
     }
 
     #[test]
