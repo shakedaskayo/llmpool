@@ -358,3 +358,10 @@ a.buttonlike:hover { border-color: var(--muted); }
   .seg { display: flex; flex-wrap: wrap; max-width: 100%; }
   dialog .callout { overflow-x: visible; }
 }
+/* Old numbers stay marked as old however far the page has scrolled. */
+#offline { position: sticky; top: 0; z-index: 3; }
+@media (max-width: 720px) {
+  #offline { top: 64px; }
+  /* The chosen tab is not parked under the way out. */
+  .side { scroll-padding-right: 96px; }
+}

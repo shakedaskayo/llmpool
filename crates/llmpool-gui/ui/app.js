@@ -364,7 +364,7 @@ function renderPool() {
       ${addPanel()}
     </dialog>`;
   const dialog = $("add");
-  dialog.addEventListener("close", () => (state.adding = false));
+  dialog.onclose = () => (state.adding = false);
   if (state.adding && !dialog.open) dialog.showModal();
 }
 
@@ -398,7 +398,7 @@ function renderRequests() {
   const rows = r.requests
     .map((x) => `<tr><td class="muted">${new Date(x.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td><td>${esc(x.who)}</td><td><span class="agentname">${avatar(x.provider, x.provider)}${esc(x.account ?? "none")}</span></td><td class="muted">${esc(x.model ?? "")}</td>
         <td>${x.status < 400 ? `<span class="ok">${x.status}</span>` : `<span class="warnmark">${x.status}</span>`}${x.tried?.length ? ` <span class="badge" title="${esc(x.tried.join("; "))}">after ${plural(x.tried.length, "other")}</span>` : ""}</td>
-        <td class="muted">${n(x.input_tokens)} / ${n(x.output_tokens)}</td><td class="muted">${n(x.ms)} ms${x.streamed ? " · streamed" : ""}</td></tr>`)
+        <td class="muted">${n(x.input_tokens)} / ${n(x.output_tokens)}</td><td class="muted">${took(x.ms)}${x.streamed ? " · streamed" : ""}</td></tr>`)
     .join("");
   const decisions = r.decisions
     .map((d) => `<li><time>${new Date(d.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${d.moved ? "swap" : ""}" aria-hidden="true">${d.moved ? "⇄" : "·"}</span><span>${
@@ -465,7 +465,7 @@ function renderSessions() {
           : a.switch == null
             ? `<div class="muted">decision model: asking…</div>`
             : `<div class="muted">decision model: ${Math.round(a.switch * 100)}% for switching${a.target ? ` to ${esc(a.target)}` : ""}${a.acted ? " · switched" : ""}</div>`;
-      const ask = state.config.advisor_enabled && state.config.has_key && s.store ? ` <button class="quiet" data-act="advise" data-id="${esc(s.id)}">Ask advisor</button>` : "";
+      const ask = state.config.advisor_enabled && state.config.has_key && s.store ? ` <button class="quiet" data-act="advise" data-id="${esc(s.id)}">Ask the decision model</button>` : "";
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
       const agent = isClaude ? "Claude Code" : agentTitle(s.agent);
       const usage = isClaude
@@ -1156,6 +1156,8 @@ async function poolAction(el) {
   if (act === "add-open" || act === "add-close") {
     state.adding = act === "add-open";
     state.addBaseline = state.accounts.map((a) => a.id);
+    // Closed by hand: a drawing that has not changed is not made again.
+    if (!state.adding) $("add")?.close();
     return renderPool();
   }
   if (act === "add-kind") {
@@ -1255,12 +1257,15 @@ const busy = () => {
   if (state.adding && state.addKind === "machine") return false;
   return (
     document.querySelector("dialog[open]") ||
-    (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName)) ||
-    // Something typed and not yet saved, or a press waiting for its second.
-    document.querySelector('main [data-dirty], main [data-armed="yes"]')
+    (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName) && active.type !== "checkbox") ||
+    document.querySelector('main [data-armed="yes"]') ||
+    // Something typed and not yet saved. The rules page keeps its own state
+    // and is never redrawn from here, so what is unsaved there holds nothing up.
+    [...document.querySelectorAll("main > section:not(#policies) :is(input:not([type=checkbox]):not([type=file]), textarea)")].some((el) => el.value !== el.defaultValue && !el.closest("dialog:not([open])"))
   );
 };
 let redrawing = false;
+let owed = false;
 // A page whose content has not changed is left as it is: focus, scrolling and
 // a half-made choice all survive a refresh that found nothing new.
 for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
@@ -1276,19 +1281,24 @@ for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
       // The control that had focus has it again in the new drawing.
       const had = page.contains(document.activeElement) ? document.activeElement : null;
       const key = had && ["act", "id", "email", "i", "name"].map((k) => had.dataset[k] ?? "").join("|");
-      const typed = new Map([...page.querySelectorAll("dialog input, dialog textarea")].filter((el) => el.value && (el.id || el.dataset.var)).map((el) => [el.id || el.dataset.var, el.value]));
+      // Only while the dialog is in use, and never a secret or a chosen file:
+      // those are typed again rather than carried about.
+      const fields = 'dialog[open] :is(input:not([type="password"]):not([type="file"]), textarea)';
+      const typed = new Map(state.adding ? [...page.querySelectorAll(fields)].filter((el) => el.value && (el.id || el.dataset.var)).map((el) => [el.id || el.dataset.var, el.value]) : []);
       html.set.call(page, (last = next));
-      for (const el of page.querySelectorAll("dialog input, dialog textarea")) if (!el.value && typed.has(el.id || el.dataset.var)) el.value = typed.get(el.id || el.dataset.var);
+      for (const el of page.querySelectorAll(fields.replace("[open]", ""))) if (!el.value && typed.has(el.id || el.dataset.var)) el.value = typed.get(el.id || el.dataset.var);
       // On a phone a row is a card: each cell says which column it was.
-      for (const table of page.querySelectorAll("table:has(thead)")) {
+      for (const table of page.querySelectorAll("table")) {
+        if (!table.tHead) continue;
         const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
         for (const row of table.tBodies[0]?.rows ?? []) [...row.cells].forEach((cell, i) => heads[i] && (cell.dataset.label = heads[i]));
       }
-      if (had?.dataset.act) [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
+      // A button gets its focus back. A select or a switch does not: its
+      // choice is made, and focus left there would hold the next refresh up.
+      if (had?.dataset.act && had.tagName === "BUTTON") [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
     },
   });
 }
-$("main").addEventListener("input", (e) => e.target.matches('input:not([type="checkbox"]), textarea') && (e.target.value ? (e.target.dataset.dirty = "yes") : delete e.target.dataset.dirty));
 // A second press for what cannot be taken back with one.
 document.addEventListener(
   "click",
@@ -1304,9 +1314,12 @@ document.addEventListener(
       return setTimeout(() => el.isConnected && (el.dataset.armed = ""), 5000);
     }
     const was = el.textContent;
+    // A fixed name would hide the question from a screen reader.
+    const name = el.getAttribute("aria-label");
+    el.removeAttribute("aria-label");
     el.dataset.armed = "yes";
     el.textContent = el.dataset.confirm;
-    setTimeout(() => el.isConnected && ((el.dataset.armed = ""), (el.textContent = was)), 5000);
+    setTimeout(() => el.isConnected && ((el.dataset.armed = ""), (el.textContent = was), name && el.setAttribute("aria-label", name)), 5000);
   },
   true,
 );
@@ -1316,7 +1329,9 @@ function renderSummary() {
   $("summary").textContent = state.offline ?? (free || "llmpool is running");
   // Old numbers must not pass for live ones, on a phone least of all.
   $("offline").hidden = !state.offline;
-  if (state.offline) $("offline").textContent = `${state.offline} · ${state.loadedAt ? `showing what was loaded at ${state.loadedAt}` : "nothing has loaded yet"}; trying again every few seconds.`;
+  const stale = state.offline ? `${state.offline} · ${state.loadedAt ? `showing what was loaded at ${state.loadedAt}` : "nothing has loaded yet"}; trying again every few seconds.` : "";
+  // Said once, not every three seconds, to whoever is listening.
+  if ($("offline").textContent !== stale) $("offline").textContent = stale;
   $("summary").className = state.offline ? "offline" : "muted online";
   const problems = (SERVER ? 0 : state.issues.length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
@@ -1381,18 +1396,24 @@ async function refresh(force = false) {
     state.loadedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch (e) {
     state.offline = unreachable(e);
+    // A drawing that was asked for and could not be made is still owed.
+    owed ||= Boolean(force);
     return renderSummary();
   }
   renderSummary();
   // Redrawing would take the field out from under someone using it.
   if (force || !busy()) {
-    redrawing = Boolean(force);
-    renderPool();
-    renderSessions();
-    renderAgents();
-    renderTeam();
-    renderSettings();
-    redrawing = false;
+    redrawing = Boolean(force) || owed;
+    owed = false;
+    try {
+      renderPool();
+      renderSessions();
+      renderAgents();
+      renderTeam();
+      renderSettings();
+    } finally {
+      redrawing = false;
+    }
   }
 }
 
@@ -1438,7 +1459,7 @@ $("pool").addEventListener("keydown", (e) => {
 $("sessions").addEventListener("click", async (e) => {
   if (SERVER || !e.target.matches('button[data-act="advise"]')) return;
   e.target.disabled = true;
-  await attempt(() => api("POST", `/sessions/${e.target.dataset.id}/advise`), "The advisor answered");
+  await attempt(() => api("POST", `/sessions/${e.target.dataset.id}/advise`), "The decision model answered");
   await refresh(true);
 });
 $("sessions").addEventListener("change", (e) => !SERVER && e.target.matches("select[data-act]") && sessionAction(e.target));
