@@ -9,6 +9,7 @@ nav:
   - {title: In Claude Code, url: /claude-code/}
   - {title: Any agent, url: /agents/}
   - {title: Rules, url: /rules/}
+  - {title: Decision model, url: /decisions/}
   - {title: Team server, url: /team/}
   - {title: Gateway, url: /gateway/}
   - {title: Kubernetes, url: /kubernetes/}

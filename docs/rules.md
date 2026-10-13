@@ -54,6 +54,6 @@ do = { swap = { pick = "least_busy" } }
 
 `llmpool policy dry-run rules.toml scenario.json` says which rule would fire for a described situation; the app's editor has the same test on every rule.
 
-## The advisor
+## The decision model
 
-Optional. With a key for the decision model (`llmpool advisor key`, then `llmpool advisor on`), llmpool asks it whether to switch and where to when an account passes half of a window. It sees accounts by letter only, acts only above the confidence you set, and never outside what your rules allow.
+Optional. A decision model can be given the whole pool and asked when to move a session and where to start a new one. See [Decision model]({{ '/decisions/' | relative_url }}).

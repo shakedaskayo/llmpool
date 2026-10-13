@@ -19,6 +19,12 @@ holds a login.
 - **Rules, not habits.** "Work repos use work accounts", "move before the
   limit", "prefer my own account while it has room": a small TOML file, or the
   editor in the app.
+- **A decision model for heavy use.** Optionally, a decision model is shown
+  the whole pool, with every teammate's load on it, and decides when a session
+  should move and where a new one should start: spreading a team's heavy use
+  across accounts before any one runs out, and staying put when moving would
+  cost more than it saves. It works inside your rules and sees accounts by
+  letter only.
 - **A team server, optionally a gateway.** Sign-in with Google or any OpenID
   Connect provider, or API keys. Per-member access, an audit log, a web page to
   run it from, and a Helm chart.

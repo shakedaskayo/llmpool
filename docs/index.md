@@ -17,6 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/i
 - **In your agent.** In Claude Code, `/llmpool` shows this session's usage and the rest of the pool, and switches account with one key. The session keeps running. [In Claude Code]({{ '/claude-code/' | relative_url }})
 - **Any agent, any provider.** Codex CLI, OpenCode, Gemini CLI, Grok, Aider or your own script start through `llmpool exec`, on a subscription login or a key. [Any agent]({{ '/agents/' | relative_url }})
 - **Rules.** "Work repos use work accounts", "move before the limit", "prefer my own account while it has room". [Rules]({{ '/rules/' | relative_url }})
+- **A decision model for heavy use.** Optionally, a decision model is shown the whole pool, with everyone's load on it, and decides when a session should move and where a new one should start. It spreads a team's heavy use across accounts before any one runs out, within your rules. [Decision model]({{ '/decisions/' | relative_url }})
 - **For a team.** One server holds the pool. Members sign in with Google or any OpenID Connect provider, or with an API key. [Team server]({{ '/team/' | relative_url }})
 - **As a gateway.** The server can be what every request goes through, so no login or key leaves it and switching happens on the server. [Gateway]({{ '/gateway/' | relative_url }})
 
