@@ -532,11 +532,11 @@ impl TeamServer {
                     .preferred
                     .insert(pair, (id.clone(), t + ADVICE_SECS * 2));
                 json!({"at": t, "who": who, "provider": provider, "chose": label(id),
-                       "was_on": current.as_ref().map(&label), "among": candidates.len(),
+                       "was_on": current.as_ref().map(label), "among": candidates.len(),
                        "moved": current.as_ref() != Some(id)})
             }
             None => json!({"at": t, "who": who, "provider": provider, "chose": null,
-                           "was_on": current.as_ref().map(&label), "among": candidates.len(),
+                           "was_on": current.as_ref().map(label), "among": candidates.len(),
                            "note": "the model did not answer; the rules decide"}),
         };
         state.decisions.push_front(record.clone());
