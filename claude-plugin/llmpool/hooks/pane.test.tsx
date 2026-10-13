@@ -36,7 +36,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
       return { value: { exitCode: 0, stdout: isStatus ? JSON.stringify(STATUS) : 'session s1 now uses work-2', stderr: '' } } as never
     })
 
-    await $.command.run({ command: 'llmpool', args: '' })
+    await $.command.run({ command: 'llmpool', args: '' } as never)
     const ui = await $.ui.mount({ plugin: 'llmpool', surface, component: 'Pane', requestId: 'llmpool', props: { title: 'llmpool' } as never })
 
     // Every account is there, each with its state said in words.
@@ -63,7 +63,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
       return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(STATUS) : '', stderr: '' } } as never
     })
-    await $.command.run({ command: 'llmpool', args: '' })
+    await $.command.run({ command: 'llmpool', args: '' } as never)
     const ui = await $.ui.mount({ plugin: 'llmpool', surface, component: 'AbovePrompt', props: {} as never })
     expect(await ui.find({ type: 'Text', text: /91% of the 5-hour limit/ })).toBeDefined()
     await ui.press({ key: 'band-switch' })
@@ -75,7 +75,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 test('with llmpool not answering, the pane says so and how to retry', async ($, on) => {
   host(on)
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'llmpool: daemon unreachable' } }) as never)
-  await $.command.run({ command: 'llmpool', args: '' })
+  await $.command.run({ command: 'llmpool', args: '' } as never)
   const ui = await $.ui.mount({ plugin: 'llmpool', surface: 'terminal', component: 'Pane', requestId: 'llmpool', props: { title: 'llmpool' } as never })
   expect(await ui.find({ type: 'Text', text: /not answering/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /daemon unreachable/ })).toBeDefined()
@@ -91,7 +91,7 @@ test('`/llmpool next` switches without opening anything', async ($, on) => {
 
     return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(STATUS) : 'session s1 now uses work-2', stderr: '' } } as never
   })
-  const ran = await $.command.run({ command: 'llmpool', args: 'next' })
+  const ran = await $.command.run({ command: 'llmpool', args: 'next' } as never)
   expect(calls.find(argv => argv[1] === 'switch')?.slice(1)).toEqual(['switch', '--next', '--session', 's1'])
   expect(JSON.stringify(ran)).toContain('now uses work-2')
 })
