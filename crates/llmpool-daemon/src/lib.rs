@@ -3,6 +3,8 @@
 
 pub mod client;
 pub mod http;
+mod onboarding;
+pub use onboarding::LoginReq;
 mod transfer;
 
 use chrono::{Datelike, Local, Timelike};
@@ -112,6 +114,8 @@ struct Persisted {
     /// Claude Code session ids that have already been told what a
     /// `session_start` rule would have chosen, so it is said once.
     suggested: VecDeque<String>,
+    /// When each account's renewal was last attempted.
+    renew_tried: BTreeMap<AccountId, i64>,
     sessions: BTreeMap<String, Managed>,
     stores: BTreeMap<String, StoreRec>,
     events: VecDeque<LogEvent>,
@@ -122,6 +126,9 @@ struct Persisted {
 struct Inner {
     store: Store,
     p: Persisted,
+    /// Accounts whose login is being renewed right now and must not be
+    /// handed to a session until that is done.
+    renewing: BTreeSet<AccountId>,
     /// When the default profile's login was last copied to the vault.
     last_sync: i64,
 }
@@ -170,6 +177,10 @@ pub struct Daemon {
     notify: bool,
     /// The state as last written to disk.
     saved: Mutex<String>,
+    /// The sign-in in progress, if any.
+    login: Mutex<Option<onboarding::LoginJob>>,
+    /// Where logins are renewed. `None`: never (tests, or turned off).
+    token_url: Option<String>,
     inner: Mutex<Inner>,
 }
 
@@ -299,10 +310,13 @@ impl Daemon {
             keychain,
             notify: false,
             saved: Mutex::new(String::new()),
+            login: Mutex::new(None),
+            token_url: None,
             inner: Mutex::new(Inner {
                 store: Store::open(&data_dir.join("llmpool.db"))?,
                 p,
                 last_sync: 0,
+                renewing: BTreeSet::new(),
             }),
         };
         {
@@ -355,6 +369,11 @@ impl Daemon {
         };
         let mut daemon = Self::open(&data, &client::home(), vault, keychain)?;
         daemon.notify = std::env::var_os("LLMPOOL_NO_NOTIFY").is_none();
+        if std::env::var_os("LLMPOOL_NO_RENEW").is_none() {
+            let url = std::env::var("LLMPOOL_CLAUDE_TOKEN_URL")
+                .unwrap_or_else(|_| llmpool_adapter_claude::oauth::TOKEN_URL.to_string());
+            daemon.token_url = Some(url);
+        }
         Ok(daemon)
     }
 
@@ -367,12 +386,20 @@ impl Daemon {
     /// Once a minute: scheduled rules, and the housekeeping that otherwise
     /// only happens when something asks the daemon a question.
     pub fn tick(&self) {
+        self.poll_login();
+        self.renew_idle();
         let mut g = self.lock();
         self.reap(&mut g);
         let ids: Vec<String> = g.p.sessions.keys().cloned().collect();
         for id in ids {
             self.react(&mut g, &id, Event::Tick);
         }
+    }
+
+    /// Renew logins against this address. For tests, and for turning renewal on
+    /// where `open_default` is not used.
+    pub fn set_token_url(&mut self, url: Option<String>) {
+        self.token_url = url;
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -1098,6 +1125,15 @@ impl Daemon {
                 format!("{} is disabled or needs a new login", account.label),
             ));
         }
+        if g.renewing.contains(&account.id) {
+            return Err(fail(
+                409,
+                format!(
+                    "{}'s sign-in is being renewed; try again in a few seconds",
+                    account.label
+                ),
+            ));
+        }
         let store_id = match self.holders(g, account).into_iter().next() {
             // Already live somewhere: join that profile rather than copy the login.
             Some(id) => id,
@@ -1159,6 +1195,15 @@ impl Daemon {
             return Err(fail(
                 409,
                 format!("{} is disabled or needs a new login", to.label),
+            ));
+        }
+        if g.renewing.contains(&to.id) {
+            return Err(fail(
+                409,
+                format!(
+                    "{}'s sign-in is being renewed; try again in a few seconds",
+                    to.label
+                ),
             ));
         }
         if self.holders(g, to).iter().any(|held| *held != store_id) {

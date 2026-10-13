@@ -4,6 +4,7 @@
 
 pub mod install;
 pub mod lock;
+pub mod oauth;
 pub mod profile;
 pub mod statusline;
 

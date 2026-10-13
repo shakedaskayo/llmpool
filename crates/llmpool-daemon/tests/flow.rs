@@ -1226,3 +1226,311 @@ fn quiet_signals_do_not_rewrite_the_state_file_or_repeat_advice() {
         json!({})
     );
 }
+
+// ---- signing in, what is missing, renewal -----------------------------------
+
+/// A stand-in `claude` whose `auth login` behaves like the real one: prints
+/// where to sign in, then leaves a login in the profile it was pointed at.
+fn stub_claude(w: &World) {
+    let script = w.data.join("claude-stub");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+[ "$1 $2" = "auth login" ] || exit 2
+email="${4:-new@x.io}"
+echo "Opening https://claude.example/login?state=abc in your browser"
+[ "$email" = "refused@x.io" ] && exit 1
+[ "$email" = "slow@x.io" ] && sleep 30
+printf '{"claudeAiOauth":{"accessToken":"tok-%s","refreshToken":"r"}}' "$email" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+printf '{"oauthAccount":{"emailAddress":"%s","organizationUuid":"org"}}' "$email" > "$CLAUDE_CONFIG_DIR/.claude.json"
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Where the installer records the program it found.
+    std::fs::write(w.data.join("claude-bin"), script.to_str().unwrap()).unwrap();
+}
+
+fn wait_for_login(w: &World) -> Value {
+    for _ in 0..100 {
+        let status = w.daemon.login_status();
+        if status["state"] != "waiting" {
+            return status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the sign-in never finished");
+}
+
+fn login(email: &str, tags: &[&str]) -> llmpool_daemon::LoginReq {
+    serde_json::from_value(json!({"email": email, "tags": tags})).unwrap()
+}
+
+#[test]
+fn signing_in_through_claude_code_adds_the_account() {
+    let w = world();
+    stub_claude(&w);
+    let started = w.daemon.start_login(login("new@x.io", &["work"])).unwrap();
+    assert_eq!(started["state"], "waiting");
+    let done = wait_for_login(&w);
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["account"], "new@x.io");
+    assert_eq!(vault_token(&w, "new@x.io"), "tok-new@x.io");
+    let accounts = w.daemon.list_accounts().unwrap();
+    let new = accounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["email"] == "new@x.io")
+        .unwrap();
+    assert_eq!(new["tags"], json!(["work"]));
+    // Nothing of the scratch profile is left behind.
+    let leftovers: Vec<_> = std::fs::read_dir(&w.data)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("login-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_sign_in_that_is_refused_or_cancelled_adds_nothing_and_says_so() {
+    let w = world();
+    stub_claude(&w);
+    w.daemon.start_login(login("refused@x.io", &[])).unwrap();
+    let failed = wait_for_login(&w);
+    assert_eq!(failed["state"], "failed");
+    assert!(failed["message"]
+        .as_str()
+        .unwrap()
+        .contains("not completed"));
+
+    w.daemon.start_login(login("slow@x.io", &[])).unwrap();
+    // The page's address is offered in case the browser did not open.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(w.daemon.login_status()["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://claude.example/login"));
+    assert_eq!(
+        w.daemon
+            .start_login(login("new@x.io", &[]))
+            .unwrap_err()
+            .status,
+        409,
+        "one sign-in at a time"
+    );
+    assert_eq!(w.daemon.cancel_login()["state"], "cancelled");
+    assert_eq!(
+        w.daemon.list_accounts().unwrap().as_array().unwrap().len(),
+        3
+    );
+
+    // Without Claude Code there is nothing to sign in with.
+    std::fs::write(w.data.join("claude-bin"), "/nowhere/claude").unwrap();
+    if w.daemon.claude_bin().is_none() {
+        assert_eq!(
+            w.daemon
+                .start_login(login("new@x.io", &[]))
+                .unwrap_err()
+                .status,
+            409
+        );
+    }
+}
+
+#[test]
+fn what_is_missing_is_named_with_its_fix() {
+    let w = world();
+    let kinds = |w: &World| -> Vec<String> {
+        w.daemon
+            .issues()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(kinds(&w).contains(&"hooks_missing".to_string()));
+    std::fs::write(w.home.join(".claude/settings.json"), r#"{"hooks": {"SessionStart": [{"hooks": [{"command": "'/x/llmpool' hook claude SessionStart"}]}]}}"#).unwrap();
+    assert!(!kinds(&w).contains(&"hooks_missing".to_string()));
+    assert!(!kinds(&w).contains(&"login_not_in_pool".to_string()));
+
+    // The user logs Claude Code in to an account the pool does not have.
+    Profile::default_in(&w.home)
+        .write(&NoKeychain, &secret("stranger@x.io", "s"))
+        .unwrap();
+    let issues = w.daemon.issues().unwrap();
+    let missing = issues
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "login_not_in_pool")
+        .unwrap();
+    assert_eq!(missing["action"], "add_current");
+    assert!(missing["text"].as_str().unwrap().contains("stranger@x.io"));
+
+    // A login that has died.
+    let reply = start(&w, "/x", Some("a@x.io"));
+    w.daemon.hook(
+        reply["session_id"].as_str().unwrap(),
+        "StopFailure",
+        "authentication_failed",
+        &json!({}),
+    );
+    let issues = w.daemon.issues().unwrap();
+    let dead = issues
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "relogin")
+        .unwrap();
+    assert_eq!(
+        (dead["action"].as_str(), dead["email"].as_str()),
+        (Some("login"), Some("a@x.io"))
+    );
+}
+
+/// A stand-in token endpoint; returns its address and how many times it was asked.
+fn token_endpoint(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/token",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ =
+                request.respond(tiny_http::Response::from_string(body).with_status_code(status));
+        }
+    });
+    (url, asked)
+}
+
+/// A daemon that renews against `url`, holding one idle account whose short
+/// token ran out long ago, and the default login.
+fn renewing_world(url: &str) -> (tempfile::TempDir, Daemon, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let (home, data) = (dir.path().join("home"), dir.path().join("data"));
+    Profile::default_in(&home)
+        .write(&NoKeychain, &secret("home@x.io", "home-1"))
+        .unwrap();
+    let mut daemon = Daemon::open(
+        &data,
+        &home,
+        Box::new(FileVault(data.join("vault"))),
+        Box::new(NoKeychain),
+    )
+    .unwrap();
+    daemon.set_token_url(Some(url.to_string()));
+    daemon.capture(CaptureReq::default()).unwrap();
+    let scratch = data.join("login-idle");
+    let mut idle = secret("idle@x.io", "old");
+    idle.oauth["expiresAt"] = json!(1000);
+    Profile::at(&scratch).write(&NoKeychain, &idle).unwrap();
+    daemon
+        .capture(CaptureReq {
+            profile_dir: Some(scratch),
+            label: None,
+            tags: vec![],
+        })
+        .unwrap();
+    (dir, daemon, data)
+}
+
+fn stored(data: &Path, daemon: &Daemon, email: &str) -> Secret {
+    let accounts = daemon.list_accounts().unwrap();
+    let id = accounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["email"] == email)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    serde_json::from_str(&FileVault(data.join("vault")).get(&id).unwrap().unwrap()).unwrap()
+}
+
+#[test]
+fn an_idle_login_is_renewed_and_one_in_use_is_left_to_claude_code() {
+    let (url, asked) = token_endpoint(
+        200,
+        r#"{"access_token": "fresh", "refresh_token": "r-fresh", "expires_in": 3600}"#,
+    );
+    let (_dir, daemon, data) = renewing_world(&url);
+    daemon.renew_idle();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let renewed = stored(&data, &daemon, "idle@x.io");
+    assert_eq!(renewed.oauth["accessToken"], "fresh");
+    assert_eq!(renewed.oauth["refreshToken"], "r-fresh");
+    assert!(daemon
+        .events()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "renew"));
+
+    // Fresh now, so nothing more is asked; and the default login, which Claude
+    // Code holds, was never touched.
+    daemon.renew_idle();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        stored(&data, &daemon, "home@x.io").oauth["accessToken"],
+        "home-1"
+    );
+}
+
+#[test]
+fn a_login_in_a_running_session_is_not_renewed_behind_its_back() {
+    let (url, asked) = token_endpoint(200, r#"{"access_token": "fresh", "expires_in": 3600}"#);
+    let (_dir, daemon, _data) = renewing_world(&url);
+    let req = StartReq {
+        cwd: "/x".into(),
+        git_remote: None,
+        pid: std::process::id(),
+        account: Some("idle@x.io".into()),
+        tag: None,
+    };
+    daemon.start_session(req).unwrap();
+    daemon.renew_idle();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_login_the_provider_has_ended_is_marked_and_a_shaky_answer_is_not() {
+    let (url, _) = token_endpoint(400, r#"{"error": "invalid_grant"}"#);
+    let (_dir, daemon, _data) = renewing_world(&url);
+    daemon.renew_idle();
+    let health = |d: &Daemon| {
+        d.list_accounts()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["email"] == "idle@x.io")
+            .unwrap()["health"]
+            .clone()
+    };
+    assert_eq!(health(&daemon), "relogin_required");
+
+    let (url, asked) = token_endpoint(503, "busy");
+    let (_dir, daemon, data) = renewing_world(&url);
+    daemon.renew_idle();
+    assert_eq!(health(&daemon), "ok");
+    assert_eq!(
+        stored(&data, &daemon, "idle@x.io").oauth["accessToken"],
+        "old"
+    );
+    // And it is not hammered: the next attempt waits.
+    daemon.renew_idle();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

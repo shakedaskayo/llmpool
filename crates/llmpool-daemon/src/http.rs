@@ -98,6 +98,14 @@ fn route(
             text(&body, "passphrase")?,
             body["replace"] == true,
         ),
+        ("GET", ["issues"]) => d.issues(),
+        ("GET", ["logins"]) => Ok(d.login_status()),
+        ("POST", ["logins"]) => d.start_login(if body.is_null() {
+            Default::default()
+        } else {
+            parse(body)?
+        }),
+        ("DELETE", ["logins"]) => Ok(d.cancel_login()),
         ("GET", ["sessions"]) => d.list_sessions(),
         ("POST", ["sessions"]) => d.start_session(parse(body)?),
         ("POST", ["sessions", id, "assign"]) => d.assign(id, text(&body, "account")?),
