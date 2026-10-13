@@ -5,16 +5,15 @@ permalink: /kubernetes/
 # On Kubernetes
 
 ```bash
-docker build -t registry.example.com/llmpool:0.1.0 . && docker push registry.example.com/llmpool:0.1.0
-
-helm install pool deploy/helm/llmpool \
-  --set image.repository=registry.example.com/llmpool \
+helm install pool oci://ghcr.io/shakedaskayo/charts/llmpool \
   --set publicUrl=https://pool.example.com \
   --set oidc.clientId=... --set oidc.clientSecret=... \
   --set 'oidc.allowedDomains={example.com}' \
   --set 'admins={lead@example.com}' \
   --set ingress.enabled=true --set ingress.className=nginx
 ```
+
+The image is `ghcr.io/shakedaskayo/llmpool`, for amd64 and arm64. To build your own: `docker build -t registry.example.com/llmpool:0.1.0 .` and set `image.repository`.
 
 The notes the chart prints say how to import accounts.
 

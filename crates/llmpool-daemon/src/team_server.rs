@@ -803,8 +803,9 @@ impl TeamServer {
             self.audit(event, email, &account);
         }
         let policy = std::fs::read_to_string(d.policy_path()).unwrap_or_default();
+        let admin = self.config.admins.contains(&email.to_lowercase());
         Ok(Reply::Json(
-            json!({"email": email, "policy": policy, "accounts": rows}),
+            json!({"email": email, "policy": policy, "accounts": rows, "admin": admin}),
         ))
     }
 
@@ -850,8 +851,9 @@ impl TeamServer {
             })
             .collect();
         let policy = std::fs::read_to_string(d.policy_path()).unwrap_or_default();
+        let admin = self.config.admins.contains(&email.to_lowercase());
         Ok(Reply::Json(
-            json!({"email": email, "policy": policy, "accounts": rows, "gateway": true}),
+            json!({"email": email, "policy": policy, "accounts": rows, "gateway": true, "admin": admin}),
         ))
     }
 
@@ -875,7 +877,34 @@ impl TeamServer {
             ("GET", "/auth/login") => self.login(query),
             ("GET", "/auth/callback") => self.callback(query),
             ("POST", "/auth/exchange") => self.exchange(body),
-            ("GET", "/v1/me") => Ok(Reply::Json(json!({"email": self.member(bearer)?.1}))),
+            ("GET", "/v1/me") => {
+                let (_, who) = self.member(bearer)?;
+                let admin = self.config.admins.contains(&who.to_lowercase());
+                Ok(Reply::Json(json!({"email": who, "admin": admin})))
+            }
+            // An administrator hands an account from their own machine to the pool.
+            ("POST", "/v1/accounts") => {
+                let (_, who) = self.member(bearer)?;
+                if !self.config.admins.contains(&who.to_lowercase()) {
+                    return Err(fail(
+                        403,
+                        "only an administrator of this pool can add accounts to it",
+                    ));
+                }
+                let account = serde_json::from_value(body["account"].clone())
+                    .map_err(|_| fail(400, "bad request: `account` is required"))?;
+                let secret = body["secret"]
+                    .as_str()
+                    .ok_or_else(|| fail(400, "bad request: `secret` is required"))?;
+                let taken = self.daemon.receive(account, secret.to_string())?;
+                let label = taken["added"][0]
+                    .as_str()
+                    .or(taken["replaced"][0].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                self.audit("account_added", &who, &label);
+                Ok(Reply::Json(json!({"label": label})))
+            }
             ("POST", "/auth/logout") => {
                 let (key, _) = self.member(bearer)?;
                 let mut state = self.state();

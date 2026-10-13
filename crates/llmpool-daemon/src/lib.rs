@@ -975,6 +975,16 @@ impl Daemon {
     /// under the account it actually is, whatever the file claims.
     pub fn import(&self, bundle: &str, passphrase: &str, replace: bool) -> Api<Value> {
         let entries = transfer::open(bundle, passphrase).map_err(|e| fail(400, e))?;
+        self.take_in(entries, replace)
+    }
+
+    /// One account handed over by a member of a team's pool, with its login
+    /// or key. Checked exactly as an imported file is.
+    pub fn receive(&self, account: Account, secret: String) -> Api<Value> {
+        self.take_in(vec![transfer::Entry { account, secret }], true)
+    }
+
+    fn take_in(&self, entries: Vec<transfer::Entry>, replace: bool) -> Api<Value> {
         let damaged = || {
             fail(
                 400,

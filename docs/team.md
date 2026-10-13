@@ -68,13 +68,32 @@ In Google Cloud, create an OAuth client of type **Web application** with the red
 
 ## Putting accounts in
 
-On a machine that has the logins:
+Anyone named in `LLMPOOL_ADMINS` adds accounts, from wherever is handy.
+
+**A key**, on the server's page: **Accounts → Add account → API key**. Or from your machine:
 
 ```bash
-llmpool export pool.age        # asks for a passphrase
+llmpool add key openai --to-team
 ```
 
-Then import that file on the server's page (**Accounts → Add account → Logins from a pool file**) or with `llmpool import pool.age` on the server. Keys can be added on the page directly.
+**A subscription login**, from a machine with llmpool and the agent on it. This signs in to the account in your browser and puts the login straight into the pool:
+
+```bash
+llmpool team connect https://pool.example.com     # once
+llmpool add claude --to-team
+```
+
+The server's page shows these two lines to copy (**Add account → A login, from your machine**) and says when the account has arrived.
+
+**An account you already have**: **Share with team** on it in the app, or
+
+```bash
+llmpool team share work-2
+```
+
+A login is moved, because only one place can renew it: once the server has it, your machine gets it back the way every member does. A key is copied. The login an agent on your machine is running on right now stays put; sign in to it as a separate account with `--to-team` instead.
+
+**A whole pool at once**: `llmpool export pool.age` on the machine that has it, then **Add account → A pool file** on the server's page.
 
 ## The server's own page
 

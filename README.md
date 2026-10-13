@@ -37,10 +37,14 @@ Documentation: **https://shakedaskayo.github.io/llmpool/**
 curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh | sh
 ```
 
-It builds from source, so it needs git and [Rust](https://rustup.rs). On macOS
-you get the menu-bar app in `/Applications`, the `llmpool` command, and Claude
-Code connected (hooks, status line, `/llmpool`); on Linux, the command. Run it
+It downloads the latest release and checks it against its checksum (or builds
+from source where there is no ready-made build). On macOS you get the
+menu-bar app in `/Applications`, the `llmpool` command, and Claude Code
+connected (hooks, status line, `/llmpool`); on Linux, the command. Run it
 again to update. `llmpool setup --undo` takes it all back out.
+
+The server: `helm install pool oci://ghcr.io/shakedaskayo/charts/llmpool`, or
+the image `ghcr.io/shakedaskayo/llmpool`.
 
 From a checkout: `scripts/install-macos.sh`, or
 `cargo install --path crates/llmpool-cli` for the command alone.
@@ -282,6 +286,13 @@ and keys both work this way; through a gateway, Claude Code runs as an API
 client and its claude.ai connectors are off. `LLMPOOL_UPSTREAM_<PROVIDER>`
 moves a provider to your own proxy.
 
+**Putting accounts in.** An administrator adds a key on the server's page, or
+from their own machine with one command: `llmpool add claude --to-team` signs
+in and puts the login straight into the pool, `llmpool add key openai
+--to-team` does the same for a key, and `llmpool team share <account>` (or
+**Share with team** in the app) hands over one that is already there. A login
+is moved, since only one place can renew it; a key is copied.
+
 **Running the server.**
 
 ```bash
@@ -327,9 +338,7 @@ commands as anywhere (`llmpool import`, `llmpool list`, the policy file).
 **On Kubernetes.**
 
 ```bash
-docker build -t registry.example.com/llmpool:0.1.0 . && docker push registry.example.com/llmpool:0.1.0
-helm install pool deploy/helm/llmpool \
-  --set image.repository=registry.example.com/llmpool \
+helm install pool oci://ghcr.io/shakedaskayo/charts/llmpool \
   --set publicUrl=https://pool.example.com \
   --set oidc.clientId=... --set oidc.clientSecret=... \
   --set 'oidc.allowedDomains={example.com}' \

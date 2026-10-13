@@ -22,6 +22,9 @@ struct Link {
     email: String,
     synced_at: i64,
     error: Option<String>,
+    /// Whether the server lets us add accounts to its pool.
+    #[serde(default)]
+    admin: bool,
 }
 
 /// A sign-in to a server waiting in the browser.
@@ -176,6 +179,7 @@ impl Daemon {
             email: email.to_string(),
             synced_at: 0,
             error: None,
+            admin: false,
         });
         self.team_sync();
         Ok(())
@@ -305,6 +309,7 @@ impl Daemon {
             "url": link.as_ref().map(|l| &l.url),
             "email": link.as_ref().map(|l| &l.email),
             "synced_at": link.as_ref().map(|l| l.synced_at),
+            "admin": link.as_ref().is_some_and(|l| l.admin),
             "accounts": shared,
         })
     }
@@ -344,6 +349,88 @@ impl Daemon {
         Ok(json!({"state": "off"}))
     }
 
+    /// Hand one of this machine's accounts to the team's pool.
+    ///
+    /// A login is moved: it can be renewed in one place only, so once the
+    /// server has it this machine forgets it (and is lent it back like any
+    /// member). A key is copied unless `keep` is false.
+    pub fn team_share(&self, name: &str, keep: bool) -> Api<Value> {
+        let link = self.link().ok_or_else(|| {
+            fail(
+                409,
+                "connect to a team's pool first: `llmpool team connect <address>`",
+            )
+        })?;
+        let token = self
+            .vault
+            .get(TOKEN_ID)?
+            .ok_or_else(|| fail(409, "connect to the team's pool again"))?;
+        let (account, secret, is_login) = {
+            let mut g = self.lock();
+            let accounts = self.accounts(&g)?;
+            let account = find(&accounts, name)?.clone();
+            if g.p.shared.contains(&account.id) {
+                return Err(fail(
+                    409,
+                    format!("{} already comes from the team's pool", account.label),
+                ));
+            }
+            let is_login = account.kind == Kind::Oauth;
+            if is_login {
+                let in_use =
+                    g.p.sessions
+                        .values()
+                        .any(|m| m.session.account_id.as_ref() == Some(&account.id));
+                if in_use || !self.holders(&g, &account).is_empty() {
+                    return Err(fail(
+                        409,
+                        format!(
+                            "{} is the login an agent on this machine is using. Sign in to it as a separate account \
+                             (`llmpool add claude --to-team`), or switch your sessions off it first.",
+                            account.label
+                        ),
+                    ));
+                }
+                // Out of every assignment while its only copy travels.
+                g.renewing.insert(account.id.clone());
+            }
+            let secret = self
+                .vault
+                .get(&account.id)?
+                .ok_or_else(|| fail(409, format!("{} has no stored login", account.label)))?;
+            (account, secret, is_login)
+        };
+        let mut sent = account.clone();
+        sent.usage = None;
+        sent.tags.remove(select::OWN);
+        let answer = call(
+            &link.url,
+            Some(&token),
+            "POST",
+            "/v1/accounts",
+            Some(json!({"account": sent, "secret": secret})),
+        );
+        let mut g = self.lock();
+        g.renewing.remove(&account.id);
+        let answer =
+            answer.map_err(|(status, why)| fail(if status == 403 { 403 } else { 502 }, why))?;
+        let moved = is_login || !keep;
+        if moved {
+            g.store.remove(&account.id)?;
+            self.vault.remove(&account.id)?;
+        }
+        self.log(
+            &mut g,
+            "team",
+            None,
+            format!("{} was added to the team's pool", account.label),
+        );
+        self.save(&g);
+        drop(g);
+        self.team_sync();
+        Ok(json!({"label": answer["label"], "moved": moved}))
+    }
+
     /// Tell the server what we run on and take what it lends us.
     pub fn team_sync(&self) {
         let Some(mut link) = self.link() else {
@@ -378,6 +465,7 @@ impl Daemon {
                 if let Some(email) = body["email"].as_str() {
                     link.email = email.to_string();
                 }
+                link.admin = body["admin"] == true;
             }
             Err((401, why)) => link.error = Some(format!("{why}. Connect again.")),
             Err((_, why)) => link.error = Some(why),

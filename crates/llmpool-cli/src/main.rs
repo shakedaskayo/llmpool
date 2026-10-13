@@ -21,6 +21,9 @@ enum Command {
     Add {
         #[command(subcommand)]
         agent: AddAgent,
+        /// Put what is added straight into the team's pool (administrators)
+        #[arg(long, global = true)]
+        to_team: bool,
     },
     /// Sign in again to an account whose login has ended
     Login { account: String },
@@ -194,6 +197,15 @@ enum TeamCommand {
         /// Start the sign-in and return at once, without waiting for it
         #[arg(long)]
         detach: bool,
+    },
+    /// Put accounts of this machine's into the team's pool (administrators).
+    /// A login moves there; a key is copied
+    Share {
+        #[arg(required = true)]
+        accounts: Vec<String>,
+        /// Also remove a key from this machine once the pool has it
+        #[arg(long)]
+        r#move: bool,
     },
     /// Fetch the team's accounts and rules now
     Sync,

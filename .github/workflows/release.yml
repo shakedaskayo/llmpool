@@ -1,0 +1,108 @@
+name: release
+
+# A tag `vX.Y.Z` builds everything people install: the macOS app, the command
+# for Linux, the server's container image and its Helm chart.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  macos:
+    # Apple silicon. An Intel Mac builds from source with the same installer.
+    strategy:
+      matrix:
+        include:
+          - {runner: macos-latest, arch: aarch64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build tool for the app
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build
+        run: |
+          scripts/prepare-sidecar.sh
+          (cd crates/llmpool-gui && cargo tauri build --bundles app)
+      - name: Package
+        run: |
+          test -x target/release/bundle/macos/llmpool.app/Contents/MacOS/llmpool
+          ditto -c -k --keepParent target/release/bundle/macos/llmpool.app llmpool-macos-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: llmpool-macos-${{ matrix.arch }}.zip
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, arch: x86_64}
+          - {runner: ubuntu-22.04-arm, arch: aarch64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libdbus-1-dev pkg-config
+          rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build
+        run: cargo build --release --locked -p llmpool-cli
+      - name: Package
+        run: tar -czf llmpool-linux-${{ matrix.arch }}.tar.gz -C target/release llmpool
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: llmpool-linux-${{ matrix.arch }}.tar.gz
+
+  image:
+    strategy:
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, arch: amd64}
+          - {runner: ubuntu-22.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.arch }}" .
+          docker push "$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.arch }}"
+
+  publish:
+    needs: [macos, linux, image]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: One image name for both kinds of machine
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          version="${GITHUB_REF_NAME#v}"
+          for tag in "$version" latest; do
+            docker buildx imagetools create -t "$IMAGE:$tag" "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
+          done
+      - name: Helm chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/helm/llmpool --version "$version" --app-version "$version" -d dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dist/llmpool-$version.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "llmpool ${GITHUB_REF_NAME#v}" --generate-notes

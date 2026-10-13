@@ -75,8 +75,23 @@ fn connect() -> Result<Client, String> {
 
 pub fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
-        Command::Add {
-            agent:
+        Command::Add { agent, to_team } => {
+            if to_team {
+                // Said before anything is added, not after.
+                let team = connect()?.call("GET", "/team", None)?;
+                if team["state"] != "connected" {
+                    return Err(
+                        "connect to the team's pool first: `llmpool team connect <address>`".into(),
+                    );
+                }
+                if team["admin"] != true {
+                    return Err(
+                        "only an administrator of the team's pool can add accounts to it".into(),
+                    );
+                }
+            }
+            let before = if to_team { account_ids()? } else { Vec::new() };
+            let code = match agent {
                 AddAgent::Claude {
                     from_current,
                     label,
@@ -86,35 +101,48 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                     cancel,
                     interactive,
                     code,
-                },
-        } => add_claude(AddOptions {
-            from_current,
-            label,
-            tags,
-            email,
-            detach,
-            cancel,
-            interactive,
-            code,
-        }),
-        Command::Add {
-            agent:
+                } => add_claude(AddOptions {
+                    from_current,
+                    label,
+                    tags,
+                    email,
+                    detach,
+                    cancel,
+                    interactive,
+                    code,
+                }),
                 AddAgent::Key {
                     provider,
                     label,
                     tags,
                     env,
-                },
-        } => add_key(&provider, label, tags, env),
-        Command::Add {
-            agent:
+                } => add_key(&provider, label, tags, env),
                 AddAgent::Login {
                     agent,
                     label,
                     tags,
                     new,
-                },
-        } => add_login(&agent, label, tags, new),
+                } => add_login(&agent, label, tags, new),
+            }?;
+            if to_team {
+                // Whatever this command just added goes on to the team's pool.
+                let added: Vec<String> = account_ids()?
+                    .into_iter()
+                    .filter(|id| !before.contains(id))
+                    .collect();
+                if added.is_empty() {
+                    return Err(
+                        "nothing new was added, so nothing was sent to the team's pool. \
+                                An account already here goes with `llmpool team share <account>`."
+                            .into(),
+                    );
+                }
+                for id in added {
+                    share(&id, true)?;
+                }
+            }
+            Ok(code)
+        }
         Command::Agents { json } => agents(json),
         Command::Install {
             agent: InstallAgent::Agents,
@@ -1563,6 +1591,35 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn account_ids() -> Result<Vec<String>, String> {
+    let accounts = connect()?.call("GET", "/accounts", None)?;
+    Ok(accounts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a["id"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// Hand an account of this machine's to the team's pool.
+fn share(account: &str, keep: bool) -> Result<(), String> {
+    let sent = connect()?.call(
+        "POST",
+        "/team/share",
+        Some(json!({"account": account, "keep": keep})),
+    )?;
+    let label = sent["label"].as_str().unwrap_or(account);
+    println!(
+        "{label} is in the team's pool{}",
+        if sent["moved"] == true {
+            "; this machine now gets it from there, like every member"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 fn team_line(status: &Value) -> String {
     let text = |name: &str| status[name].as_str().unwrap_or_default();
     match text("state") {
@@ -1591,6 +1648,12 @@ fn team(command: Option<TeamCommand>) -> Result<ExitCode, String> {
     let client = connect()?;
     match command {
         None => done(team_line(&client.call("GET", "/team", None)?)),
+        Some(TeamCommand::Share { accounts, r#move }) => {
+            for account in accounts {
+                share(&account, !r#move)?;
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Some(TeamCommand::Sync) => done(team_line(&client.call("POST", "/team/sync", None)?)),
         Some(TeamCommand::Disconnect) => {
             client.call("DELETE", "/team", None)?;

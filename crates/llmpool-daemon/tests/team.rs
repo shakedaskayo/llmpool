@@ -943,3 +943,108 @@ fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself()
     }
     std::env::remove_var("LLMPOOL_UPSTREAM_CLAUDE");
 }
+
+#[test]
+fn an_administrator_adds_accounts_to_the_pool_from_their_own_machine() {
+    use llmpool_daemon::KeyReq;
+    let pool = machine(&[]);
+    let config = Config {
+        public_url: "http://127.0.0.1:1".into(),
+        api_keys: Config::keys(&format!("ci:{KEY},member:member-key-0123456789abcdef")).unwrap(),
+        admins: vec!["ci".into()],
+        ..Config::default()
+    };
+    let serving = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", serving.port);
+
+    let admin = machine(&[("spare@x.io", "spare-1"), ("busy@x.io", "busy-1")]);
+    admin
+        .daemon
+        .add_key(KeyReq {
+            provider: "openai".into(),
+            label: None,
+            tags: vec!["work".into()],
+            env: [("OPENAI_API_KEY".to_string(), "sk-shared".to_string())].into(),
+        })
+        .unwrap();
+    // Not before joining.
+    assert_eq!(
+        admin.daemon.team_share("openai", true).unwrap_err().status,
+        409
+    );
+    admin.daemon.team_connect(&url, Some(KEY)).unwrap();
+    assert_eq!(admin.daemon.team_status()["admin"], true);
+
+    // A key is copied: the pool has it, and so does its owner.
+    admin.daemon.team_share("openai", true).unwrap();
+    assert_eq!(accounts(&pool)["openai"]["tags"], json!(["work"]));
+    assert_eq!(accounts(&admin)["openai"]["shared"], false);
+
+    // A login is moved: one place renews it, and that place is now the server.
+    // Its owner gets it back the way every member does, without the part
+    // that renews.
+    let moved = admin.daemon.team_share("spare@x.io", true).unwrap();
+    assert_eq!(moved["moved"], true);
+    let server_copy = FileVault(pool.data.join("vault"))
+        .get(accounts(&pool)["spare@x.io"]["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(server_copy.contains("r-spare-1"));
+    let mine = &accounts(&admin)["spare@x.io"];
+    assert_eq!(mine["shared"], true);
+    let lent = FileVault(admin.data.join("vault"))
+        .get(mine["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(lent.contains("spare-1") && !lent.contains("r-spare-1"));
+    // What already came from the pool is not sent back to it.
+    assert_eq!(
+        admin
+            .daemon
+            .team_share("spare@x.io", true)
+            .unwrap_err()
+            .status,
+        409
+    );
+
+    // A login a session is running on stays where it is.
+    start_on(&admin, "busy@x.io");
+    assert_eq!(
+        admin
+            .daemon
+            .team_share("busy@x.io", true)
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert_eq!(accounts(&admin)["busy@x.io"]["shared"], false);
+
+    // Members who are not administrators cannot add to the pool.
+    let member = machine(&[("mine@x.io", "mine-1")]);
+    member
+        .daemon
+        .team_connect(&url, Some("member-key-0123456789abcdef"))
+        .unwrap();
+    assert_eq!(member.daemon.team_status()["admin"], false);
+    assert_eq!(
+        member
+            .daemon
+            .team_share("mine@x.io", true)
+            .unwrap_err()
+            .status,
+        403
+    );
+    assert_eq!(
+        accounts(&member)["mine@x.io"]["shared"],
+        false,
+        "a refused login stays"
+    );
+    assert!(!accounts(&pool).contains_key("mine@x.io"));
+
+    let audit = std::fs::read_to_string(pool.data.join("team-audit.log")).unwrap();
+    assert!(
+        audit.contains("account_added")
+            && audit.contains("spare@x.io")
+            && !audit.contains("spare-1\"")
+    );
+}

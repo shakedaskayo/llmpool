@@ -8,14 +8,14 @@ permalink: /install/
 curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh | sh
 ```
 
-The script builds from source, so it needs git and [Rust](https://rustup.rs). The first build takes a few minutes. Run it again to update.
+The script downloads the latest release for your machine and checks it against the published checksum. Where there is no ready-made build (an Intel Mac, an unusual Linux), or with `LLMPOOL_FROM_SOURCE=1`, it builds from source instead, which needs git and [Rust](https://rustup.rs) and takes a few minutes. Run it again to update.
 
 | | What you get |
 |---|---|
 | macOS | The menu-bar app in `/Applications`, the `llmpool` command in `~/.local/bin`, Claude Code connected (hooks, status line, `/llmpool`), your current login added, start at login |
 | Linux | The `llmpool` command in `~/.local/bin`, and Claude Code connected if it is installed |
 
-On Linux the build also needs the D-Bus development files (`sudo apt install libdbus-1-dev pkg-config`, or `sudo dnf install dbus-devel pkgconf-pkg-config`); the script says so if they are missing. Windows is not supported.
+Built from source on Linux, it also needs the D-Bus development files (`sudo apt install libdbus-1-dev pkg-config`, or `sudo dnf install dbus-devel pkgconf-pkg-config`); the script says so if they are missing. Windows is not supported.
 
 ## First steps
 

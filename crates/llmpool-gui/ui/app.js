@@ -236,9 +236,20 @@ function addKey() {
     </div>`;
 }
 
+// A subscription login is made by signing in with the agent itself, which
+// lives on a person's machine: one command there puts it straight in here.
+function addFromMachine() {
+  const address = state.server.public_url ?? location.origin;
+  const line = (text) => `<div class="copy"><code>${esc(text)}</code><button class="quiet" data-act="copy" data-text="${esc(text)}">Copy</button></div>`;
+  return `<p class="muted">Run this on a machine with llmpool and the agent installed. It signs in to the account in your browser and puts the login straight into this pool. Nothing is exported, and no file changes hands.</p>
+    ${line(`llmpool team connect ${address}`)}
+    ${line("llmpool add claude --to-team")}
+    <p class="muted">An account that is already in your own llmpool: ${`<code>llmpool team share &lt;account&gt;</code>`}, or <strong>Share with team</strong> on the account in the app. Another agent's login: <code>llmpool add login codex --new --to-team</code>. The account appears here as soon as it arrives.</p>`;
+}
+
 // Logins cannot be signed in to on a server; they arrive as an exported file.
 function addFile() {
-  return `<p class="muted">On a machine that has the logins, run <code>llmpool export pool.age</code> and choose a passphrase. Then pick that file here. It is opened on the server and never stored as a file.</p>
+  return `<p class="muted">For moving a whole pool at once. On a machine that has it, run <code>llmpool export pool.age</code> and choose a passphrase, then pick that file here. It is opened on the server and never stored as a file.</p>
     <div class="copy">
       <input id="import-file" type="file" aria-label="Exported pool file" />
       <input class="wide" id="import-pass" type="password" autocomplete="off" placeholder="passphrase" aria-label="Passphrase of the file" />
@@ -252,7 +263,8 @@ function addPanel() {
   const kinds = SERVER
     ? [
         ["key", "API key · any provider"],
-        ["file", "Logins from a pool file"],
+        ["machine", "A login, from your machine"],
+        ["file", "A pool file"],
       ]
     : [
         ["claude", "Claude Code login"],
@@ -260,7 +272,7 @@ function addPanel() {
         ["key", "API key · any provider"],
       ];
   if (!kinds.some(([kind]) => kind === state.addKind)) state.addKind = kinds[0][0];
-  const body = { claude: addClaude, agent: addAgent, key: addKey, file: addFile }[state.addKind]();
+  const body = { claude: addClaude, agent: addAgent, key: addKey, file: addFile, machine: addFromMachine }[state.addKind]();
   return `<div class="callout">
     <div role="group" aria-label="Kind of account" class="seg">${kinds.map(([kind, label]) => `<button data-act="add-kind" data-kind="${kind}" aria-pressed="${state.addKind === kind}">${label}</button>`).join("")}</div>
     ${body}
@@ -295,6 +307,7 @@ function accountCard(a) {
   const actions = a.shared
     ? `<span class="muted">managed by your team</span>`
     : `${a.health !== "ok" && !SERVER ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
+       ${!SERVER && state.team.state === "connected" && state.team.admin ? `<button class="quiet" data-act="share" data-id="${esc(a.id)}" title="${a.kind === "oauth" ? "Moves this login to the team's pool; you then get it from there" : "Copies this key to the team's pool"}" aria-label="Add ${esc(a.label)} to the team's pool">Share with team</button>` : ""}
        <button class="quiet" data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
        <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`;
   return `<li class="card acct${live ? "" : " off"}">
@@ -1023,6 +1036,7 @@ async function poolAction(el) {
   if (act === "goto-setup") return go("settings");
   if (act === "add-open" || act === "add-close") {
     state.adding = act === "add-open";
+    state.addBaseline = state.accounts.map((a) => a.id);
     return renderPool();
   }
   if (act === "add-kind") {
@@ -1072,11 +1086,12 @@ async function poolAction(el) {
   const done = await attempt(
     async () => {
       if (act === "capture") await api("POST", "/accounts/capture", {});
+      if (act === "share") await api("POST", "/team/share", { account: id, keep: true });
       if (act === "toggle") await api("PATCH", `/accounts/${id}`, { enabled: !account.enabled });
       if (act === "tags") await api("PATCH", `/accounts/${id}`, { tags: el.value.split(",").map((t) => t.trim()).filter(Boolean) });
       if (act === "remove") await api("DELETE", `/accounts/${id}`);
     },
-    { capture: "Login added to the pool", toggle: account?.enabled ? `${account?.label} disabled` : `${account?.label} enabled`, tags: "Tags saved", remove: `${account?.label} removed` }[act],
+    { share: `${account?.label} is in the team's pool`, capture: "Login added to the pool", toggle: account?.enabled ? `${account?.label} disabled` : `${account?.label} enabled`, tags: "Tags saved", remove: `${account?.label} removed` }[act],
   );
   if (act === "capture" && done) state.adding = false;
   await refresh(true);
@@ -1118,6 +1133,7 @@ async function sessionAction(el) {
 
 const busy = () => {
   const active = document.activeElement;
+  if (state.adding && state.addKind === "machine") return false;
   return document.querySelector("dialog[open]") || (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName));
 };
 
@@ -1172,6 +1188,16 @@ async function refresh(force = false) {
     if (before === "waiting" && state.login.state !== "waiting") {
       toast(state.login.message, state.login.state === "done" ? "ok" : "error");
       force = true;
+    }
+    // An account sent from someone's machine has arrived: say so and get
+    // out of the way.
+    if (state.adding && state.addKind === "machine") {
+      const arrived = state.accounts.filter((a) => !(state.addBaseline ?? []).includes(a.id));
+      if (arrived.length) {
+        toast(`${arrived.map((a) => a.label).join(", ")} arrived`);
+        state.adding = false;
+        force = true;
+      }
     }
     state.offline = null;
   } catch (e) {

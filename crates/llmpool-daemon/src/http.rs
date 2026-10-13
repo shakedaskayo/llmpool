@@ -149,6 +149,7 @@ pub(crate) fn route(
             Ok(d.team_status())
         }
         ("DELETE", ["team"]) => d.team_disconnect(),
+        ("POST", ["team", "share"]) => d.team_share(text(&body, "account")?, body["keep"] != false),
         ("GET", ["events"]) => Ok(d.events()),
         _ => Err(fail(404, "no such route")),
     }
