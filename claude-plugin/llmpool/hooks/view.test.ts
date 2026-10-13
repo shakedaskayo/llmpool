@@ -137,3 +137,17 @@ test('the advisor is quoted in one line', () => {
   expect(adviceLine({ switch: 0.9, target: 'work-2', acted: true })).toBe('advisor: 90% for switching to work-2 · switched')
   expect(adviceLine({ error: 'the advisor account has no tokens left' })).toBe('advisor: the advisor account has no tokens left')
 })
+
+test('keys and other agents\' logins are not offered to a Claude Code session', () => {
+  const snap = toSnapshot({
+    ...STATUS,
+    accounts: [
+      ...STATUS.accounts,
+      { id: 'k', label: 'openai-work', provider: 'openai', kind: 'api_key', tags: [], enabled: true, health: 'ok', sessions: [] },
+      { id: 'x', label: 'codex:me', provider: 'codex', kind: 'oauth', tags: [], enabled: true, health: 'ok', sessions: [] },
+      { id: 'g', label: 'team gateway (claude)', provider: 'claude', kind: 'api_key', tags: [], enabled: true, health: 'ok', sessions: [] },
+      { id: 'd', label: 'work-3', provider: 'claude', kind: 'oauth', tags: [], enabled: true, health: 'ok', sessions: [] },
+    ],
+  })
+  expect(snap.rows.map(r => r.label).sort()).toEqual(['old', 'work-1', 'work-2', 'work-3'])
+})

@@ -1,0 +1,16 @@
+title: llmpool
+description: One pool of LLM accounts for every coding agent you run.
+baseurl: /llmpool
+markdown: kramdown
+exclude: [superpowers, notes]
+nav:
+  - {title: Overview, url: /}
+  - {title: Install, url: /install/}
+  - {title: In Claude Code, url: /claude-code/}
+  - {title: Any agent, url: /agents/}
+  - {title: Rules, url: /rules/}
+  - {title: Team server, url: /team/}
+  - {title: Gateway, url: /gateway/}
+  - {title: Kubernetes, url: /kubernetes/}
+  - {title: Security, url: /security/}
+  - {title: Commands, url: /commands/}

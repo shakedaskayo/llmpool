@@ -1,34 +1,58 @@
 # llmpool
 
-A pool of LLM provider logins for coding agents. llmpool holds several
-accounts, starts each agent session on the account a policy picks, and moves a
-running session to another account when a policy says so, without restarting
-the agent.
+**One pool of LLM accounts for every coding agent you run.** llmpool holds your
+logins and keys, starts each agent session on the account your rules pick, and
+moves on to another account when one fills up. For a team, one server holds the
+pool and can be the gateway every request goes through, so nobody's machine
+holds a login.
 
-Works with Claude Code today, on macOS and Linux. The agent keeps its own login path and talks to
-the provider directly: llmpool only decides which login sits in the profile the
-agent reads. The one request it makes to a provider is renewing a login that
-is sitting unused, so it still works when you need it (`LLMPOOL_NO_RENEW=1`
-turns that off).
+![The /llmpool pane inside Claude Code](docs/assets/tui.png)
+
+![Accounts](docs/assets/accounts.png)
+
+- **Inside your agent.** In Claude Code, `/llmpool` opens a pane with this
+  session's usage, the rest of the pool, and one-key switching. A running
+  session moves to another account without restarting.
+- **Any agent, any provider.** Codex CLI, OpenCode, Gemini CLI, Grok, Aider or
+  your own script start through `llmpool exec`. Accounts are subscription
+  logins or API keys for any provider.
+- **Rules, not habits.** "Work repos use work accounts", "move before the
+  limit", "prefer my own account while it has room": a small TOML file, or the
+  editor in the app.
+- **A team server, optionally a gateway.** Sign-in with Google or any OpenID
+  Connect provider, or API keys. Per-member access, an audit log, a web page to
+  run it from, and a Helm chart.
+
+Documentation: **https://shakedaskayo.github.io/llmpool/**
 
 ## Install
 
 ```bash
-cargo build --release -p llmpool-cli
-install -m 755 target/release/llmpool ~/.local/bin/llmpool   # `install`, not `cp`, when replacing a running copy
-llmpool install claude           # hooks, status line and the /llmpool mod
-llmpool install claude --shim    # optional: plain `claude` then starts through `llmpool run`
+curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh | sh
 ```
 
-The window and tray app:
+It builds from source, so it needs git and [Rust](https://rustup.rs). On macOS
+you get the menu-bar app in `/Applications`, the `llmpool` command, and Claude
+Code connected (hooks, status line, `/llmpool`); on Linux, the command. Run it
+again to update. `llmpool setup --undo` takes it all back out.
+
+From a checkout: `scripts/install-macos.sh`, or
+`cargo install --path crates/llmpool-cli` for the command alone.
+
+Then:
 
 ```bash
-cargo install tauri-cli --version "^2" --locked
-cd crates/llmpool-gui && cargo tauri build     # target/release/bundle/macos/llmpool.app
+llmpool doctor                       # what is in place and what is missing
+llmpool add claude --from-current    # the login Claude Code has now
+llmpool add claude                   # sign in to another account
+llmpool add key openai               # a key for any provider
+llmpool agents                       # the agents llmpool found on this machine
 ```
 
-`llmpool uninstall claude` takes all of that back out and restores your
-previous status line.
+| | |
+|---|---|
+| ![Sessions](docs/assets/sessions.png) | ![Rules](docs/assets/rules.png) |
+| ![Adding an account](docs/assets/add-account.png) | ![The server's own page](docs/assets/server.png) |
 
 ## Use
 
@@ -240,6 +264,18 @@ access tokens only, which the server renews before they run out and running
 sessions pick up without a restart. Unless `LLMPOOL_SHARE_LOGINS=1`, a
 subscription login in use by one member is not lent to another until they stop.
 
+**As a gateway.** With `LLMPOOL_GATEWAY=1` (or the switch on the server's
+page), members' agents send their requests to the server and it forwards each
+one to the provider on an account it picks. No login or key leaves the server:
+a member's agent holds only the member's own session. The server stays on the
+account a member was last on while it has room, which keeps the provider's
+prompt cache warm, and moves to another when it fills up, is refused, or
+fails. Nothing restarts. Each request leaves one line in `gateway-traces.log`
+(who, account, model, tokens, time; never what was said). Subscription logins
+and keys both work this way; through a gateway, Claude Code runs as an API
+client and its claude.ai connectors are off. `LLMPOOL_UPSTREAM_<PROVIDER>`
+moves a provider to your own proxy.
+
 **Running the server.**
 
 ```bash
@@ -360,10 +396,8 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 ## Not built yet
 
 Switching accounts under a running agent other than Claude Code, and reading
-usage for anything but Claude subscriptions. An LLM gateway beside the server
-(routing requests between accounts, traces): see
-`docs/gateway.md` for what was looked at and what is proposed. Windows is not
-supported.
+usage for anything but Claude subscriptions. Exporting gateway traces to
+OpenTelemetry. Windows is not supported.
 
 ## Licence
 

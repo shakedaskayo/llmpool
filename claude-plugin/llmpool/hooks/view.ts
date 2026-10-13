@@ -15,7 +15,11 @@ export const isUsable = (row: Row): boolean => row.state === 'ok' && !row.isElse
 export const toSnapshot = (status: Json): Snapshot => {
   const session: string | null = status?.session?.id ?? null
   const current: string | null = status?.session?.account_id ?? null
-  const rows: Row[] = (status?.accounts ?? []).map((a: Json) => ({
+  // Claude Code only ever runs on Claude logins; keys and other agents'
+  // logins in the pool are not places this session can go.
+  const rows: Row[] = (status?.accounts ?? [])
+    .filter((a: Json) => (a.provider ?? 'claude') === 'claude' && (a.kind ?? 'oauth') === 'oauth')
+    .map((a: Json) => ({
     id: a.id,
     label: a.label,
     tags: a.tags ?? [],

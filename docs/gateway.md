@@ -1,40 +1,53 @@
-# An LLM gateway beside the server: what was looked at
+---
+title: Gateway
+permalink: /gateway/
+---
+# The server as a gateway
 
-Asked for: let people who install the server optionally use it as a gateway
-that routes requests between accounts and collects traces, natively if a Rust
-implementation of LiteLLM allows it. Looked at on 2026-10-13; nothing here was
-run, and nothing is built yet.
+With the gateway on, members' agents send their requests to the server, and the server forwards each one to the provider on an account from the pool. **No login or key leaves the server.** A member's agent holds only the member's own session with the server.
 
-## What exists
+Turn it on with `LLMPOOL_GATEWAY=1`, `gateway.enabled` in the Helm chart, or the switch on the server's page. Members switch over at their next sync, within a minute.
 
-| | Form | State |
-|---|---|---|
-| LiteLLM's own Rust gateway (`litellm-rust/` in BerriAI/litellm, MIT) | about 70 crates, an axum/tokio binary `litellm-gateway` with a Dockerfile | Mid-migration, with a full pure-Rust server planned for December 2026. Not on crates.io. Virtual keys, budgets and spend are not there yet; no OpenTelemetry exporter was found. It does forward Claude subscription tokens upstream as bearer tokens. |
-| agentgateway (Apache-2.0) | binary and container, YAML or a Kubernetes controller | Released regularly. OpenAI-compatible and Anthropic endpoints, load balancing, failover, budgets, OpenTelemetry metrics, logs and traces. The upstream key can be an expression computed per request. |
-| litellm-rs (MIT, one maintainer, unaffiliated) | crate, binary and image | Usable, with the risk of a single maintainer. |
-| TensorZero | | Archived. |
-| Helicone ai-gateway | | GPL-3.0 and stale. |
+![The gateway on the server's page]({{ '/assets/server.png' | relative_url }})
 
-## What follows
+## What a member sees
 
-- **Not embedded.** Every candidate is built on tokio and axum; `llmpool serve`
-  is a small synchronous server. Embedding means a second runtime and hundreds
-  of dependencies pulled from unpublished git crates.
-- **A sidecar in the Helm chart, off by default.** The gateway runs next to the
-  server; llmpool writes its configuration from the pool's keys and tells it
-  per request which account to use.
-- **Which one.** agentgateway today, because it is released and has the traces
-  and the per-request key. LiteLLM's Rust gateway is the natural choice once
-  it ships keys, budgets and a release; revisit after its December milestone.
+One account per provider the pool can serve them, named `team gateway (openai)`, `team gateway (claude)`, and so on. Starting an agent on it sets two variables: the provider's base address, pointing at the server, and the provider's key, holding the member's own session.
 
-## To decide before building
+```bash
+llmpool exec -- codex                                  # OPENAI_BASE_URL and OPENAI_API_KEY point at the server
+llmpool run --account "team gateway (claude)"          # Claude Code through the gateway
+```
 
-- A gateway sits between the agent and the provider. For keys that is
-  ordinary. For Claude subscription logins it is what the core design chose
-  not to do (Claude Code features that depend on the first-party host, and
-  the provider's terms), so the proposal is: keys through the gateway, logins
-  lent as they are now.
-- Access tokens would be shared with a second process. Today nothing but
-  llmpool holds them.
-- The per-request key expression in agentgateway was read in its source, not
-  exercised.
+Anything that speaks a provider's API can use it directly:
+
+```bash
+curl https://pool.example.com/gateway/openai/v1/chat/completions \
+  -H "Authorization: Bearer $MY_LLMPOOL_KEY" -d '{"model": "...", "messages": [...]}'
+```
+
+## Which account a request runs on
+
+The server keeps a member on the account they were last on while it has room, which keeps the provider's prompt cache warm. It moves to another account when that one passes 90% of a window, when the provider refuses it for being over its rate (it is then left alone for as long as the provider says), or when it fails. If one account refuses a request, the same request is tried on the next, up to three. The agent sees none of this, and nothing restarts.
+
+For Claude subscriptions the server reads how full each account is from the provider's own answers.
+
+## Traces
+
+Each request leaves one line in `gateway-traces.log` in the server's data directory, and on standard error:
+
+```json
+{"at": 1791896274, "who": "ann@example.com", "provider": "claude", "account": "team-1@example.com",
+ "model": "claude-opus-5-5", "path": "v1/messages", "status": 200, "ms": 3049,
+ "input_tokens": 1820, "output_tokens": 412, "streamed": true, "tried": []}
+```
+
+Who, which account, which model, how long, how many tokens. Never what was said: bodies are passed through and not kept.
+
+## What changes for Claude Code
+
+Through a gateway Claude Code runs as an API client: it says "API usage billing", and its claude.ai connectors are off. Streaming, tools and prompt caching work as before. If those features matter more than keeping logins on the server, leave the gateway off and let the server lend instead.
+
+## Your own proxy, or another provider
+
+`LLMPOOL_UPSTREAM_<PROVIDER>` (the chart's `gateway.upstreams`) moves a provider's address: `LLMPOOL_UPSTREAM_OPENAI=https://llm-proxy.internal`. It also teaches the gateway a provider it does not know.
