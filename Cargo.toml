@@ -6,3 +6,7 @@ members = ["crates/llmpool-core", "crates/llmpool-adapter-claude", "crates/llmpo
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+# One line differs from the published crate; see vendor/tiny_http/README.md.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }

@@ -684,6 +684,11 @@ fn the_servers_own_page_is_for_administrators_and_cannot_be_driven_from_elsewher
 struct Upstream {
     url: String,
     seen: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    /// A slow answer waits until this many are open together (five seconds at
+    /// most), so a test can tell answers in flight together from a queue
+    /// without reading a clock.
+    together: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn upstream() -> Upstream {
@@ -694,6 +699,10 @@ fn upstream() -> Upstream {
     );
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let together = Arc::new(AtomicUsize::new(1));
+    let (open, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (want, most) = (together.clone(), peak.clone());
     std::thread::spawn(move || {
         for mut request in server.incoming_requests() {
             let mut headers: BTreeMap<String, String> = request
@@ -722,7 +731,9 @@ fn upstream() -> Upstream {
                         .with_header(header("retry-after", "30")),
                 );
             } else if request.url().contains("stream") {
+                let (open, want, most) = (open.clone(), want.clone(), most.clone());
                 std::thread::spawn(move || {
+                    most.fetch_max(open.fetch_add(1, SeqCst) + 1, SeqCst);
                     // Two events, a moment apart, each sent the moment it exists.
                     use std::io::Write;
                     let mut out = request.into_writer();
@@ -732,9 +743,16 @@ fn upstream() -> Upstream {
                         let _ = out.flush();
                     };
                     event("data: {\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n");
+                    let began = std::time::Instant::now();
+                    while most.load(SeqCst) < want.load(SeqCst)
+                        && began.elapsed() < Duration::from_secs(5)
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     std::thread::sleep(Duration::from_millis(600));
                     event("data: {\"usage\":{\"output_tokens\":9}}\n\n");
                     event("");
+                    open.fetch_sub(1, SeqCst);
                 });
             } else {
                 // A subscription login says how full it is with every answer.
@@ -756,7 +774,12 @@ fn upstream() -> Upstream {
             }
         }
     });
-    Upstream { url, seen }
+    Upstream {
+        url,
+        seen,
+        together,
+        peak,
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -1138,9 +1161,10 @@ fn the_gateway_carries_many_requests_at_once_and_follows_the_decision_model() {
             .send_json(json!({"model": "m-1", "messages": []}))
     };
 
-    // Twelve answers that each take a while, all in flight together: done in
-    // about the time of one, not of twelve in a queue of four.
-    let began = std::time::Instant::now();
+    // Twelve answers that each take a while, all in flight together, not
+    // twelve in a queue of four: none finishes until all twelve are open.
+    use std::sync::atomic::Ordering::SeqCst;
+    provider.together.store(12, SeqCst);
     let slow: Vec<_> = (0..12)
         .map(|_| {
             let url = url.clone();
@@ -1159,11 +1183,8 @@ fn the_gateway_carries_many_requests_at_once_and_follows_the_decision_model() {
     for answer in slow {
         assert!(answer.join().unwrap().contains("output_tokens"));
     }
-    assert!(
-        began.elapsed() < Duration::from_millis(1500),
-        "took {:?}",
-        began.elapsed()
-    );
+    assert_eq!(provider.peak.load(SeqCst), 12);
+    provider.together.store(1, SeqCst);
 
     // The member starts on one login, which fills past half. The decision
     // model is asked, off the request's own time, and sends them to the one
