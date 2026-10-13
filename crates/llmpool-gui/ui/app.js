@@ -1326,6 +1326,9 @@ function selectTab(tab) {
     $(t.getAttribute("aria-controls")).hidden = !on;
   }
   tab.focus();
+  // A new page starts at its top, whichever of the two is scrolling.
+  $("main").scrollTop = 0;
+  window.scrollTo(0, 0);
 }
 $("tabs").addEventListener("click", (e) => e.target.closest('[role="tab"]') && selectTab(e.target.closest('[role="tab"]')));
 const go = (name) => selectTab($(`tab-${name}`));
