@@ -12,6 +12,10 @@ pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 /// Claude Code's public OAuth client id.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
+/// What a subscription login is granted when nothing was recorded.
+const DEFAULT_SCOPE: &str =
+    "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+
 /// Renew when the login itself has less than this left.
 const LOGIN_MARGIN_MS: i64 = 7 * 24 * 3600 * 1000;
 /// And, so that a dead login is found before it is needed, when its short
@@ -43,10 +47,25 @@ pub fn due(secret: &Secret, now_ms: i64) -> bool {
 
 /// Renew `secret` in place. On anything but `Renewed` it is left untouched.
 pub fn renew(secret: &mut Secret, url: &str, now_ms: i64) -> Outcome {
-    let Some(refresh_token) = secret.oauth["refreshToken"].as_str() else {
+    // Nothing to renew with is not worth a request: the provider only answers
+    // "invalid request format", which says nothing about the login.
+    let Some(refresh_token) = secret.oauth["refreshToken"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+    else {
         return Outcome::Later("this login has no refresh token".into());
     };
-    let request = json!({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID});
+    // The request Claude Code itself makes: the scopes the login was granted
+    // go along, and the provider refuses the request without them.
+    let scope = match secret.oauth["scopes"].as_array() {
+        Some(scopes) if !scopes.is_empty() => scopes
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => DEFAULT_SCOPE.to_string(),
+    };
+    let request = json!({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID, "scope": scope});
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(15))
         .build();
@@ -65,7 +84,12 @@ pub fn renew(secret: &mut Secret, url: &str, now_ms: i64) -> Outcome {
             // clear is tried again, because wrongly declaring a working
             // login dead costs far more than one more attempt.
             let body: Value = response.into_json().unwrap_or_default();
-            let said = body["error"].as_str().unwrap_or_default();
+            // Either the plain OAuth form (`"error": "invalid_grant"`) or the
+            // provider's own envelope (`"error": {"type": "invalid_grant"}`).
+            let said = body["error"]
+                .as_str()
+                .or(body["error"]["type"].as_str())
+                .unwrap_or_default();
             return if matches!(code, 400 | 401 | 403) && said == "invalid_grant" {
                 Outcome::Dead
             } else {
@@ -166,6 +190,8 @@ mod tests {
         assert_eq!(s.oauth["scopes"], json!(["a", "b"]));
         let sent: Value = serde_json::from_str(&sent.join().unwrap()).unwrap();
         assert_eq!(sent["grant_type"], "refresh_token");
+        // Without the scopes the real provider answers "Invalid request format".
+        assert_eq!(sent["scope"], DEFAULT_SCOPE);
         assert_eq!(sent["refresh_token"], "r-old");
     }
 
@@ -174,6 +200,16 @@ mod tests {
         let before = secret(0, 0);
         for (status, body, expected_dead) in [
             (400, r#"{"error": "invalid_grant"}"#, true),
+            (
+                400,
+                r#"{"type": "error", "error": {"type": "invalid_grant", "message": "Refresh token not found or invalid"}}"#,
+                true,
+            ),
+            (
+                400,
+                r#"{"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid request format"}}"#,
+                false,
+            ),
             (
                 400,
                 r#"{"error": "invalid_request", "error_description": "not invalid_grant"}"#,
@@ -193,6 +229,29 @@ mod tests {
                 "an unrenewed login must be left exactly as it was"
             );
         }
+    }
+
+    #[test]
+    fn the_scopes_the_login_was_granted_are_sent_back() {
+        let (url, sent) = endpoint(200, r#"{"access_token": "new", "expires_in": 3600}"#);
+        let mut s = secret(0, 0);
+        s.oauth["scopes"] = json!(["user:inference", "user:profile"]);
+        assert_eq!(renew(&mut s, &url, 1), Outcome::Renewed);
+        let sent: Value = serde_json::from_str(&sent.join().unwrap()).unwrap();
+        assert_eq!(sent["scope"], "user:inference user:profile");
+        // No new refresh token in the reply: the old one stays.
+        assert_eq!(s.oauth["refreshToken"], "r-old");
+    }
+
+    #[test]
+    fn a_login_with_nothing_to_renew_with_is_not_sent() {
+        // An address nothing listens on: reaching it would be a different message.
+        let mut s = secret(0, 0);
+        s.oauth["refreshToken"] = json!("");
+        assert_eq!(
+            renew(&mut s, "http://127.0.0.1:1/token", 1),
+            Outcome::Later("this login has no refresh token".into())
+        );
     }
 
     #[test]
