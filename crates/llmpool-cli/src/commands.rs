@@ -807,7 +807,7 @@ fn agent_session() -> Option<String> {
         return Some(sid);
     }
     match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) if PathBuf::from(&dir) != home().join(".claude") => None,
+        Some(dir) if Path::new(&dir) != home().join(".claude") => None,
         _ => Some(NATIVE.to_string()),
     }
 }
