@@ -11,6 +11,8 @@ const state = {
   issues: [],
   stats: {},
   config: {},
+  team: { state: "off" },
+  remotePolicy: {},
   loginItem: null, // true, false, or null while unknown
   setupLog: "",
   login: { state: "idle" },
@@ -110,6 +112,8 @@ function expiryBadge(a) {
 }
 
 function accountBadge(a) {
+  if (a.shared && a.health !== "ok") return `<span class="badge">team</span> <span class="badge warn">in use by a teammate</span>`;
+  if (a.shared) return `<span class="badge">team</span>`;
   if (!a.enabled) return `<span class="badge">⏸ disabled</span>`;
   if (a.health !== "ok") return `<span class="badge bad">⚠ needs a new login</span>`;
   if (a.is_default) return `<span class="badge ok">default login</span>`;
@@ -166,15 +170,17 @@ function renderPool() {
       const used = a.sessions.length ? `<div class="muted">in use by ${plural(a.sessions.length, "session")}</div>` : "";
       return `<tr>
         <td><strong>${esc(a.label)}</strong> ${accountBadge(a)} ${expiryBadge(a)}${used}</td>
-        <td><input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" /></td>
+        <td>${a.shared ? `<span class="muted">${esc(a.tags.join(", "))}</span>` : `<input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" />`}</td>
         <td>${meter(a.usage, "5h", "5-hour window")}</td>
         <td>${meter(a.usage, "7d", "7-day window")}</td>
         <td>${sparkline(a.history, `5-hour usage of ${a.label}`)}</td>
-        <td class="actions">
-          ${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
+        <td class="actions">${
+          a.shared
+            ? `<span class="muted">managed by your team</span>`
+            : `${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
           <button data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
-          <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>
-        </td></tr>`;
+          <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`
+        }</td></tr>`;
     })
     .join("");
   $("pool").innerHTML = `${issuesPanel()}
@@ -385,7 +391,12 @@ function renderPolicies() {
   } else if (state.policy === null) {
     body = `<div class="callout bad" role="alert"><strong>⚠ The policy file does not parse.</strong><p>Fix it in the TOML view.</p></div>`;
   } else {
-    body = `${state.policy.rule.map(renderRule).join("") || `<p class="empty">No rules yet. Without rules, every session runs on your own login and nothing switches.</p>`}
+    const teamRules = state.remotePolicy.team?.rule ?? [];
+    const inherited = teamRules.length
+      ? `<div class="callout" role="note"><strong>From your team · tried first · read-only</strong>
+          <ol class="teamrules">${teamRules.map((r) => `<li${r.enabled === false ? ' class="muted"' : ""}><strong>${esc(r.name)}</strong> <span class="muted">on ${esc(typeof r.on === "string" ? r.on : Object.keys(r.on ?? {})[0] ?? "")}</span></li>`).join("")}</ol></div>`
+      : "";
+    body = `${inherited}${state.policy.rule.map(renderRule).join("") || `<p class="empty">No rules yet. Without rules, every session runs on your own login and nothing switches.</p>`}
       <div class="toolbar">
         <label for="template" class="muted">Add a rule:</label>
         <select id="template" data-act="add-rule"><option value="">choose a starting point…</option>${options(Object.keys(TEMPLATES), "")}</select>
@@ -618,6 +629,35 @@ async function loadPolicy() {
 
 // ---- settings ---------------------------------------------------------------
 
+// Joining a team's shared pool: by signing in at its server, or with a key.
+function teamPanel() {
+  const t = state.team;
+  if (t.state === "connected") {
+    const ago = t.synced_at ? `synced ${Math.max(0, Math.round((Date.now() / 1000 - t.synced_at) / 60))} min ago` : "not synced yet";
+    return `<p><span class="ok" aria-hidden="true">✓</span> Connected to <code>${esc(t.url)}</code> as <strong>${esc(t.email)}</strong> · ${plural(t.accounts, "shared account")} · ${ago}</p>
+      ${t.message ? `<p class="warnmark" role="alert">⚠ ${esc(t.message)}</p>` : ""}
+      <p class="muted">The team's accounts and rules arrive read-only. Its rules are tried before yours; your own account still comes first if you say so above.</p>
+      <div class="copy"><button data-act="team-sync">Sync now</button>
+        ${t.message ? `<button class="primary" data-act="team-again">Connect again</button>` : ""}
+        <button class="quiet danger" data-act="team-leave">Leave the team's pool</button></div>`;
+  }
+  if (t.state === "waiting") {
+    return `<p role="status"><strong>◌ Waiting for you to finish signing in in your browser…</strong></p>
+      <div class="copy"><a href="#" data-act="copy" data-text="${esc(t.auth_url)}">copy the sign-in link</a>
+        <button class="quiet" data-act="team-leave">Cancel</button></div>`;
+  }
+  return `<p class="muted">A team can run an llmpool server that lends its accounts and rules to its members. Enter its address and sign in with your organisation's account, or use an API key if your administrator gave you one.</p>
+    ${t.state === "failed" && t.message ? `<p class="warnmark" role="alert">⚠ ${esc(t.message)}</p>` : ""}
+    <div class="copy">
+      <input class="wide" id="team-url" type="url" placeholder="https://pool.example.com" aria-label="Team server address" value="${esc(state.teamUrl ?? "")}" />
+      <button class="primary" data-act="team-signin">Sign in</button>
+    </div>
+    <div class="copy">
+      <input class="wide" id="team-key" type="password" autocomplete="off" placeholder="API key (instead of signing in)" aria-label="Team API key, instead of signing in" />
+      <button data-act="team-key">Connect with key</button>
+    </div>`;
+}
+
 function renderSettings() {
   const c = state.config;
   const hooked = !state.issues.some((i) => i.kind === "hooks_missing");
@@ -630,6 +670,9 @@ function renderSettings() {
         <span><strong>Prefer my own account</strong><br /><span class="muted">An account tagged <code>own</code> is used whenever it has room; the rest of the pool is for when it does not. The login Claude Code had when you set llmpool up is tagged <code>own</code> for you.</span></span></label>
       <p class="indent"><label>Counts as having room below <input class="num" type="number" min="1" max="100" data-act="own-until" value="${esc(c.own_until ?? 85)}" /> % used</label></p>
     </div>
+
+    <h2>Team pool <span class="badge">optional</span></h2>
+    <div class="callout">${teamPanel()}</div>
 
     <h2>Advisor <span class="badge">optional</span></h2>
     <div class="callout">
@@ -672,6 +715,17 @@ async function settingsAction(el) {
     await attempt(() => api("PUT", "/advisor/key", { key }), "Key stored in your keychain");
   }
   if (act === "key-clear") await attempt(() => api("DELETE", "/advisor/key"), "Key forgotten");
+  if (act === "copy") return copy(el.dataset.text);
+  if (act === "team-signin" || act === "team-key" || act === "team-again") {
+    const url = act === "team-again" ? state.team.url : $("team-url").value.trim();
+    const key = act === "team-key" ? $("team-key").value.trim() : null;
+    if (!url) return toast("Enter the server's address first", "error");
+    if (act === "team-key" && !key) return toast("Paste the key first", "error");
+    state.teamUrl = url;
+    await attempt(() => api("POST", "/team", { url, key }), key ? "Connected to the team's pool" : "Finish signing in in your browser");
+  }
+  if (act === "team-sync") await attempt(() => api("POST", "/team/sync"), "Synced");
+  if (act === "team-leave") await attempt(() => api("DELETE", "/team"), state.team.state === "waiting" ? "Sign-in cancelled" : "Left the team's pool");
   if (act === "login-item") {
     await attempt(() => invoke("login_item", { state: el.checked ? "on" : "off" }), el.checked ? "llmpool starts at login" : "llmpool no longer starts at login");
     state.loginItem = null;
@@ -783,6 +837,8 @@ async function refresh(force = false) {
       optional("login", "/logins"),
       optional("stats", "/stats"),
       optional("config", "/config"),
+      optional("team", "/team"),
+      optional("remotePolicy", "/policies"),
     ]);
     if (state.loginItem === null) {
       state.loginItem = await invoke("login_item", { state: "status" }).then((text) => /starts at login/.test(text) && !/does not/.test(text), () => false);
@@ -844,7 +900,11 @@ $("sessions").addEventListener("click", async (e) => {
   await refresh(true);
 });
 $("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
-$("settings").addEventListener("click", (e) => e.target.matches("button[data-act]") && settingsAction(e.target));
+$("settings").addEventListener("click", (e) => {
+  if (!e.target.matches("button[data-act], a[data-act]")) return;
+  e.preventDefault();
+  settingsAction(e.target);
+});
 $("settings").addEventListener("change", (e) => e.target.matches("input[data-act]") && settingsAction(e.target));
 $("settings").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "advisor-key" && document.querySelector('[data-act="key-save"]')?.click());
 $("policies").addEventListener("click", (e) => e.target.matches("button[data-act]") && policyAction(e.target));

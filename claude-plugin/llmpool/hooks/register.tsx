@@ -160,6 +160,18 @@ const byCommand = async ($: EngineInterface, wanted: string): Promise<string> =>
       ? `The quick-switch row above the prompt is ${isOn ? 'on' : 'off'}.`
       : `The accounts pane ${isOn ? 'opens' : 'no longer opens'} by itself on wide terminals.`
   }
+  // `/llmpool team`, `/llmpool team <address>`, `/llmpool team sync|leave`.
+  // A key is never typed here, where it would stay in the transcript.
+  const team = wanted.match(/^team\b\s*(.*)$/)
+  if (team) {
+    const what = team[1].trim()
+    const args =
+      what === '' ? ['team'] : what === 'sync' ? ['team', 'sync'] : what === 'leave' ? ['team', 'disconnect'] : ['team', 'connect', what, '--detach']
+    const ran = await llmpool($, args)
+    await refresh($)
+
+    return (ran.exitCode === 0 ? ran.stdout : ran.stderr).trim() || 'done'
+  }
   if (wanted === 'add' || wanted === 'login') {
     await signIn($, null)
 

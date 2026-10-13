@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llmpool
+description: The llmpool team server, lending a pool of LLM accounts and rules to signed-in members
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

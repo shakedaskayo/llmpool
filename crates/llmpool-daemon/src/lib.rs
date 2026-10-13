@@ -5,6 +5,8 @@ pub mod advisor;
 pub mod client;
 pub mod http;
 mod onboarding;
+mod team;
+pub mod team_server;
 pub use onboarding::LoginReq;
 mod transfer;
 
@@ -44,6 +46,8 @@ pub const NATIVE: &str = "-";
 /// A session llmpool did not launch has no process to watch; it is over when
 /// it has been silent this long (and comes back if it speaks again).
 const NATIVE_IDLE_SECS: i64 = 1800;
+/// Said when someone tries to change what the team's server provides.
+const TEAM_OWNED: &str = "this account comes from your team's server; it can only be changed there";
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 #[derive(Debug)]
@@ -141,6 +145,10 @@ struct Persisted {
     events: VecDeque<LogEvent>,
     rr_cursor: Option<String>,
     next: u64,
+    /// Accounts that come from the team's server: its to change, not ours.
+    shared: BTreeSet<AccountId>,
+    /// Sessions teammates run on each shared account, as the server last said.
+    team_busy: BTreeMap<AccountId, usize>,
 }
 
 struct Inner {
@@ -201,6 +209,11 @@ pub struct Daemon {
     login: Mutex<Option<onboarding::LoginJob>>,
     /// Where logins are renewed. `None`: never (tests, or turned off).
     token_url: Option<String>,
+    /// Keep every login's access token fresh, not only the login itself:
+    /// a server hands these tokens out and nothing else renews them.
+    keep_fresh: bool,
+    /// The sign-in to a team server in progress, if any.
+    team_job: Mutex<Option<team::Job>>,
     inner: Mutex<Inner>,
 }
 
@@ -313,6 +326,9 @@ fn busy(g: &Inner) -> BTreeMap<AccountId, usize> {
     {
         *load.entry(id.clone()).or_insert(0) += 1;
     }
+    for (id, sessions) in &g.p.team_busy {
+        *load.entry(id.clone()).or_insert(0) += sessions;
+    }
     load
 }
 
@@ -395,6 +411,8 @@ impl Daemon {
             saved: Mutex::new(String::new()),
             login: Mutex::new(None),
             token_url: None,
+            keep_fresh: false,
+            team_job: Mutex::new(None),
             inner: Mutex::new(Inner {
                 store: Store::open(&data_dir.join("llmpool.db"))?,
                 p,
@@ -471,12 +489,19 @@ impl Daemon {
     pub fn tick(&self) {
         self.poll_login();
         self.renew_idle();
+        self.team_poll();
+        self.team_sync();
         let mut g = self.lock();
         self.reap(&mut g);
         let ids: Vec<String> = g.p.sessions.keys().cloned().collect();
         for id in ids {
             self.react(&mut g, &id, Event::Tick);
         }
+    }
+
+    /// Serve the pool to others: keep every access token fresh.
+    pub fn set_keep_fresh(&mut self, on: bool) {
+        self.keep_fresh = on;
     }
 
     /// Renew logins against this address. For tests, and for turning renewal on
@@ -497,6 +522,20 @@ impl Daemon {
 
     fn policy_path(&self) -> PathBuf {
         self.data_dir.join("policies.toml")
+    }
+
+    fn team_policy_path(&self) -> PathBuf {
+        self.data_dir.join("policies.team.toml")
+    }
+
+    /// The rules in force: the team server's first, then this machine's own.
+    /// Settings stay this machine's.
+    fn policy(&self) -> Result<PolicyFile, llmpool_core::policy::PolicyError> {
+        let mut policy = file::load(&self.policy_path())?;
+        if let Ok(team) = file::load(&self.team_policy_path()) {
+            policy.rules.splice(0..0, team.rules);
+        }
+        Ok(policy)
     }
 
     fn default_profile(&self) -> Profile {
@@ -728,6 +767,7 @@ impl Daemon {
                 let mut row = serde_json::to_value(a).unwrap_or_default();
                 row["sessions"] = json!(sessions);
                 row["history"] = json!(g.p.history.get(&a.id));
+                row["shared"] = json!(g.p.shared.contains(&a.id));
                 row["is_default"] = json!(self
                     .holders_given(&g, a, &default)
                     .iter()
@@ -826,6 +866,9 @@ impl Daemon {
         let g = self.lock();
         let accounts = g.store.list()?;
         let mut account = find(&accounts, name)?.clone();
+        if g.p.shared.contains(&account.id) {
+            return Err(fail(403, TEAM_OWNED));
+        }
         if let Some(label) = req.label {
             label_is_free(&accounts, &account.id, &label)?;
             account.label = label;
@@ -844,6 +887,9 @@ impl Daemon {
         let g = self.lock();
         let accounts = g.store.list()?;
         let account = find(&accounts, name)?;
+        if g.p.shared.contains(&account.id) {
+            return Err(fail(403, TEAM_OWNED));
+        }
         if g.p
             .sessions
             .values()
@@ -876,6 +922,10 @@ impl Daemon {
             self.sync_default_locked(&mut g);
             let mut entries = Vec::new();
             for mut account in g.store.list()? {
+                // The team's accounts are the server's to hand out.
+                if g.p.shared.contains(&account.id) {
+                    continue;
+                }
                 // Usage describes this machine's view, not the account.
                 account.usage = None;
                 let secret = self
@@ -1212,7 +1262,8 @@ impl Daemon {
                 .clone(),
             )
         } else {
-            let policy = file::load(&self.policy_path())
+            let policy = self
+                .policy()
                 .map_err(|e| fail(400, format!("policy file: {e}")))?;
             let decision = self.decide(&g, &policy, Event::SessionStart, &session, &accounts);
             rule = decision.rule;
@@ -1585,7 +1636,7 @@ impl Daemon {
         if m.store.is_none() {
             return;
         }
-        let policy = match file::load(&self.policy_path()) {
+        let policy = match self.policy() {
             Ok(policy) => policy,
             Err(e) => {
                 self.log(g, "policy_error", None, e.to_string());
@@ -1790,7 +1841,7 @@ impl Daemon {
     /// A plain session cannot be started on another login, so where a
     /// `session_start` rule would have chosen one, say so instead.
     fn suggest(&self, g: &mut Inner, sid: &str, accounts: &[Account], current: &Account) {
-        let (Ok(policy), Some(m)) = (file::load(&self.policy_path()), g.p.sessions.get(sid)) else {
+        let (Ok(policy), Some(m)) = (self.policy(), g.p.sessions.get(sid)) else {
             return;
         };
         // Evaluated as a session with no account yet, as `llmpool run` would.
@@ -1999,7 +2050,9 @@ impl Daemon {
     pub fn policy_text(&self) -> Value {
         let path = self.policy_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        json!({"policy": PolicyFile::parse(&text).ok(), "text": text, "path": path})
+        let team = std::fs::read_to_string(self.team_policy_path()).unwrap_or_default();
+        json!({"policy": PolicyFile::parse(&text).ok(), "text": text, "path": path,
+               "team": PolicyFile::parse(&team).ok().filter(|_| !team.trim().is_empty()), "team_text": team})
     }
 
     /// Structured form of policy text an editor holds, validated but not saved.
@@ -2026,7 +2079,7 @@ impl Daemon {
         let g = self.lock();
         let policy = match &req.text {
             Some(text) => file::checked(text),
-            None => file::load(&self.policy_path()),
+            None => self.policy(),
         }
         .map_err(|e| fail(400, e.to_string()))?;
         let session = match &req.session_id {

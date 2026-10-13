@@ -476,7 +476,9 @@ Where the implementation differs from the design above, and why.
 | `schedule` takes a cron expression | `schedule = { at = "HH:MM", days = [...] }` | Covers switching at a time of day without a cron parser; the engine is ticked once a minute |
 | GUI in React and TypeScript, live via server-sent events, tray with per-session switching | Plain HTML, CSS and JavaScript with no build step, polling every three seconds; tray lists sessions with a submenu of accounts to switch to | Fewer moving parts for the same screens |
 | `ask` on a running session opens a GUI picker | It queues a notice naming the candidates; the choice is made in `/llmpool`, the GUI or `llmpool switch` | One place to choose from, already present in every surface |
-| Account health `quarantined` | Unused; a login that fails is `relogin_required` | One state was enough |
+| Account health `quarantined` | Used for a team account another member holds, or one the server stopped lending while a session is on it | The account exists but is not this member's to use right now |
+| Team server: a later spec | Built in `team_server.rs` and `team.rs`: sign-in through any OpenID Connect provider (code flow at the server, handed to the client's loopback address and bound to a secret only the client holds) or named API keys; members receive access tokens only and the team's rules read-only; seats are exclusive per subscription login unless `LLMPOOL_SHARE_LOGINS`; container image and Helm chart | Asked for before the other adapters. Not built: roles, audit log, per-member revocation |
+| ID token signature | Not verified: the token is read only from the provider's token endpoint over verified TLS (OpenID Connect Core 3.1.3.7), with issuer, audience, nonce, expiry and verified email checked | No JWT or RSA dependency; never applies to a token from anywhere else |
 | Windows | Not supported: process, lock and permission handling use Unix calls | macOS and Linux first |
 
 Verified against real Claude Code on macOS: install, capture of the current

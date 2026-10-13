@@ -1,0 +1,761 @@
+//! Serving this machine's pool to signed-in teammates.
+//!
+//! People sign in with the organisation's identity provider (Google unless
+//! configured otherwise) and receive a session token of ours. With it their
+//! own llmpool fetches the shared rules and, for the accounts they may use,
+//! short-lived access tokens. Refresh tokens never leave this machine.
+//!
+//! This listener speaks plain HTTP; put it behind something that terminates
+//! TLS. Clients refuse a server that is not `https` unless it is on loopback.
+
+use crate::http::percent_decode;
+use crate::{fail, now, Api, ApiError, Daemon};
+use base64::Engine;
+use llmpool_core::model::{AccountId, Kind, Usage};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// A sign-in may sit in the browser this long.
+const PENDING_SECS: i64 = 600;
+/// The code handed to the client's loopback address is good for this long.
+const GRANT_SECS: i64 = 120;
+/// How long a session of ours lasts before the person signs in again.
+const SESSION_SECS: i64 = 30 * 24 * 3600;
+/// A seat is given up when its holder has not reported using it for this long.
+const SEAT_SECS: i64 = 180;
+const MAX_PENDING: usize = 256;
+const MAX_BODY: u64 = 1 << 20;
+
+pub struct Config {
+    /// Where people's browsers reach this server, e.g. `https://pool.example.com`.
+    pub public_url: String,
+    /// Sign-in through an OpenID Connect provider (Google, Okta, Keycloak,
+    /// Entra, ...). `None`: API keys only.
+    pub oidc: Option<Oidc>,
+    /// Members who connect with a key instead of signing in: name to the
+    /// SHA-256 of their key.
+    pub api_keys: BTreeMap<String, String>,
+    /// Who may sign in through the provider: anyone whose verified address is in one of these
+    /// domains, or is one of these addresses. Both empty admits nobody.
+    pub domains: Vec<String>,
+    pub emails: Vec<String>,
+    /// Let several people run on one subscription login at once. Off, a login
+    /// in use by one person is not handed to another.
+    pub share_logins: bool,
+}
+
+pub struct Oidc {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// A key shorter than this is too easy to guess to guard a pool of logins.
+const MIN_KEY: usize = 24;
+
+impl Config {
+    pub fn from_env() -> Result<Self, String> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let need = |name: &str| var(name).ok_or_else(|| format!("{name} is not set"));
+        let list = |name: &str| -> Vec<String> {
+            var(name)
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let config = Self {
+            public_url: need("LLMPOOL_PUBLIC_URL")?
+                .trim_end_matches('/')
+                .to_string(),
+            oidc: match var("LLMPOOL_OIDC_CLIENT_ID") {
+                Some(client_id) => Some(Oidc {
+                    issuer: var("LLMPOOL_OIDC_ISSUER")
+                        .unwrap_or_else(|| "https://accounts.google.com".into())
+                        .trim_end_matches('/')
+                        .to_string(),
+                    client_id,
+                    client_secret: need("LLMPOOL_OIDC_CLIENT_SECRET")?,
+                }),
+                None => None,
+            },
+            api_keys: Self::keys(&var("LLMPOOL_API_KEYS").unwrap_or_default())?,
+            domains: list("LLMPOOL_ALLOWED_DOMAINS"),
+            emails: list("LLMPOOL_ALLOWED_EMAILS"),
+            share_logins: var("LLMPOOL_SHARE_LOGINS").is_some_and(|v| v == "1" || v == "true"),
+        };
+        if config.oidc.is_none() && config.api_keys.is_empty() {
+            return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
+        }
+        if config.oidc.is_some() && config.domains.is_empty() && config.emails.is_empty() {
+            return Err(
+                "set LLMPOOL_ALLOWED_DOMAINS or LLMPOOL_ALLOWED_EMAILS: with neither, nobody may sign in"
+                    .into(),
+            );
+        }
+        Ok(config)
+    }
+
+    /// `name:key` pairs, separated by commas or line breaks.
+    pub fn keys(text: &str) -> Result<BTreeMap<String, String>, String> {
+        let mut keys = BTreeMap::new();
+        for pair in text
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            let (name, key) = pair
+                .split_once(':')
+                .map(|(n, k)| (n.trim(), k.trim()))
+                .filter(|(n, _)| !n.is_empty())
+                .ok_or("LLMPOOL_API_KEYS: each entry is `name:key`")?;
+            if key.len() < MIN_KEY {
+                return Err(format!(
+                    "LLMPOOL_API_KEYS: the key of `{name}` is shorter than {MIN_KEY} characters"
+                ));
+            }
+            keys.insert(name.to_string(), sha256_hex(key));
+        }
+        Ok(keys)
+    }
+
+    fn admits(&self, email: &str) -> bool {
+        let email = email.to_lowercase();
+        let domain = email.rsplit('@').next().unwrap_or_default();
+        self.emails.contains(&email) || self.domains.iter().any(|d| d == domain)
+    }
+}
+
+struct Pending {
+    port: u16,
+    challenge: String,
+    client_state: String,
+    nonce: String,
+    at: i64,
+}
+
+struct Grant {
+    challenge: String,
+    email: String,
+    at: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Member {
+    email: String,
+    expires_at: i64,
+}
+
+#[derive(Default)]
+struct State {
+    pending: BTreeMap<String, Pending>,
+    grants: BTreeMap<String, Grant>,
+    /// By the SHA-256 of the session token, so the file holds nothing usable.
+    members: BTreeMap<String, Member>,
+    /// Who runs how many sessions on which account, and when they last said so.
+    seats: BTreeMap<AccountId, BTreeMap<String, (i64, usize)>>,
+}
+
+pub struct TeamServer {
+    config: Config,
+    daemon: Arc<Daemon>,
+    state: Mutex<State>,
+    /// The identity provider's (issuer, authorization, token) addresses.
+    provider: Mutex<Option<(String, String, String)>>,
+    members_path: PathBuf,
+}
+
+enum Reply {
+    Json(Value),
+    Redirect(String),
+    Page(u16, String),
+}
+
+pub(crate) fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    getrandom::getrandom(&mut buf).expect("the system has no randomness");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub(crate) fn sha256_hex(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub(crate) fn url_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+pub(crate) fn query_of(url: &str) -> BTreeMap<String, String> {
+    url.split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (percent_decode(k), percent_decode(&v.replace('+', " "))))
+        .collect()
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+pub(crate) fn page(title: &str, text: &str) -> String {
+    format!(
+        "<!doctype html><meta charset=utf-8><title>llmpool</title>\
+         <body style=\"font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:32em;margin:18vh auto;padding:0 1em\">\
+         <h1 style=\"font-size:18px\">{}</h1><p>{}</p>",
+        escape(title),
+        escape(text)
+    )
+}
+
+fn denied(text: &str) -> ApiError {
+    fail(403, text)
+}
+
+/// The claims of an ID token. Its signature is not checked here: the token
+/// came straight from the provider's token endpoint over verified TLS, which
+/// OpenID Connect Core 3.1.3.7 accepts in place of the signature check.
+/// Never use this on a token that arrived any other way.
+fn claims_of(id_token: &str) -> Option<Value> {
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+impl TeamServer {
+    pub fn new(daemon: Arc<Daemon>, config: Config) -> Self {
+        let members_path = daemon.data_dir().join("team-members.json");
+        let members = std::fs::read_to_string(&members_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self {
+            config,
+            daemon,
+            state: Mutex::new(State {
+                members,
+                ..State::default()
+            }),
+            provider: Mutex::new(None),
+            members_path,
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn save_members(&self, state: &State) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let tmp = self.members_path.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(
+                    serde_json::to_string(&state.members)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )
+            });
+        if written.is_ok() {
+            let _ = std::fs::rename(tmp, &self.members_path);
+        }
+    }
+
+    /// The provider's addresses, from its discovery document, read once.
+    fn provider(&self) -> Api<(String, String, String)> {
+        let mut cached = self.provider.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(found) = cached.as_ref() {
+            return Ok(found.clone());
+        }
+        let url = format!("{}/.well-known/openid-configuration", self.oidc()?.issuer);
+        let doc: Value = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .get(&url)
+            .call()
+            .map_err(|e| fail(502, format!("the sign-in provider is unreachable: {e}")))?
+            .into_json()
+            .map_err(|e| fail(502, format!("the sign-in provider answered oddly: {e}")))?;
+        let field = |name: &str| {
+            doc[name]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| fail(502, format!("the sign-in provider names no {name}")))
+        };
+        let found = (
+            field("issuer")?,
+            field("authorization_endpoint")?,
+            field("token_endpoint")?,
+        );
+        *cached = Some(found.clone());
+        Ok(found)
+    }
+
+    fn oidc(&self) -> Api<&Oidc> {
+        self.config
+            .oidc
+            .as_ref()
+            .ok_or_else(|| fail(404, "this pool has no sign-in; connect with an API key"))
+    }
+
+    fn redirect_uri(&self) -> String {
+        format!("{}/auth/callback", self.config.public_url)
+    }
+
+    /// Step one: the client's browser arrives, saying where on its own
+    /// machine to come back to and what it will prove itself with.
+    fn login(&self, query: &BTreeMap<String, String>) -> Api<Reply> {
+        let get = |name: &str| query.get(name).map(String::as_str).unwrap_or_default();
+        let port: u16 = get("port")
+            .parse()
+            .ok()
+            .filter(|p| *p >= 1024)
+            .ok_or_else(|| fail(400, "bad request: `port` is required"))?;
+        let (challenge, client_state) = (get("challenge"), get("state"));
+        let hex = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex(challenge, 64) || !hex(client_state, 32) {
+            return Err(fail(
+                400,
+                "bad request: `challenge` and `state` are required",
+            ));
+        }
+        let oidc = self.oidc()?;
+        let (_, authorize, _) = self.provider()?;
+        let (state_id, nonce) = (random_hex(16), random_hex(16));
+        {
+            let mut state = self.state();
+            let t = now();
+            state.pending.retain(|_, p| t - p.at < PENDING_SECS);
+            if state.pending.len() >= MAX_PENDING {
+                return Err(fail(
+                    429,
+                    "too many sign-ins in progress; try again shortly",
+                ));
+            }
+            state.pending.insert(
+                state_id.clone(),
+                Pending {
+                    port,
+                    challenge: challenge.into(),
+                    client_state: client_state.into(),
+                    nonce: nonce.clone(),
+                    at: t,
+                },
+            );
+        }
+        let mut url = format!(
+            "{authorize}{}response_type=code&scope=openid%20email&client_id={}&redirect_uri={}&state={state_id}&nonce={nonce}&prompt=select_account",
+            if authorize.contains('?') { '&' } else { '?' },
+            url_encode(&oidc.client_id),
+            url_encode(&self.redirect_uri()),
+        );
+        // A hint only; the address is checked when it comes back.
+        if let ([domain], true) = (
+            self.config.domains.as_slice(),
+            self.config.emails.is_empty(),
+        ) {
+            url += &format!("&hd={}", url_encode(domain));
+        }
+        Ok(Reply::Redirect(url))
+    }
+
+    /// Step two: the provider sends the browser back with a code. We trade it
+    /// for the person's identity, decide whether they may come in, and send
+    /// the browser on to the client that started this.
+    fn callback(&self, query: &BTreeMap<String, String>) -> Api<Reply> {
+        let get = |name: &str| query.get(name).map(String::as_str).unwrap_or_default();
+        let pending = self
+            .state()
+            .pending
+            .remove(get("state"))
+            .filter(|p| now() - p.at < PENDING_SECS)
+            .ok_or_else(|| fail(400, "this sign-in was not started here, or took too long"))?;
+        if !get("error").is_empty() {
+            return Err(denied(&format!(
+                "the sign-in was not completed ({})",
+                get("error")
+            )));
+        }
+        let oidc = self.oidc()?;
+        let (issuer, _, token_url) = self.provider()?;
+        let answer: Value = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .post(&token_url)
+            .send_form(&[
+                ("grant_type", "authorization_code"),
+                ("code", get("code")),
+                ("redirect_uri", &self.redirect_uri()),
+                ("client_id", &oidc.client_id),
+                ("client_secret", &oidc.client_secret),
+            ])
+            .map_err(|_| fail(502, "the sign-in provider did not accept the sign-in"))?
+            .into_json()
+            .map_err(|_| fail(502, "the sign-in provider answered oddly"))?;
+        let claims = answer["id_token"]
+            .as_str()
+            .and_then(claims_of)
+            .ok_or_else(|| fail(502, "the sign-in provider sent no identity"))?;
+        let audience_ok = match &claims["aud"] {
+            Value::String(aud) => *aud == oidc.client_id,
+            Value::Array(all) => all.iter().any(|a| a == oidc.client_id.as_str()),
+            _ => false,
+        };
+        let verified = claims["email_verified"] == true || claims["email_verified"] == "true";
+        let email = claims["email"].as_str().unwrap_or_default().to_lowercase();
+        if claims["iss"].as_str() != Some(issuer.as_str())
+            || !audience_ok
+            || claims["nonce"].as_str() != Some(pending.nonce.as_str())
+            || claims["exp"].as_i64().is_none_or(|exp| exp < now())
+        {
+            return Err(denied(
+                "the identity the provider sent was not meant for this sign-in",
+            ));
+        }
+        if email.is_empty() || !verified {
+            return Err(denied(
+                "the provider has not verified an email address for you",
+            ));
+        }
+        if !self.config.admits(&email) {
+            return Err(denied(&format!("{email} is not allowed to use this pool")));
+        }
+        let code = random_hex(24);
+        {
+            let mut state = self.state();
+            let t = now();
+            state.grants.retain(|_, g| t - g.at < GRANT_SECS);
+            state.grants.insert(
+                code.clone(),
+                Grant {
+                    challenge: pending.challenge,
+                    email,
+                    at: t,
+                },
+            );
+        }
+        // Only ever to the person's own machine.
+        Ok(Reply::Redirect(format!(
+            "http://127.0.0.1:{}/callback?code={code}&state={}",
+            pending.port, pending.client_state
+        )))
+    }
+
+    /// Step three: the client proves it is the one that started the sign-in
+    /// and receives its session.
+    fn exchange(&self, body: &Value) -> Api<Reply> {
+        let text = |name: &str| body[name].as_str().unwrap_or_default();
+        let mut state = self.state();
+        let t = now();
+        let grant = state
+            .grants
+            .remove(text("code"))
+            .filter(|g| t - g.at < GRANT_SECS && g.challenge == sha256_hex(text("verifier")))
+            .ok_or_else(|| fail(400, "this sign-in code is unknown, used or too old"))?;
+        let token = random_hex(32);
+        let expires_at = t + SESSION_SECS;
+        state.members.retain(|_, m| m.expires_at > t);
+        state.members.insert(
+            sha256_hex(&token),
+            Member {
+                email: grant.email.clone(),
+                expires_at,
+            },
+        );
+        self.save_members(&state);
+        Ok(Reply::Json(
+            json!({"token": token, "email": grant.email, "expires_at": expires_at}),
+        ))
+    }
+
+    fn member(&self, bearer: Option<&str>) -> Api<(String, String)> {
+        let key = sha256_hex(bearer.unwrap_or_default());
+        // A key member is whoever the server's configuration says holds it.
+        if let Some((name, _)) = self.config.api_keys.iter().find(|(_, hash)| **hash == key) {
+            return Ok((key, name.clone()));
+        }
+        let member = self
+            .state()
+            .members
+            .get(&key)
+            .filter(|m| m.expires_at > now())
+            .cloned()
+            .ok_or_else(|| fail(401, "sign in to this pool again"))?;
+        // Leaving the allow list ends the session, not only future sign-ins.
+        if !self.config.admits(&member.email) {
+            return Err(fail(401, "you are no longer allowed to use this pool"));
+        }
+        Ok((key, member.email))
+    }
+
+    /// What one teammate's llmpool asks every minute: here is what I am
+    /// running on and what I saw of its usage; what may I use?
+    fn sync(&self, email: &str, body: &Value) -> Api<Reply> {
+        let using: BTreeMap<AccountId, usize> =
+            serde_json::from_value(body["using"].clone()).unwrap_or_default();
+        let usage: BTreeMap<AccountId, Usage> =
+            serde_json::from_value(body["usage"].clone()).unwrap_or_default();
+        let d = &self.daemon;
+        let g = d.lock();
+        let accounts = d.accounts(&g)?;
+        let mut state = self.state();
+        let t = now();
+        for holders in state.seats.values_mut() {
+            holders.retain(|who, (seen, _)| who != email && t - *seen < SEAT_SECS);
+        }
+        let mut rows = Vec::new();
+        for mut account in accounts {
+            if !account.usable() || g.renewing.contains(&account.id) {
+                continue;
+            }
+            let holders = state.seats.entry(account.id.clone()).or_default();
+            let others: usize = holders.values().map(|(_, n)| n).sum();
+            let exclusive = account.kind == Kind::Oauth && !self.config.share_logins;
+            let held = exclusive && others > 0;
+            if let (Some(sessions), false) = (using.get(&account.id), held) {
+                holders.insert(email.to_string(), (t, *sessions));
+            }
+            // The server runs no sessions; what it knows of usage is what
+            // clients tell it.
+            if let Some(seen) = usage.get(&account.id) {
+                if account
+                    .usage
+                    .as_ref()
+                    .is_none_or(|have| seen.fetched_at > have.fetched_at)
+                    && seen.fetched_at <= t + 60
+                {
+                    account.usage = Some(seen.clone());
+                    g.store.put(&account)?;
+                }
+            }
+            let secret = if held {
+                Value::Null
+            } else {
+                match d.secret_of(&account.id) {
+                    Ok(mut secret) => {
+                        // The part that can mint new tokens stays here.
+                        if let Some(oauth) = secret.oauth.as_object_mut() {
+                            oauth.remove("refreshToken");
+                            oauth.remove("refreshTokenExpiresAt");
+                        }
+                        serde_json::to_value(&secret)?
+                    }
+                    Err(_) => continue,
+                }
+            };
+            account.login_expires_at = None;
+            rows.push(
+                json!({"account": account, "secret": secret, "others": others, "held": held}),
+            );
+        }
+        let policy = std::fs::read_to_string(d.policy_path()).unwrap_or_default();
+        Ok(Reply::Json(
+            json!({"email": email, "policy": policy, "accounts": rows}),
+        ))
+    }
+
+    fn route(
+        &self,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        bearer: Option<&str>,
+        body: &Value,
+    ) -> Api<Reply> {
+        match (method, path) {
+            ("GET", "/health") => Ok(Reply::Json(json!({
+                "ok": true,
+                "service": "llmpool",
+                "sign_in": self.config.oidc.as_ref().map(|o| o.issuer.as_str()),
+                "api_keys": !self.config.api_keys.is_empty(),
+            }))),
+            ("GET", "/auth/login") => self.login(query),
+            ("GET", "/auth/callback") => self.callback(query),
+            ("POST", "/auth/exchange") => self.exchange(body),
+            ("GET", "/v1/me") => Ok(Reply::Json(json!({"email": self.member(bearer)?.1}))),
+            ("POST", "/auth/logout") => {
+                let (key, _) = self.member(bearer)?;
+                let mut state = self.state();
+                state.members.remove(&key);
+                self.save_members(&state);
+                Ok(Reply::Json(json!({})))
+            }
+            ("POST", "/v1/sync") => {
+                let (_, email) = self.member(bearer)?;
+                self.sync(&email, body)
+            }
+            _ => Err(fail(404, "no such route")),
+        }
+    }
+
+    fn handle(&self, mut request: tiny_http::Request) {
+        let bearer = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Authorization"))
+            .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+            .map(str::to_string);
+        let mut text = String::new();
+        let _ = request.as_reader().take(MAX_BODY).read_to_string(&mut text);
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let url = request.url().to_string();
+        let path = url.split('?').next().unwrap_or_default().to_string();
+        let browser = path.starts_with("/auth/") && *request.method() == tiny_http::Method::Get;
+        let result = self.route(
+            request.method().as_str(),
+            &path,
+            &query_of(&url),
+            bearer.as_deref(),
+            &body,
+        );
+        let reply = match result {
+            Ok(reply) => reply,
+            // A person is looking at this one.
+            Err(e) if browser => Reply::Page(e.status, page("Sign-in did not work", &e.message)),
+            Err(e) => {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(json!({"error": e.message}).to_string())
+                        .with_status_code(e.status)
+                        .with_header(header("Content-Type", "application/json")),
+                );
+                return;
+            }
+        };
+        let _ = match reply {
+            Reply::Json(value) => request.respond(
+                tiny_http::Response::from_string(value.to_string())
+                    .with_header(header("Content-Type", "application/json"))
+                    .with_header(header("Cache-Control", "no-store")),
+            ),
+            Reply::Redirect(to) => request.respond(
+                tiny_http::Response::empty(302)
+                    .with_header(header("Location", &to))
+                    .with_header(header("Cache-Control", "no-store")),
+            ),
+            Reply::Page(status, html) => request.respond(
+                tiny_http::Response::from_string(html)
+                    .with_status_code(status)
+                    .with_header(header("Content-Type", "text/html; charset=utf-8")),
+            ),
+        };
+    }
+}
+
+pub(crate) fn header(name: &str, value: &str) -> tiny_http::Header {
+    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+        .unwrap_or_else(|_| tiny_http::Header::from_bytes(&b"X-Bad"[..], &b"1"[..]).unwrap())
+}
+
+pub struct Serving {
+    pub port: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl Serving {
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Serve the pool on `listen` (e.g. `0.0.0.0:8787`) until stopped.
+pub fn start(daemon: Arc<Daemon>, config: Config, listen: &str) -> std::io::Result<Serving> {
+    let server = Arc::new(tiny_http::Server::http(listen).map_err(std::io::Error::other)?);
+    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
+    let team = Arc::new(TeamServer::new(daemon, config));
+    let stop = Arc::new(AtomicBool::new(false));
+    for _ in 0..4 {
+        let (server, team, stop) = (server.clone(), team.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(300)) {
+                    team.handle(request);
+                }
+            }
+        });
+    }
+    Ok(Serving { port, stop })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(domains: &[&str], emails: &[&str]) -> Config {
+        Config {
+            public_url: "https://pool.example".into(),
+            oidc: None,
+            api_keys: BTreeMap::new(),
+            domains: domains.iter().map(|s| s.to_string()).collect(),
+            emails: emails.iter().map(|s| s.to_string()).collect(),
+            share_logins: false,
+        }
+    }
+
+    #[test]
+    fn admits_by_domain_or_address_and_nobody_by_default() {
+        let c = config(&["x.io"], &["guest@y.io"]);
+        assert!(c.admits("Ann@X.io"));
+        assert!(c.admits("guest@y.io"));
+        assert!(!c.admits("ann@y.io"));
+        // A domain is matched whole, not as an ending.
+        assert!(!c.admits("ann@evilx.io"));
+        assert!(!c.admits("ann@x.io.evil.com"));
+        assert!(!config(&[], &[]).admits("ann@x.io"));
+    }
+
+    #[test]
+    fn api_keys_are_named_hashed_and_long_enough() {
+        let keys =
+            Config::keys("ci:0123456789abcdefghijklmnop,\n ann@x.io : zyxwvutsrqponmlkjihgfedcba")
+                .unwrap();
+        assert_eq!(keys["ci"], sha256_hex("0123456789abcdefghijklmnop"));
+        assert!(keys.contains_key("ann@x.io"));
+        assert!(Config::keys("ci:short").is_err());
+        assert!(Config::keys("nokey").is_err());
+        assert!(Config::keys("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_claims_and_query_and_escapes_pages() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":"a@x.io","aud":"client"}"#);
+        let claims = claims_of(&format!("h.{payload}.s")).unwrap();
+        assert_eq!(claims["email"], "a@x.io");
+        assert!(claims_of("not-a-token").is_none());
+        let q = query_of("/auth/callback?code=a%2Fb&state=s+1");
+        assert_eq!(q["code"], "a/b");
+        assert_eq!(q["state"], "s 1");
+        assert!(page("t", "<script>").contains("&lt;script&gt;"));
+        assert_eq!(url_encode("a b/c"), "a%20b%2Fc");
+    }
+}

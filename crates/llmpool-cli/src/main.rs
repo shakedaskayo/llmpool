@@ -131,6 +131,18 @@ enum Command {
         #[command(subcommand)]
         agent: UninstallAgent,
     },
+    /// A team's shared pool: connect to its server, see the link, leave
+    Team {
+        #[command(subcommand)]
+        command: Option<TeamCommand>,
+    },
+    /// Serve this machine's pool to a team (configured by LLMPOOL_* variables;
+    /// see the README)
+    Serve {
+        /// Address to listen on; put TLS in front of it
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        listen: String,
+    },
     /// Run or stop the background daemon
     Daemon {
         /// Stop the running daemon
@@ -147,6 +159,25 @@ enum Command {
     /// Called as the agent's status line; not for direct use
     #[command(hide = true)]
     Statusline { agent: String },
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    /// Connect to a team's server by signing in, or with an API key
+    Connect {
+        /// The server's address, e.g. https://pool.example.com
+        url: String,
+        /// Use an API key instead of signing in (typed or piped, never an argument)
+        #[arg(long)]
+        key: bool,
+        /// Start the sign-in and return at once, without waiting for it
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Fetch the team's accounts and rules now
+    Sync,
+    /// Leave the team's pool
+    Disconnect,
 }
 
 #[derive(Subcommand)]

@@ -138,12 +138,19 @@ fn route(
             Ok(d.hook(sid, event, argument, &body))
         }
         ("POST", ["statusline", "claude", sid]) => Ok(d.statusline(sid, &body)),
+        ("GET", ["team"]) => Ok(d.team_status()),
+        ("POST", ["team"]) => d.team_connect(text(&body, "url")?, body["key"].as_str()),
+        ("POST", ["team", "sync"]) => {
+            d.team_sync();
+            Ok(d.team_status())
+        }
+        ("DELETE", ["team"]) => d.team_disconnect(),
         ("GET", ["events"]) => Ok(d.events()),
         _ => Err(fail(404, "no such route")),
     }
 }
 
-fn percent_decode(segment: &str) -> String {
+pub(crate) fn percent_decode(segment: &str) -> String {
     let bytes = segment.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

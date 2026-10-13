@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llmpool.name" . }}
+  labels: {{- include "llmpool.labels" . | nindent 4 }}
+spec:
+  # One writer: the pool's state and its single-use refresh tokens allow no second copy.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{- include "llmpool.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "llmpool.labels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: llmpool
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--listen", "0.0.0.0:8787"]
+          env:
+            - name: LLMPOOL_PUBLIC_URL
+              value: {{ .Values.publicUrl | trimSuffix "/" | quote }}
+            {{- if .Values.oidc.clientId }}
+            - name: LLMPOOL_OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: LLMPOOL_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: LLMPOOL_ALLOWED_DOMAINS
+              value: {{ join "," .Values.oidc.allowedDomains | quote }}
+            - name: LLMPOOL_ALLOWED_EMAILS
+              value: {{ join "," .Values.oidc.allowedEmails | quote }}
+            {{- end }}
+            - name: LLMPOOL_SHARE_LOGINS
+              value: {{ ternary "1" "0" .Values.shareLogins | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "llmpool.secret" . }}
+          ports:
+            - name: http
+              containerPort: 8787
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "llmpool.name" .) }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

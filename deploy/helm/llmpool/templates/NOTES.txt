@@ -1,0 +1,19 @@
+llmpool is serving at {{ .Values.publicUrl }}.
+
+1. Put accounts in the pool. On a machine that has them, run `llmpool export pool.age`,
+   then copy the file in and import it (you are asked for the passphrase):
+
+     POD=$(kubectl -n {{ .Release.Namespace }} get pod -l app.kubernetes.io/instance={{ .Release.Name }} -o name)
+     kubectl -n {{ .Release.Namespace }} cp pool.age ${POD#pod/}:/tmp/pool.age
+     kubectl -n {{ .Release.Namespace }} exec -it $POD -- llmpool import /tmp/pool.age
+     kubectl -n {{ .Release.Namespace }} exec $POD -- rm /tmp/pool.age
+
+   Rules for everyone: `kubectl exec -it $POD -- llmpool policy path` names the file to edit.
+
+2. Members join from the llmpool app (Settings > Team pool) or with:
+
+     llmpool team connect {{ .Values.publicUrl }}{{ if not .Values.oidc.clientId }} --key{{ end }}
+{{- if .Values.oidc.clientId }}
+
+   The sign-in provider must list {{ .Values.publicUrl | trimSuffix "/" }}/auth/callback as a redirect address.
+{{- end }}

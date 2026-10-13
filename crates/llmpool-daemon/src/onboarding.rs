@@ -11,6 +11,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 const LOGIN_PATIENCE_SECS: i64 = 600;
 /// A renewal that did not work is not tried again sooner than this.
 const RENEW_RETRY_SECS: i64 = 6 * 3600;
+/// A server renews an access token this long before it runs out.
+const FRESH_MARGIN_MS: i64 = 30 * 60 * 1000;
 /// With renewal working, a login this close to its end means something is wrong.
 const EXPIRY_WARN_SECS: i64 = 3 * 24 * 3600;
 
@@ -391,6 +393,11 @@ impl Daemon {
             let Ok(accounts) = g.store.list() else {
                 return;
             };
+            let retry = if self.keep_fresh {
+                600
+            } else {
+                RENEW_RETRY_SECS
+            };
             let due = accounts.into_iter().find_map(|account| {
                 let idle = account.usable()
                     && account.kind == Kind::Oauth
@@ -399,9 +406,18 @@ impl Daemon {
                     && g.p
                         .renew_tried
                         .get(&account.id)
-                        .is_none_or(|at| t - at >= RENEW_RETRY_SECS);
+                        .is_none_or(|at| t - at >= retry);
                 let secret = idle.then(|| self.secret_of(&account.id).ok()).flatten()?;
-                oauth::due(&secret, t * 1000).then_some((account, secret))
+                // A server's tokens are in use elsewhere, so they are renewed
+                // before they run out, not only when the login is at risk.
+                let stale = self.keep_fresh
+                    && secret.oauth["refreshToken"]
+                        .as_str()
+                        .is_some_and(|r| !r.is_empty())
+                    && secret.oauth["expiresAt"]
+                        .as_i64()
+                        .is_some_and(|at| at - t * 1000 < FRESH_MARGIN_MS);
+                (stale || oauth::due(&secret, t * 1000)).then_some((account, secret))
             });
             if let Some((account, _)) = &due {
                 // Held out of every assignment while its only valid token is

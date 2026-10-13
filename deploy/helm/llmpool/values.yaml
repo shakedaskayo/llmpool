@@ -1,0 +1,72 @@
+image:
+  repository: ghcr.io/llmpool/llmpool
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Where members' browsers and clients reach the server. Required, and https:
+# clients refuse to send a credential anywhere else.
+publicUrl: ""
+
+# Sign-in through any OpenID Connect provider (Google, Okta, Keycloak, Entra).
+# Register {publicUrl}/auth/callback as the redirect address there.
+# Leave clientId empty to run with API keys only.
+oidc:
+  issuer: https://accounts.google.com
+  clientId: ""
+  clientSecret: ""
+  # Who may sign in. With sign-in on, at least one of these is required.
+  allowedDomains: []
+  allowedEmails: []
+
+# Members who connect with a key instead of signing in: name -> key, each key
+# at least 24 characters (e.g. `openssl rand -hex 24`).
+apiKeys: {}
+
+# Keep the secrets out of your values: name a Secret you manage yourself with
+# the keys LLMPOOL_OIDC_CLIENT_SECRET and/or LLMPOOL_API_KEYS (`name:key`
+# pairs, one per line). When set, oidc.clientSecret and apiKeys are ignored.
+existingSecret: ""
+
+# Off: a subscription login in use by one member is not lent to another.
+# Providers license such logins per person; turn this on only where yours
+# allows several people on one login.
+shareLogins: false
+
+# The pool itself (accounts, their logins, members' sessions) lives here.
+# Use a storage class that encrypts at rest: logins are stored as files.
+persistence:
+  size: 1Gi
+  storageClass: ""
+  existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  # Name of a TLS secret for the host; empty leaves TLS to the controller.
+  tlsSecret: ""
+
+# Only let traffic in from these namespaces' pods (your ingress controller).
+# The server's own outbound calls (the sign-in provider, token renewal) stay open.
+networkPolicy:
+  enabled: false
+  ingressNamespaces: []
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

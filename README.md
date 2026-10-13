@@ -163,6 +163,81 @@ skipped until you add it again.
 To add a trigger: implement `Trigger` in
 `crates/llmpool-core/src/policy/triggers.rs` and add one line to `all()`.
 
+## Team pool
+
+A team can run one llmpool as a server that lends its accounts and rules to
+its members. Each member's own llmpool keeps working as before and adds what
+the server lends.
+
+**Joining.** In the app: Settings > Team pool, enter the server's address and
+sign in, or paste an API key. In a terminal:
+
+```bash
+llmpool team connect https://pool.example.com         # opens the sign-in page
+llmpool team connect https://pool.example.com --key   # asks for an API key
+llmpool team                                          # the link, and any problem with it
+llmpool team disconnect
+```
+
+In Claude Code: `/llmpool team https://pool.example.com`, `/llmpool team`,
+`/llmpool team leave`.
+
+**What a member gets.** The team's accounts appear in the pool tagged `team`,
+read-only: they cannot be edited, removed or exported. The team's rules are
+tried before the member's own and cannot be changed locally. A member's own
+login of the same account always wins over the lent one. Every minute the
+member's llmpool tells the server which team accounts it runs on and what
+usage it saw, so `least_busy` and `pressure` rules see the whole team.
+
+**What the server keeps.** Refresh tokens never leave it. Members receive
+access tokens only, which the server renews before they run out and running
+sessions pick up without a restart. Unless `LLMPOOL_SHARE_LOGINS=1`, a
+subscription login in use by one member is not lent to another until they stop.
+
+**Running the server.**
+
+```bash
+LLMPOOL_PUBLIC_URL=https://pool.example.com \
+LLMPOOL_OIDC_CLIENT_ID=... LLMPOOL_OIDC_CLIENT_SECRET=... \
+LLMPOOL_ALLOWED_DOMAINS=example.com \
+llmpool serve --listen 127.0.0.1:8787
+```
+
+| Variable | Meaning |
+|---|---|
+| `LLMPOOL_PUBLIC_URL` | where members reach the server; required |
+| `LLMPOOL_OIDC_ISSUER` | any OpenID Connect provider; default `https://accounts.google.com` |
+| `LLMPOOL_OIDC_CLIENT_ID`, `LLMPOOL_OIDC_CLIENT_SECRET` | turn sign-in on; register `{public url}/auth/callback` with the provider |
+| `LLMPOOL_ALLOWED_DOMAINS`, `LLMPOOL_ALLOWED_EMAILS` | who may sign in; required with sign-in, and checked on every request |
+| `LLMPOOL_API_KEYS` | `name:key` pairs (commas or lines), keys of 24+ characters, for members without sign-in |
+| `LLMPOOL_SHARE_LOGINS` | `1` lets several members run on one subscription login at once |
+
+Sign-in, API keys, or both. The server speaks plain HTTP: put TLS in front of
+it. Members' clients refuse an address that is not `https` unless it is on
+their own machine. Accounts and rules are managed on the server with the same
+commands as anywhere (`llmpool import`, `llmpool list`, the policy file).
+
+**On Kubernetes.**
+
+```bash
+docker build -t registry.example.com/llmpool:0.1.0 . && docker push registry.example.com/llmpool:0.1.0
+helm install pool deploy/helm/llmpool \
+  --set image.repository=registry.example.com/llmpool \
+  --set publicUrl=https://pool.example.com \
+  --set oidc.clientId=... --set oidc.clientSecret=... \
+  --set 'oidc.allowedDomains={example.com}' \
+  --set ingress.enabled=true --set ingress.className=nginx
+```
+
+The chart runs one replica (the pool has one writer) as a non-root user on a
+read-only root filesystem, keeps the pool on a volume that survives
+`helm uninstall`, takes its secrets from values or from a Secret you manage
+(`existingSecret`), and refuses to render without `https`, without anyone who
+may connect, or with a short key. The notes it prints say how to import
+accounts. Logins are stored as files on the volume: use a storage class that
+encrypts at rest. The pod needs to reach the sign-in provider and the
+providers' token endpoints.
+
 ## How a swap works
 
 Each managed session runs in its own Claude Code profile
@@ -184,7 +259,8 @@ Secrets are kept in the OS keychain; account metadata in SQLite under
 Subscription logins are licensed per person, and providers restrict what
 third-party tools may do with them. llmpool is built for one person's own
 accounts. Check the terms of each provider before using it, and before sharing
-a pool with anyone.
+a pool with anyone. A team server lends a subscription login to one member at
+a time unless told otherwise, for that reason.
 
 ## Layout
 
@@ -193,6 +269,8 @@ a pool with anyone.
 | `crates/llmpool-core` | pool model, policy engine, account store, vault |
 | `crates/llmpool-adapter-claude` | everything that knows Claude Code's files, locks and settings |
 | `crates/llmpool-daemon` | session registry, swap logic, local HTTP API |
+| `crates/llmpool-daemon/src/team_server.rs`, `team.rs` | the team server and a member's link to one |
+| `Dockerfile`, `deploy/helm/llmpool` | the server as a container and a Helm chart |
 | `crates/llmpool-cli` | the `llmpool` binary |
 | `crates/llmpool-gui` | Tauri window and tray |
 | `claude-plugin/llmpool` | the Claude Code mod, embedded in the binary |
@@ -212,9 +290,10 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 
 ## Not built yet
 
-Other agents and providers (Codex, Gemini CLI, Bedrock, API keys) and the team
-server with inherited policies. Each is its own design; the adapter and
-trigger traits are where they attach. Windows is not supported.
+Other agents and providers (Codex, Gemini CLI, Grok, Bedrock, provider API
+keys): the adapter trait is where they attach. On the team server: roles
+(every member sees every account), an audit log, and revoking one signed-in
+member without removing them from the allow list. Windows is not supported.
 
 ## Licence
 

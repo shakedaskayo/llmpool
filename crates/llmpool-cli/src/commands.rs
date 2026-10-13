@@ -1,4 +1,7 @@
-use crate::{AddAgent, AdvisorCommand, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent};
+use crate::{
+    AddAgent, AdvisorCommand, Cli, Command, InstallAgent, PolicyCommand, TeamCommand,
+    UninstallAgent,
+};
 use llmpool_adapter_claude::install;
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
@@ -137,6 +140,8 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         } => uninstall_claude(),
         Command::Setup { undo } => setup(undo),
         Command::LoginItem { state } => login_item(&state),
+        Command::Team { command } => team(command),
+        Command::Serve { listen } => serve(&listen),
         Command::Daemon { stop } => daemon(stop),
         Command::Hook {
             agent,
@@ -1245,6 +1250,93 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     http::start(Arc::new(daemon), lock)
         .map_err(|e| e.to_string())?
         .wait();
+    Ok(ExitCode::SUCCESS)
+}
+
+fn team_line(status: &Value) -> String {
+    let text = |name: &str| status[name].as_str().unwrap_or_default();
+    match text("state") {
+        "connected" => {
+            let mut line = format!(
+                "connected to {} as {} · {} shared account(s)",
+                text("url"),
+                text("email"),
+                status["accounts"]
+            );
+            if !text("message").is_empty() {
+                line += &format!("\nproblem: {}", text("message"));
+            }
+            line
+        }
+        "waiting" => format!(
+            "waiting for the sign-in in your browser:\n{}",
+            text("auth_url")
+        ),
+        "failed" => format!("not connected: {}", text("message")),
+        _ => "not connected to a team's pool. `llmpool team connect <url>` joins one.".into(),
+    }
+}
+
+fn team(command: Option<TeamCommand>) -> Result<ExitCode, String> {
+    let client = connect()?;
+    match command {
+        None => done(team_line(&client.call("GET", "/team", None)?)),
+        Some(TeamCommand::Sync) => done(team_line(&client.call("POST", "/team/sync", None)?)),
+        Some(TeamCommand::Disconnect) => {
+            client.call("DELETE", "/team", None)?;
+            done("left the team's pool; its accounts and rules are gone from this machine".into())
+        }
+        Some(TeamCommand::Connect { url, key, detach }) => {
+            // Typed without echo, or piped in; never an argument.
+            let key = if !key {
+                None
+            } else if std::io::stdin().is_terminal() {
+                Some(rpassword::prompt_password("API key: ").map_err(|e| e.to_string())?)
+            } else {
+                Some(stdin_text())
+            };
+            let mut status = client.call("POST", "/team", Some(json!({"url": url, "key": key})))?;
+            if detach && status["state"] == "waiting" {
+                return done(team_line(&status));
+            }
+            if status["state"] == "waiting" {
+                eprintln!("{}", team_line(&status));
+                while status["state"] == "waiting" {
+                    std::thread::sleep(Duration::from_millis(500));
+                    status = client.call("GET", "/team", None)?;
+                }
+            }
+            if status["state"] != "connected" {
+                return Err(team_line(&status));
+            }
+            eprintln!("{TERMS_NOTICE}");
+            done(team_line(&status))
+        }
+    }
+}
+
+/// The daemon, also answering teammates on `listen`.
+fn serve(listen: &str) -> Result<ExitCode, String> {
+    use llmpool_daemon::team_server;
+    let config = team_server::Config::from_env()?;
+    if let Some(running) = Client::existing(Duration::from_secs(5)) {
+        // One daemon per data directory; the serving one replaces the plain one.
+        let _ = running.call("POST", "/shutdown", None);
+        std::thread::sleep(Duration::from_millis(600));
+    }
+    let lock = http::instance_lock(&data_dir()).map_err(|e| e.to_string())?;
+    let mut daemon = Daemon::open_default().map_err(|e| e.message)?;
+    daemon.set_keep_fresh(true);
+    let daemon = Arc::new(daemon);
+    let local = http::start(daemon.clone(), lock).map_err(|e| e.to_string())?;
+    let serving =
+        team_server::start(daemon, config, listen).map_err(|e| format!("{listen}: {e}"))?;
+    eprintln!(
+        "llmpool: serving the pool on {listen} (port {})",
+        serving.port
+    );
+    local.wait();
+    serving.stop();
     Ok(ExitCode::SUCCESS)
 }
 
