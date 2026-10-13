@@ -41,6 +41,8 @@ const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
 // What the last look at a sign-in said, so its ending is announced once.
 let lastLogin = 'idle'
+// Until the first answer from llmpool, nothing is known about the pool.
+let isLoaded = false
 
 // Every argument is made a string here: the host refuses anything else, and
 // one stray `undefined` would take the whole pane down with it.
@@ -61,6 +63,7 @@ const refresh = async ($: EngineInterface) => {
     next = { ...EMPTY, error: `could not run ${BIN}: ${String(error)}` }
   }
   await update($, snapshot, () => next)
+  isLoaded = true
   // The account and its usage are on the status line already; nothing is
   // pinned here, or the same line would show twice. A sign-in ending is news.
   if (lastLogin === 'waiting' && next.login.state !== 'waiting' && next.login.message !== '') {
@@ -185,7 +188,8 @@ export const register: Register = on => {
       return next(e)
     }
     const snap = await read($, snapshot)
-    const tail = snap.error !== null ? '' : snap.rows.length === 0 ? '/llmpool to add an account' : '/llmpool to switch account'
+    const tail =
+      snap.error !== null ? '' : !isLoaded ? '/llmpool' : snap.rows.length === 0 ? '/llmpool to add an account' : '/llmpool to switch account'
 
     return tail === '' ? next(e) : next({ ...e, props: { ...e.props, tail: [e.props.tail, tail].filter(Boolean).join(' · ') } })
   })
