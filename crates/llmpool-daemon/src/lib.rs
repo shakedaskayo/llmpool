@@ -28,6 +28,10 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// right after a swap may still describe the previous account.
 const SETTLE_SECS: i64 = 60;
 const MAX_EVENTS: usize = 200;
+/// Lock wait for housekeeping that will simply be tried again.
+const BRIEF_LOCK: Duration = Duration::from_millis(250);
+/// How often the login in `~/.claude` is copied to the vault.
+const SYNC_SECS: i64 = 60;
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 #[derive(Debug)]
@@ -53,7 +57,8 @@ type Api<T> = Result<T, ApiError>;
 pub struct Managed {
     #[serde(flatten)]
     pub session: Session,
-    /// The `llmpool run` process; when it is gone the session is over.
+    /// The agent's process (the launcher's until the agent has started);
+    /// when it is gone the session is over.
     pub pid: u32,
     /// Which profile the agent runs in. `None`: the agent's own login, untouched.
     pub store: Option<String>,
@@ -97,6 +102,8 @@ struct Persisted {
 struct Inner {
     store: Store,
     p: Persisted,
+    /// When the default profile's login was last copied to the vault.
+    last_sync: i64,
 }
 
 #[derive(Default, Deserialize)]
@@ -173,7 +180,7 @@ impl Daemon {
             home: home.to_path_buf(),
             vault,
             keychain,
-            inner: Mutex::new(Inner { store: Store::open(&data_dir.join("llmpool.db"))?, p }),
+            inner: Mutex::new(Inner { store: Store::open(&data_dir.join("llmpool.db"))?, p, last_sync: 0 }),
         };
         daemon.reap(&mut daemon.lock());
         Ok(daemon)
@@ -247,14 +254,17 @@ impl Daemon {
         }
     }
 
-    /// The profile currently holding this account's login, if any.
-    fn holder(&self, g: &Inner, account: &Account) -> Option<String> {
+    /// Every profile holding this account's login. More than one means the
+    /// login was duplicated outside llmpool.
+    fn holders(&self, g: &Inner, account: &Account) -> Vec<String> {
+        let mut held = Vec::new();
         if let Some((email, organization)) = self.default_profile().identity() {
             if same_login(account, &email, organization.as_deref()) {
-                return Some(DEFAULT_STORE.to_string());
+                held.push(DEFAULT_STORE.to_string());
             }
         }
-        g.p.stores.iter().find(|(_, rec)| rec.account_id == account.id).map(|(id, _)| id.clone())
+        held.extend(g.p.stores.iter().filter(|(_, rec)| rec.account_id == account.id).map(|(id, _)| id.clone()));
+        held
     }
 
     fn secret_of(&self, id: &str) -> Api<Secret> {
@@ -263,27 +273,75 @@ impl Daemon {
     }
 
     /// Copy a profile's login back into the vault, because the agent may have
-    /// rotated the token since we wrote it. Caller holds the profile's locks.
-    fn read_back(&self, accounts: &[Account], profile: &Profile, account_id: &str) {
-        let (Some(secret), Some(account)) =
-            (profile.read(&*self.keychain), accounts.iter().find(|a| a.id == account_id))
-        else {
+    /// rotated the token since we wrote it. It is filed under the account the
+    /// profile really holds, whatever we last recorded. `Ok` also when the
+    /// profile holds nothing of ours. Caller holds the profile's locks.
+    fn read_back(&self, accounts: &[Account], profile: &Profile) -> Api<()> {
+        let Some(secret) = profile.read(&*self.keychain) else {
+            return Ok(());
+        };
+        let email = secret.email().unwrap_or_default();
+        if let Some(account) = accounts.iter().find(|a| same_login(a, email, secret.organization())) {
+            self.vault.put(&account.id, &serde_json::to_string(&secret)?)?;
+        }
+        Ok(())
+    }
+
+    /// Retire profiles no session uses: save their login, then remove them.
+    /// A profile whose login cannot be saved right now (the agent is
+    /// refreshing it, or the vault is locked) is kept and tried again later,
+    /// because it may hold the only current copy.
+    fn sweep(&self, g: &mut Inner) {
+        let Ok(accounts) = self.accounts(g) else {
             return;
         };
-        // If the user logged this profile into something else, it is not ours to file.
-        if same_login(account, secret.email().unwrap_or_default(), secret.organization()) {
-            if let Ok(text) = serde_json::to_string(&secret) {
-                let _ = self.vault.put(account_id, &text);
+        let idle: Vec<String> = g
+            .p
+            .stores
+            .keys()
+            .filter(|id| !g.p.sessions.values().any(|s| s.store.as_ref() == Some(*id)))
+            .cloned()
+            .collect();
+        for id in idle {
+            let profile = g.p.stores[&id].profile.clone();
+            let Ok(_locks) = lock::credentials(&profile.config_dir, BRIEF_LOCK) else {
+                continue;
+            };
+            if self.read_back(&accounts, &profile).is_ok() {
+                profile.destroy(&*self.keychain);
+                g.p.stores.remove(&id);
             }
         }
     }
 
-    /// End sessions whose launcher process is gone.
+    fn sync_default_locked(&self, g: &mut Inner) {
+        g.last_sync = now();
+        let profile = self.default_profile();
+        let (Ok(accounts), true) = (self.accounts(g), profile.config_dir.is_dir()) else {
+            return;
+        };
+        if let Ok(_locks) = lock::credentials(&profile.config_dir, BRIEF_LOCK) {
+            let _ = self.read_back(&accounts, &profile);
+        }
+    }
+
+    /// Save the login in `~/.claude` to the vault if it belongs to a pool
+    /// account. Claude Code rotates that token on its own; without this, the
+    /// vault's copy goes stale and is lost if the user logs in to something else.
+    pub fn sync_default(&self) {
+        self.sync_default_locked(&mut self.lock());
+    }
+
+    /// End sessions whose agent process is gone, and tidy up after them.
     fn reap(&self, g: &mut Inner) {
         let dead: Vec<String> =
             g.p.sessions.iter().filter(|(_, m)| !pid_alive(m.pid)).map(|(id, _)| id.clone()).collect();
         for id in dead {
             self.end(g, &id);
+        }
+        self.sweep(g);
+        if now() - g.last_sync >= SYNC_SECS {
+            self.sync_default_locked(g);
         }
     }
 
@@ -291,19 +349,10 @@ impl Daemon {
         let Some(m) = g.p.sessions.remove(sid) else {
             return;
         };
-        let accounts = self.accounts(g).unwrap_or_default();
-        if let Some(store_id) = &m.store {
-            let shared = g.p.sessions.values().any(|s| s.store.as_ref() == Some(store_id));
-            if let (Some(profile), Some(account_id)) = (self.profile_of(g, store_id), &m.session.account_id) {
-                if let Ok(_locks) = lock::credentials(&profile.config_dir, LOCK_TIMEOUT) {
-                    self.read_back(&accounts, &profile, account_id);
-                }
-                if !shared && !profile.is_default {
-                    profile.destroy(&*self.keychain);
-                    g.p.stores.remove(store_id);
-                }
-            }
+        if m.store.as_deref() == Some(DEFAULT_STORE) {
+            self.sync_default_locked(g);
         }
+        self.sweep(g);
         self.log(g, "end", Some(sid), format!("session in {} ended", m.session.cwd));
         self.save(g);
     }
@@ -321,7 +370,7 @@ impl Daemon {
                     g.p.sessions.iter().filter(|(_, m)| m.session.account_id.as_ref() == Some(&a.id)).map(|(id, _)| id).collect();
                 let mut row = serde_json::to_value(a).unwrap_or_default();
                 row["sessions"] = json!(sessions);
-                row["is_default"] = json!(self.holder(&g, a).as_deref() == Some(DEFAULT_STORE));
+                row["is_default"] = json!(self.holders(&g, a).iter().any(|h| h == DEFAULT_STORE));
                 row
             })
             .collect();
@@ -336,6 +385,16 @@ impl Daemon {
             Some(dir) => Profile::at(dir),
             None => self.default_profile(),
         };
+        // Resolved, so `..` and links cannot dress one directory up as another.
+        let real = profile
+            .config_dir
+            .canonicalize()
+            .map_err(|_| fail(404, format!("no Claude profile at {}", profile.config_dir.display())))?;
+        if g.p.stores.values().any(|rec| rec.profile.config_dir.canonicalize().ok().as_ref() == Some(&real)) {
+            return Err(fail(400, "that directory is a running session's profile"));
+        }
+        let is_scratch = real.parent().map(Path::to_path_buf) == self.data_dir.canonicalize().ok()
+            && real.file_name().is_some_and(|name| name.to_string_lossy().starts_with("login-"));
         let secret = {
             let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
             profile.read(&*self.keychain)
@@ -368,7 +427,7 @@ impl Daemon {
 
         // A scratch profile made for this login has done its job. It is
         // removed without logging out, which would revoke the token.
-        if !profile.is_default && profile.config_dir.starts_with(&self.data_dir) {
+        if is_scratch {
             profile.destroy(&*self.keychain);
         }
         Ok(serde_json::to_value(&account)?)
@@ -531,7 +590,7 @@ impl Daemon {
         if !account.usable() {
             return Err(fail(409, format!("{} is disabled or needs a new login", account.label)));
         }
-        let store_id = match self.holder(g, account) {
+        let store_id = match self.holders(g, account).into_iter().next() {
             // Already live somewhere: join that profile rather than copy the login.
             Some(id) => id,
             None => {
@@ -569,17 +628,29 @@ impl Daemon {
         if !to.usable() {
             return Err(fail(409, format!("{} is disabled or needs a new login", to.label)));
         }
-        if self.holder(g, to).is_some_and(|held| held != store_id) {
+        if self.holders(g, to).iter().any(|held| *held != store_id) {
             return Err(fail(409, format!("{} is in use by other sessions", to.label)));
         }
         let profile = self.profile_of(g, &store_id).ok_or_else(|| fail(500, "session profile is missing"))?;
         let secret = self.secret_of(&to.id)?;
         {
             let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
-            if let Some(from) = &m.session.account_id {
-                self.read_back(&accounts, &profile, from);
+            // What the profile holds now, which is not always what we put
+            // there: the user can log it in to something else.
+            let actual = profile.identity();
+            let holds = |a: &Account| actual.as_ref().is_some_and(|(email, org)| same_login(a, email, org.as_deref()));
+            if actual.is_some() && !accounts.iter().any(holds) {
+                return Err(fail(
+                    409,
+                    "this profile is logged in to an account that is not in the pool; \
+                     add it with `llmpool add claude --from-current` first so it is not lost",
+                ));
             }
-            profile.write(&*self.keychain, &secret)?;
+            // If the outgoing login cannot be saved, it must not be overwritten.
+            self.read_back(&accounts, &profile)?;
+            if !holds(to) {
+                profile.write(&*self.keychain, &secret)?;
+            }
         }
         if let Some(rec) = g.p.stores.get_mut(&store_id) {
             rec.account_id = to.id.clone();
@@ -612,6 +683,14 @@ impl Daemon {
         Ok(json!({"session_id": sid, "account": id}))
     }
 
+    /// Point a session at its agent's process once that has started.
+    pub fn set_pid(&self, sid: &str, pid: u32) -> Api<Value> {
+        let mut g = self.lock();
+        g.p.sessions.get_mut(sid).ok_or_else(|| fail(404, "no such session"))?.pid = pid;
+        self.save(&g);
+        Ok(json!({}))
+    }
+
     pub fn end_session(&self, sid: &str) -> Value {
         self.end(&mut self.lock(), sid);
         json!({})
@@ -638,17 +717,18 @@ impl Daemon {
         };
         // An account live in another profile cannot also be put in this one.
         let free: Vec<Account> =
-            all.iter().filter(|a| self.holder(g, a).is_none_or(|held| Some(&held) == m.store.as_ref())).cloned().collect();
+            all.iter().filter(|a| self.holders(g, a).iter().all(|held| Some(held) == m.store.as_ref())).cloned().collect();
         let decision = self.decide(g, &policy, event, &m.session, &free);
         let rule = decision.rule.clone().unwrap_or_default();
         let label = |id: &String| all.iter().find(|a| &a.id == id).map_or(id.clone(), |a| a.label.clone());
 
         let notice = match &decision.outcome {
             Outcome::Swap(to) => {
-                g.p.rr_cursor = Some(to.clone());
-                self.swap(g, sid, to, &format!("rule \"{rule}\""))
-                    .err()
-                    .map(|e| format!("llmpool: rule \"{rule}\" tried to switch account but could not: {}", e.message))
+                let swapped = self.swap(g, sid, to, &format!("rule \"{rule}\""));
+                if swapped.is_ok() {
+                    g.p.rr_cursor = Some(to.clone());
+                }
+                swapped.err().map(|e| format!("llmpool: rule \"{rule}\" tried to switch account but could not: {}", e.message))
             }
             Outcome::Ask(ids) => Some(format!(
                 "llmpool: rule \"{rule}\" suggests switching account. Candidates: {}. Run `llmpool switch <account>`.",

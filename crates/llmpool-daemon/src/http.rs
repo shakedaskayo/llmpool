@@ -25,9 +25,25 @@ impl Endpoint {
     }
 }
 
+/// Held for as long as a daemon serves a data directory. Two daemons on one
+/// directory would each keep their own idea of which profile holds which login.
+pub struct InstanceLock(#[allow(dead_code)] std::fs::File);
+
+pub fn instance_lock(data_dir: &Path) -> std::io::Result<InstanceLock> {
+    use std::os::fd::AsRawFd;
+    std::fs::create_dir_all(data_dir)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data_dir.join("daemon.lock"))?;
+    // Released by the operating system when the process ends, however it ends.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "another llmpool daemon is already running"));
+    }
+    Ok(InstanceLock(file))
+}
+
 pub struct Running {
     pub endpoint: Endpoint,
     workers: Vec<JoinHandle<()>>,
+    _lock: InstanceLock,
 }
 
 impl Running {
@@ -61,6 +77,10 @@ fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBoo
         ("GET", ["sessions"]) => d.list_sessions(),
         ("POST", ["sessions"]) => d.start_session(parse(body)?),
         ("POST", ["sessions", id, "assign"]) => d.assign(id, text(&body, "account")?),
+        ("POST", ["sessions", id, "pid"]) => {
+            let pid = body["pid"].as_u64().ok_or_else(|| fail(400, "bad request: `pid` is required"))?;
+            d.set_pid(id, pid as u32)
+        }
         ("POST", ["sessions", id, "swap"]) => d.swap_session(id, text(&body, "account")?),
         ("DELETE", ["sessions", id]) => Ok(d.end_session(id)),
         ("GET", ["policies"]) => Ok(d.policy_text()),
@@ -125,7 +145,7 @@ fn handle(d: &Daemon, token: &str, mut request: tiny_http::Request, stop: &Atomi
 }
 
 /// Start serving on a free loopback port and record it in `daemon.json`.
-pub fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
+pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running> {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").map_err(std::io::Error::other)?);
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or_default();
     let mut bytes = [0u8; 16];
@@ -134,11 +154,13 @@ pub fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
     let endpoint = Endpoint { port, token: token.clone(), pid: std::process::id() };
 
     let path = daemon.data_dir().join("daemon.json");
-    std::fs::write(&path, serde_json::to_string(&endpoint)?)?;
-    #[cfg(unix)]
+    // The token is a secret: the file is never readable by anyone else.
+    let _ = std::fs::remove_file(&path);
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        file.write_all(serde_json::to_string(&endpoint)?.as_bytes())?;
     }
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -151,11 +173,14 @@ pub fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
                         handle(&daemon, &token, request, &stop);
                     }
                 }
-                let _ = std::fs::remove_file(&path);
+                // Only our own file: a newer daemon may have written its own.
+                if Endpoint::read(path.parent().unwrap_or(&path)).is_some_and(|e| e.token == token) {
+                    let _ = std::fs::remove_file(&path);
+                }
             })
         })
         .collect();
-    Ok(Running { endpoint, workers })
+    Ok(Running { endpoint, workers, _lock: lock })
 }
 
 #[cfg(test)]

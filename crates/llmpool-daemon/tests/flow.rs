@@ -272,7 +272,7 @@ fn policies_are_validated_on_save_and_can_be_dry_run() {
 #[test]
 fn http_api_requires_the_token_and_serves_json() {
     let w = world();
-    let running = http::start(w.daemon.clone()).unwrap();
+    let running = http::start(w.daemon.clone(), http::instance_lock(&w.data).unwrap()).unwrap();
     let endpoint = http::Endpoint::read(&w.data).unwrap();
     assert_eq!(endpoint.port, running.endpoint.port);
     let url = |path: &str| format!("http://127.0.0.1:{}{path}", endpoint.port);
@@ -301,4 +301,120 @@ fn http_api_requires_the_token_and_serves_json() {
     ureq::post(&url("/shutdown")).set("Authorization", &auth).call().unwrap();
     running.wait();
     assert!(http::Endpoint::read(&w.data).is_none());
+}
+
+// ---- findings from review -------------------------------------------------
+
+fn default_token(w: &World) -> String {
+    Profile::default_in(&w.home).read(&NoKeychain).unwrap().oauth["accessToken"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_profile_whose_login_cannot_be_saved_yet_is_kept_until_it_can() {
+    let w = world();
+    let reply = start(&w, "/x", Some("a@x.io"));
+    let dir = PathBuf::from(reply["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap());
+    Profile::at(&dir).write(&NoKeychain, &secret("a@x.io", "a-rotated")).unwrap();
+    // Claude Code is in the middle of refreshing this login.
+    std::fs::create_dir(dir.join(".oauth_refresh.lock")).unwrap();
+
+    w.daemon.end_session(reply["session_id"].as_str().unwrap());
+    assert!(dir.exists(), "the only copy of the rotated login must not be deleted");
+    assert_eq!(vault_token(&w, "a@x.io"), "a-1");
+    // Starting the account again reuses that profile instead of an old copy.
+    let again = start(&w, "/x", Some("a@x.io"));
+    assert_eq!(again["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap(), dir.to_str().unwrap());
+    w.daemon.end_session(again["session_id"].as_str().unwrap());
+
+    std::fs::remove_dir(dir.join(".oauth_refresh.lock")).unwrap();
+    w.daemon.list_sessions().unwrap();
+    assert!(!dir.exists());
+    assert_eq!(vault_token(&w, "a@x.io"), "a-rotated");
+}
+
+#[test]
+fn swap_respects_what_the_profile_really_holds() {
+    let w = world();
+    let reply = start(&w, "/x", Some("home@x.io"));
+    let sid = reply["session_id"].as_str().unwrap();
+    let default = Profile::default_in(&w.home);
+
+    // The user logged ~/.claude in to an account outside the pool.
+    default.write(&NoKeychain, &secret("stranger@x.io", "stranger-1")).unwrap();
+    let err = w.daemon.swap_session(sid, "a@x.io").unwrap_err();
+    assert_eq!(err.status, 409);
+    assert!(err.message.contains("not in the pool"), "{}", err.message);
+    assert_eq!(default_token(&w), "stranger-1", "a login llmpool cannot save must not be overwritten");
+
+    // The user logged ~/.claude in to pool account a, with a newer token than the vault's.
+    default.write(&NoKeychain, &secret("a@x.io", "a-live")).unwrap();
+    w.daemon.swap_session(sid, "a@x.io").unwrap();
+    assert_eq!(default_token(&w), "a-live", "the live token must not be replaced by the vault's older copy");
+    assert_eq!(vault_token(&w, "a@x.io"), "a-live");
+    assert_eq!(w.daemon.list_sessions().unwrap()[0]["account_label"], "a@x.io");
+}
+
+#[test]
+fn swap_refuses_an_account_already_live_in_a_session_profile() {
+    let w = world();
+    start(&w, "/x", Some("a@x.io"));
+    let on_default = start(&w, "/y", Some("home@x.io"));
+    // ~/.claude was logged in to a outside llmpool: a is now in two places.
+    Profile::default_in(&w.home).write(&NoKeychain, &secret("a@x.io", "a-other")).unwrap();
+    let err = w.daemon.swap_session(on_default["session_id"].as_str().unwrap(), "a@x.io").unwrap_err();
+    assert_eq!(err.status, 409);
+}
+
+#[test]
+fn capture_only_ever_deletes_its_own_scratch_login_directories() {
+    let w = world();
+    // Outside the data directory, reached through `..`.
+    let victim = w.data.parent().unwrap().join("victim");
+    Profile::at(&victim).write(&NoKeychain, &secret("v@x.io", "v-1")).unwrap();
+    let sneaky = w.data.join("..").join("victim");
+    w.daemon.capture(CaptureReq { profile_dir: Some(sneaky), label: None, tags: vec![] }).unwrap();
+    assert!(victim.exists());
+
+    // A running session's profile.
+    let reply = start(&w, "/x", Some("a@x.io"));
+    let dir = PathBuf::from(reply["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap());
+    let err = w.daemon.capture(CaptureReq { profile_dir: Some(dir.clone()), label: None, tags: vec![] }).unwrap_err();
+    assert_eq!(err.status, 400);
+    assert!(dir.exists());
+
+    // A directory that is not there is not created.
+    let missing = w.data.join("login-nope");
+    let err = w.daemon.capture(CaptureReq { profile_dir: Some(missing.clone()), label: None, tags: vec![] }).unwrap_err();
+    assert_eq!(err.status, 404);
+    assert!(!missing.exists());
+}
+
+#[test]
+fn a_session_lives_as_long_as_its_agent_not_its_launcher() {
+    let w = world();
+    let req = StartReq { cwd: "/x".into(), git_remote: None, pid: 999_999_999, account: Some("a@x.io".into()), tag: None };
+    // Registered and re-pointed at the agent before anything reaps it.
+    let reply = w.daemon.start_session(req).unwrap();
+    let sid = reply["session_id"].as_str().unwrap();
+    w.daemon.set_pid(sid, std::process::id()).unwrap();
+    assert_eq!(w.daemon.list_sessions().unwrap().as_array().unwrap().len(), 1);
+    w.daemon.set_pid(sid, 999_999_999).unwrap();
+    assert_eq!(w.daemon.list_sessions().unwrap(), json!([]));
+}
+
+#[test]
+fn the_default_login_is_kept_fresh_in_the_vault() {
+    let w = world();
+    Profile::default_in(&w.home).write(&NoKeychain, &secret("home@x.io", "home-2")).unwrap();
+    w.daemon.sync_default();
+    assert_eq!(vault_token(&w, "home@x.io"), "home-2");
+}
+
+#[test]
+fn only_one_daemon_can_serve_a_data_directory() {
+    let w = world();
+    let first = http::instance_lock(&w.data).unwrap();
+    assert!(http::instance_lock(&w.data).is_err());
+    drop(first);
+    assert!(http::instance_lock(&w.data).is_ok());
 }

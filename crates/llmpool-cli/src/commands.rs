@@ -136,7 +136,14 @@ fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> R
         }
         request["profile_dir"] = json!(scratch);
     }
-    let account = client.call("POST", "/accounts/capture", Some(request))?;
+    let captured = client.call("POST", "/accounts/capture", Some(request.clone()));
+    if captured.is_err() {
+        // Nothing was added, so a half-made login must not be left lying around.
+        if let Some(scratch) = request["profile_dir"].as_str() {
+            let _ = std::fs::remove_dir_all(scratch);
+        }
+    }
+    let account = captured?;
     eprintln!("{TERMS_NOTICE}");
     done(format!("added {}", account["label"].as_str().unwrap_or_default()))
 }
@@ -258,7 +265,14 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
     for (key, value) in reply["env"].as_object().into_iter().flatten() {
         command.env(key, value.as_str().unwrap_or_default());
     }
-    let status = command.status();
+    let status = command.spawn().and_then(|mut child| {
+        // The session belongs to the agent from here on: if this launcher is
+        // killed while the agent keeps running, the session must stay.
+        if let Some(client) = &client {
+            let _ = client.call("POST", &format!("/sessions/{sid}/pid"), Some(json!({"pid": child.id()})));
+        }
+        child.wait()
+    });
     if let Some(client) = &client {
         let _ = client.call("DELETE", &format!("/sessions/{sid}"), None);
     }
@@ -409,21 +423,21 @@ fn shell_rc() -> Result<PathBuf, String> {
 
 /// The rc file's text with llmpool's block removed.
 fn without_shim(text: &str) -> String {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in text.lines() {
-        match line.trim() {
-            SHIM_BEGIN => inside = true,
-            SHIM_END => inside = false,
-            _ if !inside => out.push(line),
-            _ => {}
-        }
+    let lines: Vec<&str> = text.lines().collect();
+    let begin = lines.iter().position(|l| l.trim() == SHIM_BEGIN);
+    let end = begin.and_then(|b| lines[b..].iter().position(|l| l.trim() == SHIM_END).map(|e| b + e));
+    // A begin marker with no end is not our block; touching it could eat the
+    // rest of someone's rc file.
+    let (Some(begin), Some(end)) = (begin, end) else {
+        return text.to_string();
+    };
+    let mut kept: Vec<&str> = lines[..begin].to_vec();
+    kept.extend(&lines[end + 1..]);
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
     }
-    let mut text = out.join("\n");
-    if !text.is_empty() {
-        text.push('\n');
-    }
-    text
+    out
 }
 
 fn install_claude(shim: bool) -> Result<ExitCode, String> {
@@ -475,8 +489,10 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     if existing.is_some() {
         return Err("the daemon is already running".into());
     }
+    // Taken before anything is opened: a second daemon must not touch state.
+    let lock = http::instance_lock(&data_dir()).map_err(|e| e.to_string())?;
     let daemon = Daemon::open_default().map_err(|e| e.message)?;
-    http::start(Arc::new(daemon)).map_err(|e| e.to_string())?.wait();
+    http::start(Arc::new(daemon), lock).map_err(|e| e.to_string())?.wait();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -527,7 +543,8 @@ fn statusline(agent: &str) -> ExitCode {
     }
     let previous = install::previous_status_command(&previous_status_path()).and_then(|command| {
         let mut child = std::process::Command::new("sh").arg("-c").arg(command).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
-        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        // A command that never reads its input closes the pipe; that is fine.
+        let _ = child.stdin.take()?.write_all(input.as_bytes());
         let out = child.wait_with_output().ok()?;
         Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string()).filter(|s| !s.is_empty())
     });
@@ -609,6 +626,9 @@ mod tests {
         let rc = format!("export A=1\n{SHIM_BEGIN}\nclaude() {{ x; }}\n{SHIM_END}\nalias k=kubectl\n");
         assert_eq!(without_shim(&rc), "export A=1\nalias k=kubectl\n");
         assert_eq!(without_shim("export A=1\n"), "export A=1\n");
+        assert_eq!(without_shim("export A=1"), "export A=1");
+        let unterminated = format!("export A=1\n{SHIM_BEGIN}\nalias k=kubectl\n");
+        assert_eq!(without_shim(&unterminated), unterminated);
         assert_eq!(without_shim(""), "");
     }
 

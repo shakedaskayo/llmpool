@@ -22,8 +22,9 @@ fn client() -> Result<Client, String> {
     if let Some(client) = Client::existing(timeout) {
         return Ok(client);
     }
+    let lock = http::instance_lock(&llmpool_daemon::client::data_dir()).map_err(|e| e.to_string())?;
     let daemon = Daemon::open_default().map_err(|e| e.message)?;
-    let running = http::start(Arc::new(daemon)).map_err(|e| e.to_string())?;
+    let running = http::start(Arc::new(daemon), lock).map_err(|e| e.to_string())?;
     std::thread::spawn(move || running.wait());
     Client::existing(timeout).ok_or_else(|| "could not start the llmpool daemon".to_string())
 }

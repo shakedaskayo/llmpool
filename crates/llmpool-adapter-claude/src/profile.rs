@@ -173,11 +173,24 @@ impl Profile {
 
         let mut credentials = object_or_empty(self.raw_credentials(keychain));
         credentials["claudeAiOauth"] = secret.oauth.clone();
+        let previous = std::fs::read(self.credentials_path()).ok();
         write_private(&self.credentials_path(), &credentials)?;
+        if let Err(e) = self.write_identity(secret) {
+            // One account's token beside another's identity is worse than no
+            // change at all: put the credential file back as it was.
+            match previous {
+                Some(bytes) => std::fs::write(self.credentials_path(), bytes)?,
+                None => std::fs::remove_file(self.credentials_path())?,
+            }
+            return Err(e);
+        }
         // A Keychain item would shadow the file we just wrote. Claude Code
         // recreates the item itself the next time it saves this login.
         keychain.delete(&self.service);
+        Ok(())
+    }
 
+    fn write_identity(&self, secret: &Secret) -> io::Result<()> {
         let mut config = object_or_empty(read_json(&self.global_config));
         config["oauthAccount"] = secret.account.clone();
         if !self.is_default {
@@ -312,6 +325,20 @@ pub(crate) mod tests {
         assert_eq!(config["oauthAccount"]["emailAddress"], "new@x.io");
         // The default profile's onboarding state is the user's, not ours.
         assert!(config.get("hasCompletedOnboarding").is_none());
+    }
+
+    #[test]
+    fn a_write_that_cannot_finish_leaves_the_old_login_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = Profile::at(&dir.path().join("p"));
+        profile.write(&NoKeychain, &secret("a@x.io", "a-1")).unwrap();
+        let before = std::fs::read(profile.credentials_path()).unwrap();
+        // Make the identity file impossible to replace.
+        std::fs::remove_file(&profile.global_config).unwrap();
+        std::fs::create_dir(&profile.global_config).unwrap();
+
+        assert!(profile.write(&NoKeychain, &secret("b@x.io", "b-1")).is_err());
+        assert_eq!(std::fs::read(profile.credentials_path()).unwrap(), before);
     }
 
     #[test]
