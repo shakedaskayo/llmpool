@@ -198,6 +198,15 @@ enum TeamCommand {
         #[arg(long)]
         detach: bool,
     },
+    /// Join a team's pool in one go: connect, have new sessions use it, and
+    /// make plain `claude` start through it. What an invitation runs
+    Join {
+        /// The server's address, e.g. https://pool.example.com
+        url: String,
+        /// Use an API key instead of signing in (typed or piped, never an argument)
+        #[arg(long)]
+        key: bool,
+    },
     /// Put accounts of this machine's into the team's pool (administrators).
     /// A login moves there; a key is copied
     Share {

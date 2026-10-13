@@ -1648,6 +1648,40 @@ fn team(command: Option<TeamCommand>) -> Result<ExitCode, String> {
     let client = connect()?;
     match command {
         None => done(team_line(&client.call("GET", "/team", None)?)),
+        Some(TeamCommand::Join { url, key }) => {
+            let code = team(Some(TeamCommand::Connect {
+                url,
+                key,
+                detach: false,
+            }))?;
+            // New sessions run on the pool, unless a rule of this person's
+            // already says where they go. Their own account still comes
+            // first if they have said so.
+            let policy = client.call("GET", "/policies", None)?;
+            let text = policy["text"].as_str().unwrap_or_default();
+            let decides_already = policy["policy"]["rule"]
+                .as_array()
+                .is_some_and(|rules| rules.iter().any(|r| r["on"] == "session_start"));
+            if !decides_already {
+                let rule = "[[rule]]\nname = \"use the team's pool\"\non = \"session_start\"\ndo = { assign = { tag = \"team\" } }\n";
+                let joined = if text.trim().is_empty() {
+                    rule.to_string()
+                } else {
+                    format!("{}\n\n{rule}", text.trim_end())
+                };
+                client.call("PUT", "/policies", Some(json!({"text": joined})))?;
+            }
+            // Plain `claude` starts through llmpool, so it lands on the pool
+            // without anyone having to remember a different command.
+            let shim = std::env::current_exe()
+                .map_err(|e| e.to_string())
+                .and_then(|exe| install_claude_as(&exe, true));
+            match shim {
+                Ok(_) => println!("\nYou are in. Open a new terminal and start `claude`; `/llmpool` shows the account it runs on."),
+                Err(why) => println!("\nYou are connected. Start your agent with `llmpool run` ({why})."),
+            }
+            Ok(code)
+        }
         Some(TeamCommand::Share { accounts, r#move }) => {
             for account in accounts {
                 share(&account, !r#move)?;

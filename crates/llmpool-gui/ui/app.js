@@ -923,6 +923,27 @@ function renderAgents() {
     <div class="card pad">${agentsPanel(claude, hooked)}</div>`;
 }
 
+// A link to send: it opens a page that says who invited you to what, with
+// the one line that installs llmpool, connects it and makes `claude` use the pool.
+function invitePanel(v) {
+  const from = state.inviteFrom ?? v.you.split("@")[0].replace(/[._-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const link = `${v.invite}${from.trim() ? `?from=${encodeURIComponent(from.trim())}` : ""}`;
+  const subject = from.trim() ? `${from.trim()} invited you to the ${v.name} LLM pool` : `You are invited to the ${v.name} LLM pool`;
+  const body = `${subject}.\n\nOne line sets it up, and your coding agent then runs on the shared pool:\n\n${link}\n`;
+  return `<p class="muted">Send people this link. It opens a page that says who invited them, with one line to copy: it installs llmpool, connects it to this pool, and makes <code>claude</code> run on it. ${v.sign_in ? `Only people who may sign in (${esc([...v.allowed_domains.map((d) => "*@" + d), ...v.allowed_emails].join(", "))}) get in.` : "They also need an API key from you."}</p>
+    <div class="copy">
+      <label class="filter">The pool is called <input class="wide" id="invite-name" value="${esc(v.settings.name ?? "")}" placeholder="${esc(v.name)}" aria-label="Name of the pool on the invitation" /></label>
+      <button data-act="invite-name">Save</button>
+      <label class="filter">from <input class="tags" id="invite-from" value="${esc(from)}" aria-label="Your name on the invitation" /></label>
+    </div>
+    <div class="copy">
+      <code class="invite">${esc(link)}</code>
+      <button class="primary" data-act="copy" data-text="${esc(link)}">Copy link</button>
+      <a class="buttonlike" href="mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}">Email it</a>
+      <a class="buttonlike" href="${esc(link)}" target="_blank" rel="noopener">See the page</a>
+    </div>`;
+}
+
 // What only a server has: who may connect, what each may use, who is on what.
 function renderServer() {
   const v = state.server;
@@ -938,6 +959,9 @@ function renderServer() {
     .map((e) => `<li><time>${new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${e.event.includes("denied") ? "login" : ""}" aria-hidden="true">${e.event.includes("denied") ? "⚠" : "·"}</span><span><strong>${esc(e.event.replaceAll("_", " "))}</strong> ${esc(e.who)}${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</span></li>`)
     .join("");
   $("team").innerHTML = `${pageHead("Server", `Serving this pool at <code>${esc(v.public_url)}</code>. Members connect with <code>llmpool team connect ${esc(v.public_url)}</code>.`)}
+    <h3 class="section">Invite your team</h3>
+    <div class="card pad">${invitePanel(v)}</div>
+
     <h3 class="section">Gateway</h3>
     <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="srv-gateway"${v.settings.gateway ? " checked" : ""} />
@@ -1076,6 +1100,7 @@ async function settingsAction(el) {
     await loadReport();
     return renderRequests();
   }
+  if (act === "invite-name") await attempt(() => api("PUT", "/server", { name: $("invite-name").value }), "Saved");
   if (act === "srv-gateway") await attempt(() => api("PUT", "/server", { gateway: el.checked }), el.checked ? "The server is a gateway; members switch over at their next sync" : "Accounts are lent to members again");
   if (act === "srv-share") await attempt(() => api("PUT", "/server", { share_logins: el.checked }), el.checked ? "Logins are shared between members" : "One member per login at a time");
   if (act === "srv-access") await attempt(() => api("PUT", "/server", { access: $("srv-access").value }), "Access saved");
@@ -1340,6 +1365,12 @@ for (const page of ["settings", "team", "agents"]) {
 }
 // What is typed for the team's server survives a redraw.
 $("team").addEventListener("input", (e) => e.target.id === "team-url" && (state.teamUrl = e.target.value));
+// The name on an invitation follows what is typed, link and all.
+$("team").addEventListener("change", (e) => {
+  if (e.target.id !== "invite-from") return;
+  state.inviteFrom = e.target.value;
+  renderTeam();
+});
 $("team").addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   if (e.target.id === "team-url") document.querySelector('[data-act="team-signin"]')?.click();

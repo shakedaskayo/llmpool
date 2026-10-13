@@ -1477,3 +1477,65 @@ fn settings_that_cannot_be_read_stop_the_server_rather_than_loosen_it() {
     let refused = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0");
     assert!(refused.is_err_and(|e| e.to_string().contains("team-settings.json")));
 }
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn an_invitation_page_says_who_invites_to_what_with_the_line_to_run() {
+    let pool = machine(&[]);
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        admins: vec!["ci".into()],
+        ..Config::default()
+    });
+    let get = |path: &str| ureq::get(&format!("{url}{path}")).call().unwrap();
+
+    // Anyone with the link sees it; it carries no secret and runs no script
+    // of its own making.
+    let page = get("/join?from=Dana%20Lee").into_string().unwrap();
+    assert!(page.contains("Dana Lee invited you to the"));
+    assert!(
+        page.contains(&format!("llmpool team join {url} --key")),
+        "a key-only pool says so"
+    );
+    assert!(page.contains("scripts/install.sh | sh"));
+    assert!(get("/join")
+        .header("Content-Security-Policy")
+        .unwrap()
+        .contains("default-src 'self'"));
+    assert!(get("/join.js").into_string().unwrap().contains("clipboard"));
+
+    // A name on an invitation is a name: nothing else gets onto the page.
+    let hostile = get("/join?from=%3Cscript%3Ealert(1)%3C%2Fscript%3E%22onload%3D")
+        .into_string()
+        .unwrap();
+    assert!(!hostile.contains("<script>alert") && !hostile.contains("onload="));
+    assert!(hostile.contains("scriptalert1script"));
+
+    // An administrator names the pool; the invitation uses the name.
+    let login = ureq::AgentBuilder::new()
+        .redirects(0)
+        .build()
+        .post(&format!("{url}/admin/login"))
+        .send_form(&[("key", KEY)])
+        .unwrap();
+    let session = login
+        .header("Set-Cookie")
+        .unwrap()
+        .split(['=', ';'])
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let saved: Value = ureq::post(&format!("{url}/admin/invoke/api"))
+        .set("Cookie", &format!("llmpool_session={session}"))
+        .set("X-Llmpool", "1")
+        .send_json(
+            json!({"method": "PUT", "path": "/server", "body": {"name": "Acme <b>Labs</b>"}}),
+        )
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(saved["invite"], format!("{url}/join"));
+    let named = get("/join").into_string().unwrap();
+    assert!(named.contains("You are invited to the Acme &lt;b&gt;Labs&lt;/b&gt; LLM pool"));
+}

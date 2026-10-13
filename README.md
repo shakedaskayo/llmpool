@@ -291,6 +291,11 @@ and keys both work this way; through a gateway, Claude Code runs as an API
 client and its claude.ai connectors are off. `LLMPOOL_UPSTREAM_<PROVIDER>`
 moves a provider to your own proxy.
 
+**Inviting people.** The server's page gives an administrator a link to send.
+It opens a page that says who invited them, with one line that installs
+llmpool, connects it (their browser opens for sign-in) and makes plain
+`claude` run on the pool: `... | sh && llmpool team join https://pool.example.com`.
+
 **Putting accounts in.** An administrator adds a key on the server's page, or
 from their own machine with one command: `llmpool add claude --to-team` signs
 in and puts the login straight into the pool, `llmpool add key openai

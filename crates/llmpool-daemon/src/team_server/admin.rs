@@ -29,6 +29,22 @@ window.__TAURI__ = {
   event: { listen: async () => () => {} },
 };"#;
 
+/// The invitation's one script: copying a command. Served as a file because
+/// our pages run no script written into them.
+const JOIN_JS: &str = r#"for (const button of document.querySelectorAll("button[data-copy]")) {
+  button.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(document.getElementById(button.dataset.copy).textContent);
+    const was = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(() => (button.textContent = was), 1600);
+  });
+}"#;
+const JOIN_HTML: &str = include_str!("join.html");
+
+/// Where the installer lives; the invitation's one-liner starts with it.
+const INSTALLER: &str =
+    "https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh";
+
 /// What of the pool's own API an administrator may use from a browser.
 /// Left out on purpose: exporting every login, shutting the daemon down,
 /// signing in on the server's machine, and what only running agents send.
@@ -107,6 +123,70 @@ impl TeamServer {
         )
     }
 
+    /// What the pool calls itself: the name an administrator gave it, or
+    /// the host it is reached at.
+    fn pool_name(&self) -> String {
+        let name = self.settings().name;
+        if !name.trim().is_empty() {
+            return name.trim().to_string();
+        }
+        self.config
+            .public_url
+            .split("//")
+            .nth(1)
+            .unwrap_or(&self.config.public_url)
+            .to_string()
+    }
+
+    /// The page an invitation leads to: who invited you to what, and the one
+    /// line that sets it up. Public, and it says nothing a member could not
+    /// say: the address is in the link already.
+    fn join_page(&self, query: &BTreeMap<String, String>) -> String {
+        // A name on an invitation is letters; anything else is not shown.
+        let from: String = query
+            .get("from")
+            .map(String::as_str)
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '\''))
+            .take(40)
+            .collect();
+        let name = escape(&self.pool_name());
+        let url = escape(&self.config.public_url);
+        let headline = if from.trim().is_empty() {
+            format!("You are invited to the {name} LLM pool")
+        } else {
+            format!("{} invited you to the {name} LLM pool", escape(from.trim()))
+        };
+        let key = if self.config.oidc.is_some() {
+            ""
+        } else {
+            " --key"
+        };
+        let sign_in = match (&self.config.oidc, self.config.domains.as_slice()) {
+            (Some(_), [domain]) => format!(
+                "Your browser opens. Sign in with your <strong>{}</strong> account.",
+                escape(domain)
+            ),
+            (Some(_), _) => "Your browser opens. Sign in with your work account.".to_string(),
+            (None, _) => {
+                "You are asked for an API key. Your administrator has one for you.".to_string()
+            }
+        };
+        let through = if self.settings().gateway {
+            "Your agent's requests go through the pool, on an account it picks for each one. No login or key is put on your machine."
+        } else {
+            "The pool lends your machine an account for each session and takes it back when you are done."
+        };
+        JOIN_HTML
+            .replace("{headline}", &headline)
+            .replace("{through}", through)
+            .replace("{installer}", INSTALLER)
+            .replace("{url}", &url)
+            .replace("{key}", key)
+            .replace("{sign_in}", &sign_in)
+    }
+
     /// Everything a browser asks for.
     pub(super) fn web(&self, ask: &Ask) -> Api<Reply> {
         let text = |s: &str| s.to_string();
@@ -123,6 +203,8 @@ impl TeamServer {
                 Err(_) => Ok(Reply::Redirect("/login".into())),
             },
             ("GET", "/login") => Ok(Reply::Page(200, self.login_page(""))),
+            ("GET", "/join") => Ok(Reply::Page(200, self.join_page(ask.query))),
+            ("GET", "/join.js") => Ok(Reply::Asset("text/javascript", text(JOIN_JS))),
             ("GET", "/app.js") => Ok(Reply::Asset("text/javascript", text(APP))),
             ("GET", "/icons.js") => Ok(Reply::Asset("text/javascript", text(ICONS))),
             ("GET", "/__tauri.js") => Ok(Reply::Asset("text/javascript", text(SHIM))),
@@ -269,6 +351,8 @@ impl TeamServer {
         Ok(json!({
             "you": who,
             "public_url": self.config.public_url,
+            "name": self.pool_name(),
+            "invite": format!("{}/join", self.config.public_url),
             "sign_in": self.config.oidc.as_ref().map(|o| &o.issuer),
             "allowed_domains": self.config.domains,
             "allowed_emails": self.config.emails,
@@ -280,6 +364,7 @@ impl TeamServer {
                 "access": settings.access.iter().map(|(who, tags)| format!("{who}={}", tags.join(","))).collect::<Vec<_>>().join("\n"),
                 "blocked": settings.blocked,
                 "gateway": settings.gateway,
+                "name": settings.name,
             },
             "gateway": {
                 "base": format!("{}/gateway", self.config.public_url),
@@ -298,6 +383,14 @@ impl TeamServer {
         let mut settings = self.settings();
         if let Some(on) = body["share_logins"].as_bool() {
             settings.share_logins = on;
+        }
+        if let Some(name) = body["name"].as_str() {
+            settings.name = name
+                .trim()
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(60)
+                .collect();
         }
         if let Some(on) = body["gateway"].as_bool() {
             settings.gateway = on;

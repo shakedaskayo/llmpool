@@ -21,6 +21,18 @@ In Claude Code: `/llmpool team https://pool.example.com`.
 
 ![Joining a team's pool]({{ '/assets/team.png' | relative_url }})
 
+## Inviting people
+
+On the server's page, **Server → Invite your team** gives you a link to copy or email. It opens a page that says who invited them to which pool, with one line to run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh | sh && ~/.local/bin/llmpool team join https://pool.example.com
+```
+
+That installs llmpool, connects it to the pool (their browser opens for sign-in), has new sessions use the pool, and makes plain `claude` start through it. They open a new terminal, type `claude`, and are on the pool. Someone who already has llmpool runs only `llmpool team join https://pool.example.com`.
+
+The page is public and holds no secret: who gets in is still decided by sign-in and your allow list.
+
 ## What a member gets
 
 The team's accounts appear tagged `team`, read-only. The team's rules are tried before the member's own. A member's own login of the same account always wins over the team's. Every minute the member's llmpool tells the server which team accounts it runs on, so `least_busy` and `pressure` rules see the whole team.

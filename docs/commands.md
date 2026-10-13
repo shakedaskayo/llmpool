@@ -52,6 +52,8 @@ permalink: /commands/
 
 | | |
 |---|---|
-| `llmpool team connect <address> [--key]` | Join a team's pool |
+| `llmpool team join <address> [--key]` | Join in one go: connect, have new sessions use the pool, make plain `claude` start through it |
+| `llmpool team connect <address> [--key]` | Only connect |
+| `llmpool team share <account>` | Put one of your accounts into the team's pool (administrators) |
 | `llmpool team` / `team sync` / `team disconnect` | The link, a sync now, leaving |
 | `llmpool serve --listen <address>` | Serve this machine's pool to a team |

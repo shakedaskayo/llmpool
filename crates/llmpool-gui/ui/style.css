@@ -304,3 +304,7 @@ main { padding: 26px 32px 44px; }
 .filter { color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .steps > .card { margin: 8px 0 0; }
 table.traces { margin-top: 0; }
+
+code.invite { padding: 6px 10px; user-select: all; max-width: 100%; overflow-wrap: anywhere; }
+a.buttonlike { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 5px 12px; text-decoration: none; font-weight: 500; white-space: nowrap; }
+a.buttonlike:hover { border-color: var(--muted); }

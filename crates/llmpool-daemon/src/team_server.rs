@@ -91,6 +91,9 @@ struct Settings {
     blocked: Vec<String>,
     #[serde(default)]
     gateway: bool,
+    /// What the pool is called on its invitation, e.g. the organisation's name.
+    #[serde(default)]
+    name: String,
 }
 
 pub struct Oidc {
@@ -449,6 +452,7 @@ impl TeamServer {
             access: config.access.clone(),
             blocked: config.blocked.clone(),
             gateway: config.gateway,
+            name: String::new(),
         });
         Ok(Self {
             settings: Mutex::new(settings),
@@ -1292,6 +1296,7 @@ mod tests {
             access: vec![],
             blocked: vec![],
             gateway: false,
+            name: String::new(),
         };
         assert!(c.opens("ann@x.io", &tags(&["anything"])));
         c.access = Config::access("*@x.io=work; Ann@x.io = vip ;ci=ci\nboss@x.io=*").unwrap();
