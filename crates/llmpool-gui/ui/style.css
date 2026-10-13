@@ -122,7 +122,7 @@ button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(
 
 select, input, textarea { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 4px 9px; min-height: 30px; }
 input::placeholder { color: color-mix(in srgb, var(--muted) 75%, transparent); }
-input[type="checkbox"] { min-height: 0; accent-color: var(--focus); }
+input[type="checkbox"] { min-height: 0; accent-color: var(--accent); }
 input.tags { width: 118px; }
 input.wide { width: 230px; }
 input.num { width: 62px; }
@@ -308,3 +308,32 @@ table.traces { margin-top: 0; }
 code.invite { padding: 6px 10px; user-select: all; max-width: 100%; overflow-wrap: anywhere; }
 a.buttonlike { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 5px 12px; text-decoration: none; font-weight: 500; white-space: nowrap; }
 a.buttonlike:hover { border-color: var(--muted); }
+
+.steps { align-items: start; }
+
+/* ---- narrow: a phone, or a small window ------------------------------------------------ */
+
+@media (max-width: 720px) {
+  html, body { height: auto; }
+  .app { display: block; height: auto; }
+  .side { position: sticky; top: 0; z-index: 4; flex-direction: row; align-items: center; gap: 6px; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+  .side h1 { font-size: 0; gap: 0; margin: 0 4px 0 0; }
+  [role="tablist"] { flex-direction: row; }
+  [role="tab"] { width: auto; white-space: nowrap; min-height: 36px; padding: 6px 10px; }
+  [role="tab"] .icon { display: none; }
+  .side-foot { margin: 0 0 0 auto; padding: 0 4px; white-space: nowrap; }
+  .side-foot p { margin: 0; }
+  #summary, .keys:not(:has(#sign-out)) { display: none; }
+  main { overflow: visible; padding: 18px 16px 36px; }
+  .head { flex-wrap: wrap; }
+  .acct, .sess { grid-template-columns: 32px minmax(0, 1fr); row-gap: 8px; }
+  .acct > :nth-child(n+3), .sess > :nth-child(n+3) { grid-column: 2; }
+  .acct .actions { justify-content: flex-start; }
+  .card { overflow-x: auto; }
+  .card td, .card th { white-space: nowrap; }
+  /* Big enough for a thumb, and for iOS not to zoom in on focus. */
+  button, select, a.buttonlike, input:not([type="checkbox"]):not([type="radio"]) { min-height: 36px; }
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px; max-width: 100%; }
+  .indent { margin-left: 0; }
+  #toasts { left: 12px; right: 12px; max-width: none; }
+}

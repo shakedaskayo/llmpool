@@ -405,7 +405,7 @@ function renderRequests() {
 
     <h3 class="section">Requests <span class="count">${n(t.requests)}</span></h3>
     <div class="toolbar">${pick("who", "Member", r.members)}${pick("provider", "Provider", r.providers)}${pick("account", "Account", r.accounts)}${pick("result", "Result", ["ok", "failed"])}
-      <span class="spacer"></span><span class="muted">${r.requests.length < t.requests ? `newest ${r.requests.length} of ${n(t.requests)}` : ""} · ${n(r.kept)} kept here, all of them in <code>gateway-traces.log</code></span></div>
+      <span class="spacer"></span><span class="muted">${r.requests.length < t.requests ? `newest ${r.requests.length} of ${n(t.requests)} · ` : ""}${n(r.kept)} kept here, all of them in <code>gateway-traces.log</code></span></div>
     ${rows ? `<div class="card pad"><table class="traces"><caption class="skip">Requests</caption><thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Account</th><th scope="col">Model</th><th scope="col">Result</th><th scope="col">Tokens in / out</th><th scope="col">Time</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty"><h3>No requests match</h3><p>Nothing has come through with these filters.</p></div>`}`;
 }
 

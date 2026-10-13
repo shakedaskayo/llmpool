@@ -25,6 +25,8 @@ In Claude Code: `/llmpool team https://pool.example.com`.
 
 On the server's page, **Server → Invite your team** gives you a link to copy or email. It opens a page that says who invited them to which pool, with one line to run:
 
+![The invitation page]({{ '/assets/invite.png' | relative_url }})
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shakedaskayo/llmpool/main/scripts/install.sh | sh && ~/.local/bin/llmpool team join https://pool.example.com
 ```
