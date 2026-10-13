@@ -265,3 +265,13 @@ pre.log { margin: 10px 0 0; padding: 10px; background: var(--sunken); border: 1p
 #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; max-width: 420px; z-index: 5; }
 .toast { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--ok); border-radius: 8px; padding: 9px 13px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2); }
 .toast.error { border-left-color: var(--bad); }
+
+.avatar.mark { background: var(--sunken); color: var(--text); border: 1px solid var(--line); }
+.agentname { display: flex; align-items: center; gap: 10px; }
+.agentname .avatar { width: 26px; height: 26px; border-radius: 7px; }
+.agentname .avatar svg { width: 14px; height: 14px; }
+
+[role="tab"][hidden] { display: none; }
+#srv-access { width: 100%; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.card.pad p { margin: 12px 0 6px; }
+.card.pad > :first-child { margin-top: 0; }

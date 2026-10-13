@@ -3,6 +3,8 @@
 
 const invoke = window.__TAURI__.core.invoke;
 const api = (method, path, body) => invoke("api", { method, path, body: body ?? null });
+// The same interface is served by a team's server to its administrators.
+const SERVER = window.LLMPOOL_HOST === "server";
 
 const state = {
   accounts: [],
@@ -12,6 +14,7 @@ const state = {
   stats: {},
   config: {},
   team: { state: "off" },
+  server: {}, // what a team's server says about itself, when this page is its own
   agents: { harnesses: [] },
   providers: [],
   adding: false, // whether the add-account dialog is open
@@ -113,8 +116,14 @@ const pageHead = (title, sub, actions = "") =>
 
 // A stable colour per provider or agent, so the eye learns which is which.
 const hue = (text) => [...String(text)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
-const avatar = (label, key) =>
-  `<span class="avatar" style="--h:${hue(key)}" aria-hidden="true">${esc((String(label).replace(/^[a-z-]+:/, "")[0] ?? "?").toUpperCase())}</span>`;
+// The provider's or agent's own mark where there is one; its initial otherwise.
+const avatar = (label, key) => {
+  const mark = window.LLMPOOL_ICONS?.[key];
+  const inner = mark
+    ? `<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" fill-rule="evenodd"><path d="${mark}"/></svg>`
+    : esc((String(label).replace(/^[a-z-]+:/, "")[0] ?? "?").toUpperCase());
+  return `<span class="avatar${mark ? " mark" : ""}" style="--h:${hue(key)}" aria-hidden="true">${inner}</span>`;
+};
 
 // One usage window with its name in front, for cards that show two.
 const windowRow = (usage, name, title) => `<div class="win"><span class="cap">${name}</span>${meter(usage, name, title)}</div>`;
@@ -140,6 +149,8 @@ function accountBadge(a) {
 
 // What is missing, each with the button that fixes it.
 function issuesPanel() {
+  // A server has no agent of its own to be connected to.
+  if (SERVER) return "";
   if (state.login.state === "waiting") {
     const url = state.login.url ? `<p class="muted">If no page opened: <a href="#" data-act="copy" data-text="${esc(state.login.url)}">copy the sign-in link</a></p>` : "";
     return `<div class="callout" role="status"><strong>◌ Waiting for you to finish signing in in your browser…</strong>${url}
@@ -225,13 +236,31 @@ function addKey() {
     </div>`;
 }
 
+// Logins cannot be signed in to on a server; they arrive as an exported file.
+function addFile() {
+  return `<p class="muted">On a machine that has the logins, run <code>llmpool export pool.age</code> and choose a passphrase. Then pick that file here. It is opened on the server and never stored as a file.</p>
+    <div class="copy">
+      <input id="import-file" type="file" aria-label="Exported pool file" />
+      <input class="wide" id="import-pass" type="password" autocomplete="off" placeholder="passphrase" aria-label="Passphrase of the file" />
+      <button class="primary" data-act="import-file">Import</button>
+    </div>`;
+}
+
 function addPanel() {
-  const kinds = [
-    ["claude", "Claude Code login"],
-    ["agent", "Another agent's login"],
-    ["key", "API key · any provider"],
-  ];
-  const body = { claude: addClaude, agent: addAgent, key: addKey }[state.addKind]();
+  // Signing an agent in happens on a person's own machine; a server takes
+  // keys directly and logins as a file exported from such a machine.
+  const kinds = SERVER
+    ? [
+        ["key", "API key · any provider"],
+        ["file", "Logins from a pool file"],
+      ]
+    : [
+        ["claude", "Claude Code login"],
+        ["agent", "Another agent's login"],
+        ["key", "API key · any provider"],
+      ];
+  if (!kinds.some(([kind]) => kind === state.addKind)) state.addKind = kinds[0][0];
+  const body = { claude: addClaude, agent: addAgent, key: addKey, file: addFile }[state.addKind]();
   return `<div class="callout">
     <div role="group" aria-label="Kind of account" class="seg">${kinds.map(([kind, label]) => `<button data-act="add-kind" data-kind="${kind}" aria-pressed="${state.addKind === kind}">${label}</button>`).join("")}</div>
     ${body}
@@ -265,7 +294,7 @@ function accountCard(a) {
     : `<span class="muted">usage is not reported to llmpool</span>`;
   const actions = a.shared
     ? `<span class="muted">managed by your team</span>`
-    : `${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
+    : `${a.health !== "ok" && !SERVER ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
        <button class="quiet" data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
        <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`;
   return `<li class="card acct${live ? "" : " off"}">
@@ -289,7 +318,7 @@ function renderPool() {
         <h3>${esc(agentTitle(provider))} <span class="count">${groups.get(provider).length}</span></h3>
         <ul class="cards">${groups.get(provider).map(accountCard).join("")}</ul></section>`)
     .join("");
-  $("pool").innerHTML = `${pageHead("Accounts", "Every login and key in your pool, and how much of each is used.", `<button class="primary" data-act="add-open">Add account</button>`)}
+  $("pool").innerHTML = `${pageHead("Accounts", SERVER ? "What this server lends to its members." : "Every login and key in your pool, and how much of each is used.", `<button class="primary" data-act="add-open">Add account</button>`)}
     ${issuesPanel()}
     ${
       lists
@@ -343,7 +372,7 @@ function renderSessions() {
         ? `${windowRow(s.usage, "5h", "5-hour window")}${windowRow(s.usage, "7d", "7-day window")}`
         : `<span class="muted">usage is not reported to llmpool</span>`;
       return `<li class="card sess">
-          ${avatar(agent, s.provider)}
+          ${avatar(agent, isClaude ? "claude" : (s.agent ?? "").split("/").pop())}
           <div class="who"><div class="name"><strong title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></strong> ${kind}</div>
             <div class="sub">${esc(agent)}${s.picked_by ? ` · ${esc(s.picked_by)}` : ""}</div>${verdict}</div>
           <div class="pick">${picker}${ask}</div>
@@ -751,7 +780,7 @@ async function loadPolicy() {
 
 // Every agent llmpool can start, what it runs on and how to start it.
 function agentsPanel(claude, hooked) {
-  const row = (title, runsOn, status, how) => `<tr><td><strong>${esc(title)}</strong></td><td class="muted">${runsOn}</td><td>${status}</td><td class="actions">${how}</td></tr>`;
+  const row = (title, runsOn, status, how, key) => `<tr><td><span class="agentname">${avatar(title, key)}<strong>${esc(title)}</strong></span></td><td class="muted">${runsOn}</td><td>${status}</td><td class="actions">${how}</td></tr>`;
   const command = (text) => `<a href="#" data-act="copy" data-text="${esc(text)}" title="Copy"><code>${esc(text)}</code></a>`;
   const rows = [
     row(
@@ -759,6 +788,7 @@ function agentsPanel(claude, hooked) {
       "its own logins",
       claude ? (hooked ? `<span class="ok" aria-hidden="true">✓</span> connected: live switching, usage, <code>/llmpool</code>` : `<span class="warnmark" aria-hidden="true">⚠</span> installed, not connected yet`) : `<span class="muted">not found on this Mac</span>`,
       command("claude"),
+      "claude",
     ),
     ...state.agents.harnesses.map((h) => {
       const runsOn = [h.has_login ? "its own logins" : "", h.provider ? `${esc(agentTitle(h.provider))} keys` : h.has_login ? "any key" : "any key, by provider"].filter(Boolean).join(", ");
@@ -767,7 +797,7 @@ function agentsPanel(claude, hooked) {
         : h.accounts > 0
           ? `<span class="ok" aria-hidden="true">✓</span> ${plural(h.accounts, "account")} in the pool`
           : `<span class="warnmark" aria-hidden="true">⚠</span> no account in the pool yet <button class="quiet" data-act="goto-add" data-kind="${h.logged_in && !h.login_in_pool ? "agent" : "key"}">Add one</button>`;
-      return row(h.title, runsOn, status, h.installed ? command(`llmpool exec -- ${h.command}`) : "");
+      return row(h.title, runsOn, status, h.installed ? command(`llmpool exec -- ${h.command}`) : "", h.name);
     }),
   ].join("");
   return `<table><caption class="skip">Coding agents</caption>
@@ -812,7 +842,54 @@ function renderAgents() {
     <div class="card pad">${agentsPanel(claude, hooked)}</div>`;
 }
 
+// What only a server has: who may connect, what each may use, who is on what.
+function renderServer() {
+  const v = state.server;
+  if (!v.settings) return ($("team").innerHTML = pageHead("Server", "Loading…"));
+  const codes = (items) => (items?.length ? items.map((i) => `<code>${esc(i)}</code>`).join(" ") : `<span class="muted">none</span>`);
+  const when = (at) => new Date(at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const members = v.members
+    .map((m) => `<tr><td><strong>${esc(m.email)}</strong>${m.email === v.you ? ` <span class="badge">you</span>` : ""}</td><td class="muted">${m.by_key ? "an API key, on this page" : "signed in"}</td><td class="muted">until ${esc(when(m.expires_at))}</td>
+        <td class="actions"><button class="quiet danger" data-act="srv-revoke" data-email="${esc(m.email)}">Sign out everywhere</button></td></tr>`)
+    .join("");
+  const seats = v.seats.map((x) => `<tr><td><strong>${esc(x.account)}</strong></td><td>${esc(x.who)}</td><td class="muted">${plural(x.sessions, "session")}</td></tr>`).join("");
+  const audit = v.audit
+    .map((e) => `<li><time>${new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${e.event.includes("denied") ? "login" : ""}" aria-hidden="true">${e.event.includes("denied") ? "⚠" : "·"}</span><span><strong>${esc(e.event.replaceAll("_", " "))}</strong> ${esc(e.who)}${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</span></li>`)
+    .join("");
+  $("team").innerHTML = `${pageHead("Server", `Serving this pool at <code>${esc(v.public_url)}</code>. Members connect with <code>llmpool team connect ${esc(v.public_url)}</code>.`)}
+    <h3 class="section">Lending</h3>
+    <div class="card pad">
+      <label class="switch"><input type="checkbox" data-act="srv-share"${v.settings.share_logins ? " checked" : ""} />
+        <span><strong>Let several members run on one subscription login at once</strong><br /><span class="muted">Off, a login in use by one member is not lent to another until they stop. Providers license such logins per person; turn this on only where yours allows it. Keys are always shared.</span></span></label>
+      <p><strong>Who may use what</strong><br /><span class="muted">One line per member: an address, a key's name, <code>*@domain</code> or <code>*</code>, then the tags it opens (<code>*</code> for all). Empty: every member may use every account.</span></p>
+      <textarea id="srv-access" rows="4" spellcheck="false" aria-label="Access rules, one per line" placeholder="*@example.com=work&#10;lead@example.com=*">${esc(v.settings.access)}</textarea>
+      <div class="copy"><button data-act="srv-access">Save access</button></div>
+      <p><strong>Turned away</strong><br /><span class="muted">Members who may not connect even though sign-in or a key would admit them.</span></p>
+      <div class="copy"><input class="wide" id="srv-blocked" value="${esc(v.settings.blocked.join(", "))}" placeholder="addresses or key names, comma separated" aria-label="Blocked members, comma separated" />
+        <button data-act="srv-blocked">Save</button></div>
+    </div>
+
+    <h3 class="section">Members <span class="count">${v.members.length}</span></h3>
+    <div class="card pad">${members ? `<table><caption class="skip">Members with a session</caption><tbody>${members}</tbody></table>` : `<span class="muted">Nobody is signed in. Members who connect with an API key do not appear here; their use shows below.</span>`}</div>
+
+    <h3 class="section">In use now</h3>
+    <div class="card pad">${seats ? `<table><caption class="skip">Accounts members are running on</caption><tbody>${seats}</tbody></table>` : `<span class="muted">No member is running on a lent account right now.</span>`}</div>
+
+    <h3 class="section">Who can connect <span class="badge">set in the deployment</span></h3>
+    <div class="card pad"><table><tbody>
+      <tr><td class="muted">Sign-in</td><td>${v.sign_in ? `<code>${esc(v.sign_in)}</code>` : `<span class="muted">off; API keys only</span>`}</td></tr>
+      ${v.sign_in ? `<tr><td class="muted">May sign in</td><td>${codes([...v.allowed_domains.map((d) => "*@" + d), ...v.allowed_emails])}</td></tr>` : ""}
+      <tr><td class="muted">API keys</td><td>${codes(v.key_members)}</td></tr>
+      <tr><td class="muted">Administrators</td><td>${codes(v.admins)}</td></tr>
+      <tr><td class="muted">Stored logins</td><td>${v.sealed ? `<span class="ok" aria-hidden="true">✓</span> encrypted with a key held outside the volume` : `<span class="warnmark" aria-hidden="true">⚠</span> not encrypted: set <code>LLMPOOL_VAULT_KEY</code>`}</td></tr>
+    </tbody></table></div>
+
+    <h3 class="section">Audit log</h3>
+    ${audit ? `<ul class="events">${audit}</ul>` : `<p class="muted">Nothing yet.</p>`}`;
+}
+
 function renderTeam() {
+  if (SERVER) return renderServer();
   const fact = (title, text) => `<div><strong>${title}</strong><p class="muted">${text}</p></div>`;
   $("team").innerHTML = `${pageHead("Team", "Use a pool your team shares, through a server it runs.")}
     <div class="card pad">${teamPanel()}</div>
@@ -893,6 +970,10 @@ async function settingsAction(el) {
     state.teamUrl = url;
     await attempt(() => api("POST", "/team", { url, key }), key ? "Connected to the team's pool" : "Finish signing in in your browser");
   }
+  if (act === "srv-share") await attempt(() => api("PUT", "/server", { share_logins: el.checked }), el.checked ? "Logins are shared between members" : "One member per login at a time");
+  if (act === "srv-access") await attempt(() => api("PUT", "/server", { access: $("srv-access").value }), "Access saved");
+  if (act === "srv-blocked") await attempt(() => api("PUT", "/server", { blocked: $("srv-blocked").value.split(",") }), "Saved");
+  if (act === "srv-revoke") await attempt(() => api("DELETE", `/server/members/${encodeURIComponent(el.dataset.email)}`), `${el.dataset.email} is signed out`);
   if (act === "team-sync") await attempt(() => api("POST", "/team/sync"), "Synced");
   if (act === "team-leave") await attempt(() => api("DELETE", "/team"), state.team.state === "waiting" ? "Sign-in cancelled" : "Left the team's pool");
   if (act === "login-item") {
@@ -932,6 +1013,17 @@ async function poolAction(el) {
   if (act === "key-provider") {
     state.keyProvider = el.value;
     return renderPool();
+  }
+  if (act === "import-file") {
+    const file = $("import-file").files[0];
+    if (!file) return toast("Choose the exported file first", "error");
+    const bundle = await file.text();
+    const ok = await attempt(async () => {
+      const r = await api("POST", "/import", { bundle, passphrase: $("import-pass").value, replace: false });
+      toast(`Added ${r.added.length}${r.skipped.length ? `, left ${r.skipped.length} as they were` : ""}`);
+    });
+    if (ok) state.adding = false;
+    return refresh(true);
   }
   if (act === "add-agent") {
     if (await attempt(() => api("POST", "/accounts/files", { harness: el.dataset.name }), "Login added to the pool")) state.adding = false;
@@ -1014,7 +1106,7 @@ function renderSummary() {
   const free = state.stats.headroom_5h == null ? "" : `${Math.round(state.stats.headroom_5h)}% of the 5-hour allowance free`;
   $("summary").textContent = state.offline ?? (free || "llmpool is running");
   $("summary").className = state.offline ? "offline" : "muted online";
-  const problems = state.issues.length + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
+  const problems = (SERVER ? 0 : state.issues.length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
     pool: problems ? "!" : state.accounts.length || "",
     sessions: state.sessions.length || "",
@@ -1049,11 +1141,12 @@ async function refresh(force = false) {
       optional("stats", "/stats"),
       optional("config", "/config"),
       optional("team", "/team"),
+      SERVER ? optional("server", "/server") : null,
       optional("agents", "/harnesses"),
       state.providers.length ? null : optional("providers", "/providers"),
       optional("remotePolicy", "/policies"),
     ]);
-    if (state.loginItem === null) {
+    if (state.loginItem === null && !SERVER) {
       state.loginItem = await invoke("login_item", { state: "status" }).then((text) => /starts at login/.test(text) && !/does not/.test(text), () => false);
     }
     // A sign-in that just ended is news, whichever way it went.
@@ -1157,6 +1250,19 @@ window.__TAURI__.event.listen("llmpool-message", (event) => {
   go("sessions");
   toast(event.payload, "error");
 });
+
+// On a server: only what a server has, and a way out.
+if (SERVER) {
+  for (const name of ["sessions", "agents", "settings"]) $(`tab-${name}`).hidden = true;
+  $("tab-team").querySelector("span").textContent = "Server";
+  document.querySelector(".keys").innerHTML = `<a href="#" id="sign-out">Sign out</a>`;
+  $("sign-out").addEventListener("click", async (e) => {
+    e.preventDefault();
+    await invoke("sign_out").catch(() => {});
+    location.replace("/login");
+  });
+  document.title = "llmpool server";
+}
 
 // A section can be opened by address: `#sessions`, `#team`, ...
 const fromHash = () => $(`tab-${location.hash.slice(1)}`) && go(location.hash.slice(1));

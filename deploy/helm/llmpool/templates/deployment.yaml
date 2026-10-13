@@ -48,6 +48,10 @@ spec:
             - name: LLMPOOL_ALLOWED_EMAILS
               value: {{ join "," .Values.oidc.allowedEmails | quote }}
             {{- end }}
+            {{- if .Values.admins }}
+            - name: LLMPOOL_ADMINS
+              value: {{ join "," .Values.admins | quote }}
+            {{- end }}
             {{- if .Values.access }}
             - name: LLMPOOL_ACCESS
               value: {{ $rules := list }}{{ range $who, $tags := .Values.access }}{{ $rules = append $rules (printf "%s=%s" $who (join "," $tags)) }}{{ end }}{{ join ";" $rules | quote }}

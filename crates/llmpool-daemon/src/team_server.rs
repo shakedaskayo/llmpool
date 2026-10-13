@@ -8,6 +8,8 @@
 //! This listener speaks plain HTTP; put it behind something that terminates
 //! TLS. Clients refuse a server that is not `https` unless it is on loopback.
 
+mod admin;
+
 use crate::http::percent_decode;
 use crate::{fail, now, Api, ApiError, Daemon};
 use base64::Engine;
@@ -56,6 +58,18 @@ pub struct Config {
     pub access: Vec<(String, Vec<String>)>,
     /// Members turned away whatever else admits them.
     pub blocked: Vec<String>,
+    /// Members who may run the server from its web page: addresses or key
+    /// names. Empty: nobody, and the page says so.
+    pub admins: Vec<String>,
+}
+
+/// What an administrator can change while the server runs. It starts as the
+/// deployment says and, once changed, is kept in `team-settings.json`.
+#[derive(Clone, Serialize, Deserialize)]
+struct Settings {
+    share_logins: bool,
+    access: Vec<(String, Vec<String>)>,
+    blocked: Vec<String>,
 }
 
 pub struct Oidc {
@@ -100,6 +114,7 @@ impl Config {
             share_logins: var("LLMPOOL_SHARE_LOGINS").is_some_and(|v| v == "1" || v == "true"),
             access: Self::access(&var("LLMPOOL_ACCESS").unwrap_or_default())?,
             blocked: list("LLMPOOL_BLOCKED"),
+            admins: list("LLMPOOL_ADMINS"),
         };
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
@@ -158,6 +173,14 @@ impl Config {
             .collect()
     }
 
+    fn admits(&self, email: &str) -> bool {
+        let email = email.to_lowercase();
+        let domain = email.rsplit('@').next().unwrap_or_default();
+        self.emails.contains(&email) || self.domains.iter().any(|d| d == domain)
+    }
+}
+
+impl Settings {
     /// Whether `who` may use an account carrying `tags`.
     fn opens(&self, who: &str, tags: &std::collections::BTreeSet<String>) -> bool {
         if self.access.is_empty() {
@@ -175,12 +198,6 @@ impl Config {
 
     fn blocks(&self, who: &str) -> bool {
         self.blocked.contains(&who.to_lowercase())
-    }
-
-    fn admits(&self, email: &str) -> bool {
-        let email = email.to_lowercase();
-        let domain = email.rsplit('@').next().unwrap_or_default();
-        self.emails.contains(&email) || self.domains.iter().any(|d| d == domain)
     }
 }
 
@@ -202,6 +219,10 @@ struct Grant {
 struct Member {
     email: String,
     expires_at: i64,
+    /// Signed in on the web page with an API key rather than the provider:
+    /// good for as long as that key is configured.
+    #[serde(default)]
+    by_key: bool,
 }
 
 #[derive(Default)]
@@ -223,12 +244,31 @@ pub struct TeamServer {
     /// The identity provider's (issuer, authorization, token) addresses.
     provider: Mutex<Option<(String, String, String)>>,
     members_path: PathBuf,
+    settings: Mutex<Settings>,
 }
 
 enum Reply {
     Json(Value),
     Redirect(String),
     Page(u16, String),
+    /// A file of the web page: its type and its text.
+    Asset(&'static str, String),
+    /// Start (or with `None` end) a browser session, then go somewhere.
+    Session(Option<String>, String),
+}
+
+/// Everything about one request that deciding on it can need.
+struct Ask<'a> {
+    method: &'a str,
+    path: &'a str,
+    query: &'a BTreeMap<String, String>,
+    bearer: Option<&'a str>,
+    /// The browser session, from its cookie.
+    cookie: Option<&'a str>,
+    /// Sent by our own page's script; a form on another site cannot add it.
+    ours: bool,
+    body: &'a Value,
+    text: &'a str,
 }
 
 pub(crate) fn random_hex(bytes: usize) -> String {
@@ -305,7 +345,16 @@ impl TeamServer {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        let settings = std::fs::read_to_string(daemon.data_dir().join("team-settings.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| Settings {
+                share_logins: config.share_logins,
+                access: config.access.clone(),
+                blocked: config.blocked.clone(),
+            });
         Self {
+            settings: Mutex::new(settings),
             config,
             daemon,
             state: Mutex::new(State {
@@ -335,6 +384,13 @@ impl TeamServer {
         {
             let _ = writeln!(file, "{line}");
         }
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -408,14 +464,21 @@ impl TeamServer {
     /// machine to come back to and what it will prove itself with.
     fn login(&self, query: &BTreeMap<String, String>) -> Api<Reply> {
         let get = |name: &str| query.get(name).map(String::as_str).unwrap_or_default();
-        let port: u16 = get("port")
-            .parse()
-            .ok()
-            .filter(|p| *p >= 1024)
-            .ok_or_else(|| fail(400, "bad request: `port` is required"))?;
+        // From the server's own page there is no client to hand back to:
+        // port 0 marks a sign-in that ends in a browser session here.
+        let web = get("web") == "1";
+        let port: u16 = if web {
+            0
+        } else {
+            get("port")
+                .parse()
+                .ok()
+                .filter(|p| *p >= 1024)
+                .ok_or_else(|| fail(400, "bad request: `port` is required"))?
+        };
         let (challenge, client_state) = (get("challenge"), get("state"));
         let hex = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit());
-        if !hex(challenge, 64) || !hex(client_state, 32) {
+        if !web && (!hex(challenge, 64) || !hex(client_state, 32)) {
             return Err(fail(
                 400,
                 "bad request: `challenge` and `state` are required",
@@ -519,8 +582,14 @@ impl TeamServer {
                 "the provider has not verified an email address for you",
             ));
         }
-        if !self.config.admits(&email) || self.config.blocks(&email) {
+        if !self.config.admits(&email) || self.settings().blocks(&email) {
             return Err(denied(&format!("{email} is not allowed to use this pool")));
+        }
+        if pending.port == 0 {
+            return Ok(Reply::Session(
+                Some(self.open_session(&email, false)),
+                "/".into(),
+            ));
         }
         let code = random_hex(24);
         {
@@ -554,29 +623,40 @@ impl TeamServer {
             .remove(text("code"))
             .filter(|g| t - g.at < GRANT_SECS && g.challenge == sha256_hex(text("verifier")))
             .ok_or_else(|| fail(400, "this sign-in code is unknown, used or too old"))?;
-        let token = random_hex(32);
+        drop(state);
+        let token = self.open_session(&grant.email, false);
         let expires_at = t + SESSION_SECS;
+        Ok(Reply::Json(
+            json!({"token": token, "email": grant.email, "expires_at": expires_at}),
+        ))
+    }
+
+    /// A new session of ours for `email`; the token is returned once and
+    /// only its hash is kept.
+    fn open_session(&self, email: &str, by_key: bool) -> String {
+        let token = random_hex(32);
+        let t = now();
+        let mut state = self.state();
         state.members.retain(|_, m| m.expires_at > t);
         state.members.insert(
             sha256_hex(&token),
             Member {
-                email: grant.email.clone(),
-                expires_at,
+                email: email.to_string(),
+                expires_at: t + SESSION_SECS,
+                by_key,
             },
         );
         self.save_members(&state);
         drop(state);
-        self.audit("sign_in", &grant.email, "");
-        Ok(Reply::Json(
-            json!({"token": token, "email": grant.email, "expires_at": expires_at}),
-        ))
+        self.audit("sign_in", email, if by_key { "with a key" } else { "" });
+        token
     }
 
     fn member(&self, bearer: Option<&str>) -> Api<(String, String)> {
         let key = sha256_hex(bearer.unwrap_or_default());
         // A key member is whoever the server's configuration says holds it.
         if let Some((name, _)) = self.config.api_keys.iter().find(|(_, hash)| **hash == key) {
-            if self.config.blocks(name) {
+            if self.settings().blocks(name) {
                 return Err(fail(401, "you are no longer allowed to use this pool"));
             }
             return Ok((key, name.clone()));
@@ -589,7 +669,12 @@ impl TeamServer {
             .cloned()
             .ok_or_else(|| fail(401, "sign in to this pool again"))?;
         // Leaving the allow list ends the session, not only future sign-ins.
-        if !self.config.admits(&member.email) || self.config.blocks(&member.email) {
+        let still = if member.by_key {
+            self.config.api_keys.contains_key(&member.email)
+        } else {
+            self.config.admits(&member.email)
+        };
+        if !still || self.settings().blocks(&member.email) {
             return Err(fail(401, "you are no longer allowed to use this pool"));
         }
         Ok((key, member.email))
@@ -602,6 +687,7 @@ impl TeamServer {
             serde_json::from_value(body["using"].clone()).unwrap_or_default();
         let usage: BTreeMap<AccountId, Usage> =
             serde_json::from_value(body["usage"].clone()).unwrap_or_default();
+        let settings = self.settings();
         let d = &self.daemon;
         let g = d.lock();
         let accounts = d.accounts(&g)?;
@@ -630,12 +716,12 @@ impl TeamServer {
             if account.kind == Kind::Oauth && account.provider != "claude" {
                 continue;
             }
-            if !self.config.opens(email, &account.tags) {
+            if !settings.opens(email, &account.tags) {
                 continue;
             }
             let holders = state.seats.entry(account.id.clone()).or_default();
             let others: usize = holders.values().map(|(_, n)| n).sum();
-            let exclusive = account.kind == Kind::Oauth && !self.config.share_logins;
+            let exclusive = account.kind == Kind::Oauth && !settings.share_logins;
             let held = exclusive && others > 0;
             if let (Some(sessions), false) = (using.get(&account.id), held) {
                 holders.insert(email.to_string(), (t, *sessions));
@@ -712,14 +798,15 @@ impl TeamServer {
         ))
     }
 
-    fn route(
-        &self,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        bearer: Option<&str>,
-        body: &Value,
-    ) -> Api<Reply> {
+    fn route(&self, ask: &Ask) -> Api<Reply> {
+        let Ask {
+            method,
+            path,
+            query,
+            bearer,
+            body,
+            ..
+        } = *ask;
         match (method, path) {
             ("GET", "/health") => Ok(Reply::Json(json!({
                 "ok": true,
@@ -746,7 +833,7 @@ impl TeamServer {
                 let (_, email) = self.member(bearer)?;
                 self.sync(&email, body)
             }
-            _ => Err(fail(404, "no such route")),
+            _ => self.web(ask),
         }
     }
 
@@ -763,13 +850,29 @@ impl TeamServer {
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or_default().to_string();
         let browser = path.starts_with("/auth/") && *request.method() == tiny_http::Method::Get;
-        let result = self.route(
-            request.method().as_str(),
-            &path,
-            &query_of(&url),
-            bearer.as_deref(),
-            &body,
-        );
+        let cookie = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Cookie"))
+            .and_then(|h| {
+                h.value
+                    .as_str()
+                    .split(';')
+                    .find_map(|pair| pair.trim().strip_prefix("llmpool_session="))
+                    .map(str::to_string)
+            });
+        let ours = request.headers().iter().any(|h| h.field.equiv("X-Llmpool"));
+        let query = query_of(&url);
+        let result = self.route(&Ask {
+            method: request.method().as_str(),
+            path: &path,
+            query: &query,
+            bearer: bearer.as_deref(),
+            cookie: cookie.as_deref(),
+            ours,
+            body: &body,
+            text: &text,
+        });
         if let (Err(e), "/auth/callback") = (&result, path.as_str()) {
             self.audit("sign_in_denied", "", &e.message);
         }
@@ -800,8 +903,44 @@ impl TeamServer {
             Reply::Page(status, html) => request.respond(
                 tiny_http::Response::from_string(html)
                     .with_status_code(status)
-                    .with_header(header("Content-Type", "text/html; charset=utf-8")),
+                    .with_header(header("Content-Type", "text/html; charset=utf-8"))
+                    .with_header(header("Cache-Control", "no-store")),
             ),
+            Reply::Asset(kind, text) => request.respond(
+                tiny_http::Response::from_string(text)
+                    .with_header(header("Content-Type", kind))
+                    .with_header(header("Cache-Control", "no-store"))
+                    .with_header(header("X-Content-Type-Options", "nosniff"))
+                    .with_header(header("X-Frame-Options", "DENY")),
+            ),
+            Reply::Session(token, to) => {
+                // Readable by no script, sent to no other site, and only
+                // over TLS wherever the server is reached over TLS.
+                let secure = if self.config.public_url.starts_with("https://") {
+                    "; Secure"
+                } else {
+                    ""
+                };
+                let cookie = match token {
+                    Some(token) => format!(
+                        "llmpool_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200{secure}"
+                    ),
+                    None => format!("llmpool_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"),
+                };
+                // A page rather than a redirect: the browser only sends a
+                // strict cookie on a move our own page starts, and the move
+                // that brought it here may have started at the provider.
+                let html = format!(
+                    "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=\"0;url={}\"><title>llmpool</title>",
+                    escape(&to)
+                );
+                request.respond(
+                    tiny_http::Response::from_string(html)
+                        .with_header(header("Content-Type", "text/html; charset=utf-8"))
+                        .with_header(header("Set-Cookie", &cookie))
+                        .with_header(header("Cache-Control", "no-store")),
+                )
+            }
         };
     }
 }
@@ -860,7 +999,11 @@ mod tests {
     #[test]
     fn access_rules_open_accounts_by_tag_per_member() {
         let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect();
-        let mut c = config(&["x.io"], &[]);
+        let mut c = Settings {
+            share_logins: false,
+            access: vec![],
+            blocked: vec![],
+        };
         assert!(c.opens("ann@x.io", &tags(&["anything"])));
         c.access = Config::access("*@x.io=work; Ann@x.io = vip ;ci=ci\nboss@x.io=*").unwrap();
         assert!(c.opens("bob@x.io", &tags(&["work"])));

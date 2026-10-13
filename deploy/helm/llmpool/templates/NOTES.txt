@@ -1,4 +1,9 @@
 llmpool is serving at {{ .Values.publicUrl }}.
+{{- if .Values.admins }}
+Its administrators ({{ join ", " .Values.admins }}) run it from that address in a browser.
+{{- else }}
+No administrators are set (`admins`), so its web page is closed; manage it with kubectl exec.
+{{- end }}
 
 1. Put accounts in the pool. On a machine that has them, run `llmpool export pool.age`,
    then copy the file in and import it (you are asked for the passphrase):

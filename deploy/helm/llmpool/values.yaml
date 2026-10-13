@@ -30,7 +30,12 @@ apiKeys: {}
 # oidc.clientSecret, apiKeys and vaultKey are ignored.
 existingSecret: ""
 
-# Which accounts each member may use, by tag: a member (an address, an API
+# Who may run the server from its web page (at publicUrl): addresses that may
+# sign in, or names of API keys. Empty: the page is closed to everyone.
+admins: []
+
+# Which accounts each member may use, by tag (the starting point; administrators
+# can change it on the server's page, and what they save there wins): a member (an address, an API
 # key's name, `*@domain` or `*`) to the tags it opens (`*` for all). Empty:
 # every member may use every account.
 #   access:

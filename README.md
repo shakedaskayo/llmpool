@@ -163,6 +163,52 @@ skipped until you add it again.
 To add a trigger: implement `Trigger` in
 `crates/llmpool-core/src/policy/triggers.rs` and add one line to `all()`.
 
+## Any agent, any provider
+
+Claude Code is the agent llmpool knows best: it switches accounts under a
+running session and reads usage. Every other agent works through one command,
+`llmpool exec`, which starts it on the account your rules pick.
+
+```bash
+llmpool agents                                   # what llmpool found on this machine
+llmpool add key openai --tag work                # a key for any provider; typed, never an argument
+llmpool add key together --env TOGETHER_API_KEY  # a provider llmpool has not heard of
+llmpool add login codex                          # the login Codex CLI (or OpenCode) has now
+llmpool add login codex --new                    # sign it in to a second account first
+llmpool exec -- codex                            # runs on a codex login if the pool has one, else an OpenAI key
+llmpool exec --provider xai -- my-script.sh      # anything that reads a key from its environment
+llmpool install agents                           # make plain `codex`, `opencode`, ... go through the pool
+```
+
+| | Accounts | Chosen | Switched while running | Usage read |
+|---|---|---|---|---|
+| Claude Code | its own logins | by rules, at start and after | yes | yes |
+| Codex CLI, OpenCode | their own logins, or keys | by rules, at start | no | no |
+| Gemini CLI, Grok, Aider, anything else | keys | by rules, at start | no | no |
+
+A key reaches the agent as an environment variable. An account may only set
+variables that look like a credential (`*_API_KEY`, `*_TOKEN`, `*_BASE_URL`,
+...), so neither a file you import nor a team's server can change what your
+agent runs. A session on an agent's own login gets a directory with that login
+and links to the rest of the agent's files, so settings and history stay
+shared; the login is read back when the session ends, because agents renew
+their tokens in place. An agent that is not built in is a few lines in
+`harnesses.toml` in llmpool's data directory:
+
+```toml
+[[harness]]
+name = "mycli"
+title = "My CLI"
+command = "mycli"
+provider = "openrouter"        # the key it reads, if it reads one
+
+[harness.login]                # only if it keeps a login in files
+home_env = "MYCLI_HOME"
+base = ".mycli"
+files = ["auth.json"]
+login_args = ["login"]
+```
+
 ## Team pool
 
 A team can run one llmpool as a server that lends its accounts and rules to
@@ -211,6 +257,25 @@ llmpool serve --listen 127.0.0.1:8787
 | `LLMPOOL_ALLOWED_DOMAINS`, `LLMPOOL_ALLOWED_EMAILS` | who may sign in; required with sign-in, and checked on every request |
 | `LLMPOOL_API_KEYS` | `name:key` pairs (commas or lines), keys of 24+ characters, for members without sign-in |
 | `LLMPOOL_SHARE_LOGINS` | `1` lets several members run on one subscription login at once |
+| `LLMPOOL_ACCESS` | who may use what, by tag: `*@example.com=work;lead@example.com=*;ci=ci` |
+| `LLMPOOL_BLOCKED` | members turned away whatever else admits them |
+| `LLMPOOL_ADMINS` | members who may run the server from its web page |
+| `LLMPOOL_VAULT_KEY` | 32+ random characters; stored logins are encrypted with it |
+
+**Its own page.** Open the server's address in a browser. Administrators sign
+in the way members do and get the same interface as the app, for the server's
+pool: accounts (add keys, import logins from an exported file, tag, disable),
+the team's rules, and a Server page with who is signed in, who runs on what,
+what each member may use, the lending switch and the audit log. What they
+change there is kept on the server and wins over the variables above. The
+session is a cookie no script can read and no other site can send; exporting
+logins and stopping the server cannot be done from a browser.
+
+Every sign-in, refusal, lent account and administrator's change is written to
+standard error and `team-audit.log` in the data directory, never with a secret.
+Keys of other providers are lent whole. Other agents' own logins (Codex,
+OpenCode) are not lent: they renew themselves wherever they run, and a copy on
+every member's machine would end them.
 
 Sign-in, API keys, or both. The server speaks plain HTTP: put TLS in front of
 it. Members' clients refuse an address that is not `https` unless it is on
@@ -234,8 +299,10 @@ read-only root filesystem, keeps the pool on a volume that survives
 `helm uninstall`, takes its secrets from values or from a Secret you manage
 (`existingSecret`), and refuses to render without `https`, without anyone who
 may connect, or with a short key. The notes it prints say how to import
-accounts. Logins are stored as files on the volume: use a storage class that
-encrypts at rest. The pod needs to reach the sign-in provider and the
+accounts. Logins on the volume are encrypted with a key the chart makes at
+install and keeps in the release's Secret (or takes from yours); the Secret
+survives uninstall, because without it the volume cannot be read. `admins`
+opens the web page to them; `access` and `blocked` set the starting rules. The pod needs to reach the sign-in provider and the
 providers' token endpoints.
 
 ## How a swap works
@@ -274,6 +341,8 @@ a time unless told otherwise, for that reason.
 | `crates/llmpool-cli` | the `llmpool` binary |
 | `crates/llmpool-gui` | Tauri window and tray |
 | `claude-plugin/llmpool` | the Claude Code mod, embedded in the binary |
+| `crates/llmpool-core/src/harness.rs`, `providers.rs` | the agents and providers llmpool knows, as data |
+| `scripts/dev-ui.py` | the app's interface in a browser against a daemon, for design work and browser tests |
 | `docs/superpowers/specs` | design |
 
 ## Development
@@ -290,10 +359,11 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 
 ## Not built yet
 
-Other agents and providers (Codex, Gemini CLI, Grok, Bedrock, provider API
-keys): the adapter trait is where they attach. On the team server: roles
-(every member sees every account), an audit log, and revoking one signed-in
-member without removing them from the allow list. Windows is not supported.
+Switching accounts under a running agent other than Claude Code, and reading
+usage for anything but Claude subscriptions. An LLM gateway beside the server
+(routing requests between accounts, traces): see
+`docs/gateway.md` for what was looked at and what is proposed. Windows is not
+supported.
 
 ## Licence
 

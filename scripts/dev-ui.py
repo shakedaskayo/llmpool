@@ -72,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, b"not found", "text/plain")
         body = path.read_bytes()
         if name == "index.html":
-            body = body.replace(b'<script src="app.js">', b'<script src="/__tauri.js"></script><script src="app.js">')
+            body = body.replace(b'<script src="icons.js">', b'<script src="/__tauri.js"></script><script src="icons.js">')
         self.reply(200, body, TYPES.get(path.suffix, "application/octet-stream"))
 
     def do_POST(self):

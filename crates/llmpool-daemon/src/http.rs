@@ -72,7 +72,7 @@ fn text<'a>(body: &'a Value, field: &str) -> Result<&'a str, ApiError> {
         .ok_or_else(|| fail(400, format!("bad request: `{field}` is required")))
 }
 
-fn route(
+pub(crate) fn route(
     d: &Daemon,
     method: &str,
     parts: &[&str],

@@ -542,3 +542,138 @@ fn members_only_get_what_their_tags_open_and_it_is_all_recorded() {
         "the audit log must never hold a token"
     );
 }
+
+// The HTTP client's error type is large; these are a test's helpers.
+#[allow(clippy::result_large_err)]
+#[test]
+fn the_servers_own_page_is_for_administrators_and_cannot_be_driven_from_elsewhere() {
+    let pool = machine(&[("a@x.io", "a-1")]);
+    let config = Config {
+        public_url: "http://127.0.0.1:1".into(),
+        api_keys: Config::keys(&format!("ci:{KEY},member:member-key-0123456789abcdef")).unwrap(),
+        admins: vec!["ci".into()],
+        ..Config::default()
+    };
+    let serving = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", serving.port);
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let status = |r: Result<ureq::Response, ureq::Error>| match r {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("{e}"),
+    };
+
+    // Nothing of the pool without a session; the page sends you to sign in.
+    assert_eq!(status(agent.get(&format!("{url}/")).call()), 302);
+    assert_eq!(status(agent.get(&format!("{url}/login")).call()), 200);
+    let call = |cookie: &str, ours: bool, body: Value| {
+        let mut request = agent
+            .post(&format!("{url}/admin/invoke/api"))
+            .set("Cookie", &format!("llmpool_session={cookie}"));
+        if ours {
+            request = request.set("X-Llmpool", "1");
+        }
+        request.send_json(body)
+    };
+    let get_accounts = json!({"method": "GET", "path": "/accounts"});
+    assert_eq!(status(call("nope", true, get_accounts.clone())), 401);
+
+    // A member who is not an administrator does not get in, with a key or
+    // with a session of their own.
+    let login = |key: &str| {
+        agent
+            .post(&format!("{url}/admin/login"))
+            .send_form(&[("key", key)])
+    };
+    assert_eq!(status(login("member-key-0123456789abcdef")), 403);
+    assert_eq!(status(login("wrong")), 403);
+    assert_eq!(
+        status(call(
+            "member-key-0123456789abcdef",
+            true,
+            get_accounts.clone()
+        )),
+        403
+    );
+
+    // An administrator signs in and gets a cookie scripts cannot read.
+    let signed = login(KEY).unwrap();
+    let cookie = signed.header("Set-Cookie").unwrap().to_string();
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    let session = cookie.split(['=', ';']).nth(1).unwrap().to_string();
+    assert_ne!(session, KEY, "the key itself is never the cookie");
+    let page = agent
+        .get(&format!("{url}/"))
+        .set("Cookie", &format!("llmpool_session={session}"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    assert!(page.contains("/__tauri.js") && page.contains("app.js"));
+
+    // The page's own requests work; the same request from another site's
+    // form, which cannot add the header, does not.
+    let listed: Value = call(&session, true, get_accounts.clone())
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(listed[0]["label"], "a@x.io");
+    assert_eq!(status(call(&session, false, get_accounts)), 403);
+
+    // What must not be reachable from a browser is not.
+    for (method, path) in [
+        ("POST", "/export"),
+        ("POST", "/shutdown"),
+        ("POST", "/logins"),
+        ("POST", "/hooks/claude/s1/Stop"),
+    ] {
+        let refused = call(
+            &session,
+            true,
+            json!({"method": method, "path": path, "body": {"passphrase": "x"}}),
+        );
+        assert_eq!(status(refused), 403, "{method} {path}");
+    }
+
+    // Settings changed on the page take effect and are kept.
+    let saved: Value = call(&session, true, json!({"method": "PUT", "path": "/server", "body": {"access": "member=vip", "share_logins": true}}))
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(saved["settings"]["access"], "member=vip");
+    assert_eq!(saved["you"], "ci");
+    let member = machine(&[]);
+    member
+        .daemon
+        .team_connect(&url, Some("member-key-0123456789abcdef"))
+        .unwrap();
+    assert!(
+        accounts(&member).is_empty(),
+        "the account is not tagged vip"
+    );
+    assert!(pool.data.join("team-settings.json").exists());
+    assert_eq!(
+        status(call(
+            &session,
+            true,
+            json!({"method": "PUT", "path": "/server", "body": {"access": "nonsense"}})
+        )),
+        400
+    );
+
+    // Signing out ends the session.
+    agent
+        .post(&format!("{url}/admin/invoke/sign_out"))
+        .set("Cookie", &format!("llmpool_session={session}"))
+        .set("X-Llmpool", "1")
+        .send_json(json!({}))
+        .unwrap();
+    assert_eq!(
+        status(call(
+            &session,
+            true,
+            json!({"method": "GET", "path": "/accounts"})
+        )),
+        401
+    );
+}
