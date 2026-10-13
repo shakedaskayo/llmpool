@@ -27,7 +27,10 @@ const SHARED: [&str; 9] = [
 
 /// The macOS Keychain, as far as a profile needs it.
 pub trait Keychain: Send + Sync {
-    fn get(&self, service: &str) -> Option<String>;
+    /// The item's text, `None` if there is no such item, and an error if the
+    /// Keychain could not be asked: a login that cannot be read must never be
+    /// mistaken for a login that is not there.
+    fn get(&self, service: &str) -> io::Result<Option<String>>;
     fn delete(&self, service: &str);
 }
 
@@ -35,8 +38,8 @@ pub trait Keychain: Send + Sync {
 pub struct NoKeychain;
 
 impl Keychain for NoKeychain {
-    fn get(&self, _service: &str) -> Option<String> {
-        None
+    fn get(&self, _service: &str) -> io::Result<Option<String>> {
+        Ok(None)
     }
     fn delete(&self, _service: &str) {}
 }
@@ -44,19 +47,50 @@ impl Keychain for NoKeychain {
 /// The login Keychain through the `security` tool.
 pub struct MacKeychain;
 
+/// `security`'s exit code for "no such item".
+const NOT_FOUND: i32 = 44;
+/// A locked Keychain asks the user; nothing here may wait on that forever.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Keychain for MacKeychain {
-    fn get(&self, service: &str) -> Option<String> {
-        let out = std::process::Command::new("security")
+    fn get(&self, service: &str) -> io::Result<Option<String>> {
+        use std::io::Read;
+        let mut child = std::process::Command::new("/usr/bin/security")
             .args(["find-generic-password", "-s", service, "-w"])
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let start = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None if start.elapsed() > PATIENCE => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "the Keychain did not answer; unlock it and try again",
+                    ));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let mut out = String::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            let _ = stdout.read_to_string(&mut out);
+        }
+        match status.code() {
+            Some(0) => Ok(Some(out.trim().to_string())),
+            Some(NOT_FOUND) => Ok(None),
+            code => Err(io::Error::other(format!(
+                "the Keychain refused to give Claude Code's login (code {code:?})"
+            ))),
+        }
     }
 
     fn delete(&self, service: &str) {
-        let _ = std::process::Command::new("security")
+        let _ = std::process::Command::new("/usr/bin/security")
             .args(["delete-generic-password", "-s", service])
             .output();
     }
@@ -143,21 +177,43 @@ impl Profile {
 
     /// The whole credential object. Claude Code reads the Keychain first and
     /// the file second; so do we.
-    fn raw_credentials(&self, keychain: &dyn Keychain) -> Option<Value> {
-        keychain
-            .get(&self.service)
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .or_else(|| read_json(&self.credentials_path()))
+    fn raw_credentials(&self, keychain: &dyn Keychain) -> io::Result<Option<Value>> {
+        let unreadable = |what: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Claude Code's login in {what} is not readable"),
+            )
+        };
+        if let Some(text) = keychain.get(&self.service)? {
+            return serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| unreadable("the Keychain"));
+        }
+        match std::fs::read_to_string(self.credentials_path()) {
+            Ok(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| unreadable("its credentials file")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
-    /// The login currently in this profile, if it is complete.
-    pub fn read(&self, keychain: &dyn Keychain) -> Option<Secret> {
-        let oauth = self
+    /// The login currently in this profile, if it is complete. An error means
+    /// there may be a login that could not be read, which callers must not
+    /// treat as "nothing here".
+    pub fn read(&self, keychain: &dyn Keychain) -> io::Result<Option<Secret>> {
+        let Some(oauth) = self
             .raw_credentials(keychain)?
-            .get("claudeAiOauth")?
-            .clone();
-        let account = read_json(&self.global_config)?.get("oauthAccount")?.clone();
-        Some(Secret { oauth, account }).filter(|s| s.email().is_some())
+            .and_then(|raw| raw.get("claudeAiOauth").cloned())
+        else {
+            return Ok(None);
+        };
+        let Some(account) =
+            read_json(&self.global_config).and_then(|config| config.get("oauthAccount").cloned())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Secret { oauth, account }).filter(|s| s.email().is_some()))
     }
 
     /// (email, organization id) of the account this profile is logged in as.
@@ -181,7 +237,7 @@ impl Profile {
             std::fs::set_permissions(&self.config_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
-        let mut credentials = object_or_empty(self.raw_credentials(keychain));
+        let mut credentials = object_or_empty(self.raw_credentials(keychain)?);
         credentials["claudeAiOauth"] = secret.oauth.clone();
         let previous = std::fs::read(self.credentials_path()).ok();
         write_private(&self.credentials_path(), &credentials)?;
@@ -268,8 +324,8 @@ pub(crate) mod tests {
     pub struct FakeKeychain(pub Mutex<HashMap<String, String>>);
 
     impl Keychain for FakeKeychain {
-        fn get(&self, service: &str) -> Option<String> {
-            self.0.lock().unwrap().get(service).cloned()
+        fn get(&self, service: &str) -> io::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(service).cloned())
         }
         fn delete(&self, service: &str) {
             self.0.lock().unwrap().remove(service);
@@ -298,9 +354,12 @@ pub(crate) mod tests {
     fn write_then_read_round_trips_and_is_private() {
         let dir = tempfile::tempdir().unwrap();
         let profile = Profile::at(&dir.path().join("p"));
-        assert_eq!(profile.read(&NoKeychain), None);
+        assert_eq!(profile.read(&NoKeychain).unwrap(), None);
         profile.write(&NoKeychain, &secret("a@x.io", "t1")).unwrap();
-        assert_eq!(profile.read(&NoKeychain), Some(secret("a@x.io", "t1")));
+        assert_eq!(
+            profile.read(&NoKeychain).unwrap(),
+            Some(secret("a@x.io", "t1"))
+        );
         assert_eq!(
             profile.identity(),
             Some(("a@x.io".to_string(), Some("org-1".to_string())))
@@ -335,11 +394,14 @@ pub(crate) mod tests {
             profile.service.clone(),
             r#"{"claudeAiOauth": {"accessToken": "old"}, "mcpOAuth": {"server": "kept"}}"#.into(),
         );
-        assert_eq!(profile.read(&keychain).unwrap().oauth["accessToken"], "old");
+        assert_eq!(
+            profile.read(&keychain).unwrap().unwrap().oauth["accessToken"],
+            "old"
+        );
 
         profile.write(&keychain, &secret("new@x.io", "t2")).unwrap();
 
-        assert!(keychain.get(&profile.service).is_none());
+        assert!(keychain.get(&profile.service).unwrap().is_none());
         let credentials = read_json(&profile.credentials_path()).unwrap();
         assert_eq!(credentials["mcpOAuth"]["server"], "kept");
         assert_eq!(credentials["claudeAiOauth"]["accessToken"], "t2");
@@ -368,6 +430,37 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(profile.credentials_path()).unwrap(), before);
     }
 
+    /// A Keychain that cannot be asked, as when it is locked.
+    struct LockedKeychain;
+
+    impl Keychain for LockedKeychain {
+        fn get(&self, _service: &str) -> io::Result<Option<String>> {
+            Err(io::Error::other("locked"))
+        }
+        fn delete(&self, _service: &str) {}
+    }
+
+    #[test]
+    fn a_login_that_cannot_be_read_is_an_error_not_an_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = Profile::at(&dir.path().join("p"));
+        profile
+            .write(&NoKeychain, &secret("a@x.io", "a-1"))
+            .unwrap();
+        assert!(profile.read(&LockedKeychain).is_err());
+        // And nothing is written over a login that could not be read first.
+        assert!(profile
+            .write(&LockedKeychain, &secret("b@x.io", "b-1"))
+            .is_err());
+        assert_eq!(
+            profile.read(&NoKeychain).unwrap(),
+            Some(secret("a@x.io", "a-1"))
+        );
+
+        std::fs::write(profile.credentials_path(), "{ damaged").unwrap();
+        assert!(profile.read(&NoKeychain).is_err());
+    }
+
     #[test]
     fn half_a_login_is_no_login() {
         let dir = tempfile::tempdir().unwrap();
@@ -377,9 +470,9 @@ pub(crate) mod tests {
             r#"{"claudeAiOauth": {"accessToken": "t"}}"#,
         )
         .unwrap();
-        assert_eq!(profile.read(&NoKeychain), None);
+        assert_eq!(profile.read(&NoKeychain).unwrap(), None);
         std::fs::write(&profile.global_config, "not json").unwrap();
-        assert_eq!(profile.read(&NoKeychain), None);
+        assert_eq!(profile.read(&NoKeychain).unwrap(), None);
     }
 
     #[cfg(unix)]

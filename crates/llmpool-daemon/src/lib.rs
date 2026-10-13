@@ -199,6 +199,22 @@ fn label_is_free(accounts: &[Account], id: &str, label: &str) -> Api<()> {
     Ok(())
 }
 
+/// An account's id follows from who it is, so the same login always lands on
+/// the same account, however it arrives.
+fn account_id(email: &str, organization: Option<&str>) -> AccountId {
+    format!(
+        "claude-{}",
+        short_hash(&format!("{email}|{}", organization.unwrap_or("")))
+    )
+}
+
+/// When the login itself runs out and a person has to sign in again.
+fn login_expiry(secret: &Secret) -> Option<i64> {
+    secret.oauth["refreshTokenExpiresAt"]
+        .as_i64()
+        .map(|ms| ms / 1000)
+}
+
 /// When this machine started, in epoch seconds.
 fn boot_time() -> Option<i64> {
     if cfg!(target_os = "macos") {
@@ -429,7 +445,9 @@ impl Daemon {
             .vault
             .get(id)?
             .ok_or_else(|| fail(409, "this account has no stored login; add it again"))?;
-        Ok(serde_json::from_str(&text)?)
+        // The parser's own message can quote the text it choked on.
+        serde_json::from_str(&text)
+            .map_err(|_| fail(409, "this account's stored login is damaged; add it again"))
     }
 
     /// Copy a profile's login back into the vault, because the agent may have
@@ -437,7 +455,9 @@ impl Daemon {
     /// profile really holds, whatever we last recorded. `Ok` also when the
     /// profile holds nothing of ours. Caller holds the profile's locks.
     fn read_back(&self, accounts: &[Account], profile: &Profile) -> Api<()> {
-        let Some(secret) = profile.read(&*self.keychain) else {
+        // A login that cannot be read right now is an error here, so that the
+        // caller neither overwrites nor deletes what may be the only copy.
+        let Some(secret) = profile.read(&*self.keychain)? else {
             return Ok(());
         };
         let email = secret.email().unwrap_or_default();
@@ -588,7 +608,7 @@ impl Daemon {
                 .is_some_and(|name| name.to_string_lossy().starts_with("login-"));
         let secret = {
             let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
-            profile.read(&*self.keychain)
+            profile.read(&*self.keychain)?
         }
         .ok_or_else(|| {
             fail(
@@ -598,13 +618,7 @@ impl Daemon {
         })?;
         let email = secret.email().unwrap_or_default().to_string();
         let organization = secret.organization().map(str::to_string);
-        let id = format!(
-            "claude-{}",
-            short_hash(&format!(
-                "{email}|{}",
-                organization.as_deref().unwrap_or("")
-            ))
-        );
+        let id = account_id(&email, organization.as_deref());
 
         let mut account = g.store.get(&id)?.unwrap_or_else(|| Account {
             id: id.clone(),
@@ -620,6 +634,7 @@ impl Daemon {
             login_expires_at: None,
         });
         account.health = Health::Ok;
+        account.login_expires_at = login_expiry(&secret);
         if let Some(label) = req.label {
             label_is_free(&g.store.list()?, &id, &label)?;
             account.label = label;
@@ -678,43 +693,92 @@ impl Daemon {
     /// Every account with its login, encrypted with a passphrase. The result
     /// is text, safe to store in a file; without the passphrase it is opaque.
     pub fn export(&self, passphrase: &str) -> Api<Value> {
-        let g = self.lock();
-        let mut entries = Vec::new();
-        for mut account in g.store.list()? {
-            // Usage and health describe this machine's view, not the account.
-            account.usage = None;
-            let secret = self
-                .vault
-                .get(&account.id)?
-                .ok_or_else(|| fail(409, format!("{} has no stored login", account.label)))?;
-            entries.push(transfer::Entry { account, secret });
-        }
+        let entries = {
+            let mut g = self.lock();
+            // A session may have rotated its login since the vault last saw it.
+            let accounts = self.accounts(&g)?;
+            let live: Vec<Profile> = g.p.stores.values().map(|rec| rec.profile.clone()).collect();
+            for profile in live {
+                let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
+                self.read_back(&accounts, &profile)?;
+            }
+            self.sync_default_locked(&mut g);
+            let mut entries = Vec::new();
+            for mut account in g.store.list()? {
+                // Usage describes this machine's view, not the account.
+                account.usage = None;
+                let secret = self
+                    .vault
+                    .get(&account.id)?
+                    .ok_or_else(|| fail(409, format!("{} has no stored login", account.label)))?;
+                entries.push(transfer::Entry { account, secret });
+            }
+            entries
+        };
+        // Deriving a key from the passphrase is slow on purpose; nothing else
+        // should wait on it.
         let bundle = transfer::seal(&entries, passphrase).map_err(|e| fail(400, e))?;
         Ok(json!({"bundle": bundle, "accounts": entries.len()}))
     }
 
     /// Add the accounts of an exported bundle. Accounts already here are left
     /// alone unless `replace` is set, and never while a session is using them.
+    /// The file is not trusted: each login is checked to be a login, and filed
+    /// under the account it actually is, whatever the file claims.
     pub fn import(&self, bundle: &str, passphrase: &str, replace: bool) -> Api<Value> {
-        let g = self.lock();
         let entries = transfer::open(bundle, passphrase).map_err(|e| fail(400, e))?;
+        let damaged = || {
+            fail(
+                400,
+                "this file holds a login that is damaged or does not match its account",
+            )
+        };
+        let g = self.lock();
         let (mut added, mut replaced, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
         for transfer::Entry { account, secret } in entries {
-            let exists = g.store.get(&account.id)?.is_some();
+            let secret: Secret = serde_json::from_str(&secret).map_err(|_| damaged())?;
+            let email = secret.email().ok_or_else(damaged)?.to_string();
+            let organization = secret.organization().map(str::to_string);
+            let id = account_id(&email, organization.as_deref());
+            if account.id != id {
+                return Err(damaged());
+            }
+            let existing = g.store.list()?;
+            let exists = existing.iter().any(|a| a.id == id);
             let in_use =
                 g.p.sessions
                     .values()
-                    .any(|m| m.session.account_id.as_ref() == Some(&account.id));
+                    .any(|m| m.session.account_id.as_ref() == Some(&id));
+            // Only the name and tags are taken from the file; the rest is what
+            // the login itself says.
+            let label = if label_is_free(&existing, &id, &account.label).is_ok() {
+                account.label
+            } else {
+                email.clone()
+            };
             if exists && (!replace || in_use) {
-                skipped.push(account.label);
+                skipped.push(label);
                 continue;
             }
-            self.vault.put(&account.id, &secret)?;
+            let account = Account {
+                id: id.clone(),
+                provider: "claude".into(),
+                kind: Kind::Oauth,
+                label: label.clone(),
+                email: Some(email),
+                organization,
+                tags: account.tags,
+                enabled: account.enabled,
+                health: Health::Ok,
+                usage: None,
+                login_expires_at: login_expiry(&secret),
+            };
+            self.vault.put(&id, &serde_json::to_string(&secret)?)?;
             g.store.put(&account)?;
             if exists {
-                replaced.push(account.label)
+                replaced.push(label)
             } else {
-                added.push(account.label)
+                added.push(label)
             }
         }
         Ok(json!({"added": added, "replaced": replaced, "skipped": skipped}))
@@ -865,7 +929,9 @@ impl Daemon {
                     return Err(e);
                 }
             },
-            None => BTreeMap::new(),
+            // The session is still known by its id, so its hooks speak for it
+            // rather than being taken for a second, separate session.
+            None => BTreeMap::from([("LLMPOOL_SESSION".to_string(), sid.clone())]),
         };
         self.save(&g);
         Ok(json!({"session_id": sid, "env": env, "account": chosen, "ask": ask, "rule": rule}))
@@ -1159,20 +1225,25 @@ impl Daemon {
     /// The llmpool session a signal from the agent belongs to. A session that
     /// was started as plain `claude` is adopted on its first signal, provided
     /// the login in `~/.claude` is one the pool holds.
-    fn resolve(&self, g: &mut Inner, sid: &str, payload: &Value) -> Option<String> {
-        if sid != NATIVE {
-            return g.p.sessions.contains_key(sid).then(|| sid.to_string());
+    fn resolve(&self, g: &mut Inner, sid: &str, event: &str, payload: &Value) -> Option<String> {
+        let known = if sid != NATIVE {
+            g.p.sessions.contains_key(sid).then(|| sid.to_string())
+        } else {
+            let agent_id = payload["session_id"].as_str()?;
+            g.p.sessions
+                .iter()
+                .find(|(_, m)| m.agent_session_id.as_deref() == Some(agent_id))
+                .map(|(id, _)| id.clone())
+        };
+        if let Some(id) = known {
+            return self.rebind(g, &id);
+        }
+        // A session that is ending is not worth meeting.
+        if sid != NATIVE || event == "SessionEnd" {
+            return None;
         }
         let agent_id = payload["session_id"].as_str()?;
         let t = now();
-        if let Some((id, m)) =
-            g.p.sessions
-                .iter_mut()
-                .find(|(_, m)| m.agent_session_id.as_deref() == Some(agent_id))
-        {
-            m.last_seen = t;
-            return Some(id.clone());
-        }
         let accounts = self.accounts(g).ok()?;
         let (email, organization) = self.default_profile().identity()?;
         let account = accounts
@@ -1223,6 +1294,59 @@ impl Daemon {
         Some(id)
     }
 
+    /// Bring a session that runs in the user's own profile up to date with
+    /// what that profile holds now: the user can log it in to another account
+    /// at any time, and readings and switches must follow the real login.
+    fn rebind(&self, g: &mut Inner, sid: &str) -> Option<String> {
+        let t = now();
+        let m = g.p.sessions.get_mut(sid)?;
+        m.last_seen = t;
+        if m.store
+            .as_deref()
+            .is_some_and(|store| store != DEFAULT_STORE)
+        {
+            return Some(sid.to_string());
+        }
+        let (native, was) = (m.native, m.session.account_id.clone());
+        let holder = self
+            .default_profile()
+            .identity()
+            .and_then(|(email, organization)| {
+                let accounts = g.store.list().ok()?;
+                accounts
+                    .into_iter()
+                    .find(|a| same_login(a, &email, organization.as_deref()))
+            });
+        match holder {
+            Some(account) => {
+                let m = g.p.sessions.get_mut(sid)?;
+                m.store = Some(DEFAULT_STORE.to_string());
+                m.session.account_id = Some(account.id.clone());
+                if was.as_ref() != Some(&account.id) {
+                    self.log(
+                        g,
+                        "assign",
+                        Some(sid),
+                        format!("session now runs as {}", account.label),
+                    );
+                    self.save(g);
+                }
+                Some(sid.to_string())
+            }
+            // A login llmpool does not hold: nothing here is ours to manage.
+            None if native => {
+                self.end(g, sid);
+                None
+            }
+            None => {
+                let m = g.p.sessions.get_mut(sid)?;
+                m.store = None;
+                m.session.account_id = None;
+                Some(sid.to_string())
+            }
+        }
+    }
+
     /// A plain session cannot be started on another login, so where a
     /// `session_start` rule would have chosen one, say so instead.
     fn suggest(&self, g: &mut Inner, sid: &str, accounts: &[Account], current: &Account) {
@@ -1267,7 +1391,7 @@ impl Daemon {
     /// command as its JSON output.
     pub fn hook(&self, sid: &str, event: &str, argument: &str, payload: &Value) -> Value {
         let mut g = self.lock();
-        let Some(sid) = self.resolve(&mut g, sid, payload) else {
+        let Some(sid) = self.resolve(&mut g, sid, event, payload) else {
             return json!({});
         };
         let sid = sid.as_str();
@@ -1333,7 +1457,7 @@ impl Daemon {
     pub fn statusline(&self, sid: &str, payload: &Value) -> Value {
         let mut g = self.lock();
         let t = now();
-        let Some(sid) = self.resolve(&mut g, sid, payload) else {
+        let Some(sid) = self.resolve(&mut g, sid, "statusline", payload) else {
             return json!({});
         };
         let sid = sid.as_str();

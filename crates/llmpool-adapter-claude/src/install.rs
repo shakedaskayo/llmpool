@@ -124,8 +124,9 @@ pub fn install(
 
     remove_hooks(&mut after);
     for (event, matcher, argument) in HOOKS {
-        let mut group =
-            json!({"hooks": [{"type": "command", "command": format!("{exe}{MARK}{argument}")}]});
+        // The timeout is a backstop: the command itself gives up within two
+        // seconds, and a hook must never hold a session up.
+        let mut group = json!({"hooks": [{"type": "command", "command": format!("{exe}{MARK}{argument}"), "timeout": 5}]});
         if let Some(matcher) = matcher {
             group["matcher"] = json!(matcher);
         }

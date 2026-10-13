@@ -20,11 +20,11 @@ llmpool with your own accounts, and check the provider's terms before
 sharing a pool with other people.";
 
 /// A client for the daemon, starting it in the background if needed.
-fn connect() -> Result<Client, String> {
-    let timeout = Duration::from_secs(15);
-    if let Some(client) = Client::existing(timeout) {
-        return Ok(client);
-    }
+/// Start the daemon in the background, without waiting for it. In a process
+/// group of its own, so that closing the terminal that happened to start it
+/// does not take it down with every other session's bookkeeping.
+fn spawn_daemon() -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
     let data = data_dir();
     std::fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
     let log = std::fs::OpenOptions::new()
@@ -33,21 +33,30 @@ fn connect() -> Result<Client, String> {
         .open(data.join("daemon.log"))
         .map_err(|e| format!("daemon log: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("could not start the daemon: {e}"))?;
+    Ok(())
+}
+
+fn connect() -> Result<Client, String> {
+    let timeout = Duration::from_secs(15);
+    if let Some(client) = Client::existing(timeout) {
+        return Ok(client);
+    }
     let start = std::time::Instant::now();
     let mut last_spawn = None::<std::time::Instant>;
     while start.elapsed() < Duration::from_secs(10) {
         // Spawned again if nothing came up: a daemon that was just stopped may
         // still have held the instance lock when the first one tried. The
         // lock makes extra spawns harmless.
-        if last_spawn.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
-            let log = log.try_clone().map_err(|e| format!("daemon log: {e}"))?;
-            std::process::Command::new(&exe)
-                .arg("daemon")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(log)
-                .spawn()
-                .map_err(|e| format!("could not start the daemon: {e}"))?;
+        if last_spawn.is_none_or(|at| at.elapsed() > Duration::from_secs(2)) {
+            spawn_daemon()?;
             last_spawn = Some(std::time::Instant::now());
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -57,7 +66,7 @@ fn connect() -> Result<Client, String> {
     }
     Err(format!(
         "the daemon did not start; see {}",
-        data.join("daemon.log").display()
+        data_dir().join("daemon.log").display()
     ))
 }
 
@@ -788,22 +797,35 @@ fn stdin_text() -> String {
 
 /// A hook must never get in the agent's way: every failure here is silent and
 /// the exit code is always zero.
+/// Which session this Claude Code is, as the daemon should know it: the id
+/// llmpool gave it at launch, or `-` for one started on its own in the
+/// user's profile. `None` for a Claude Code running in some other profile
+/// that llmpool did not set up: its login is not `~/.claude`'s, and treating
+/// it as if it were would credit and switch the wrong account.
+fn agent_session() -> Option<String> {
+    if let Ok(sid) = std::env::var("LLMPOOL_SESSION") {
+        return Some(sid);
+    }
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) if PathBuf::from(&dir) != home().join(".claude") => None,
+        _ => Some(NATIVE.to_string()),
+    }
+}
+
 fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
     let input = stdin_text();
     if agent != "claude" {
         return ExitCode::SUCCESS;
     }
-    // Without the variable this Claude Code was started on its own; the
-    // daemon recognises it by the session id in the payload.
-    let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
-    // A session starting is the one moment worth waiting for the daemon to
-    // come up; every other hook only talks to one that is already there.
-    let client = if event == "SessionStart" {
-        connect().ok()
-    } else {
-        Client::existing(Duration::from_secs(2))
+    let Some(sid) = agent_session() else {
+        return ExitCode::SUCCESS;
     };
-    let Some(client) = client else {
+    // A hook never waits for the daemon. If there is none, a starting session
+    // sets one going and moves on; its next hook finds it.
+    let Some(client) = Client::existing(Duration::from_secs(2)) else {
+        if event == "SessionStart" {
+            let _ = spawn_daemon();
+        }
         return ExitCode::SUCCESS;
     };
     let path = match argument {
@@ -824,8 +846,7 @@ fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
 fn statusline(agent: &str) -> ExitCode {
     let input = stdin_text();
     let mut line = None;
-    if agent == "claude" {
-        let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
+    if let (Some(sid), "claude") = (agent_session(), agent) {
         if let Some(client) = Client::existing(Duration::from_millis(300)) {
             let payload = serde_json::from_str(&input).unwrap_or(Value::Null);
             line = client

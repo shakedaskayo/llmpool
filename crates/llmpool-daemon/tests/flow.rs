@@ -81,6 +81,7 @@ fn login_in(dir: &Path) -> String {
     Profile::at(dir)
         .read(&NoKeychain)
         .unwrap()
+        .unwrap()
         .email()
         .unwrap()
         .to_string()
@@ -179,7 +180,10 @@ fn session_start_assigns_by_policy_into_its_own_profile() {
     // No rule matches elsewhere: the agent runs on its own login.
     let reply = start(&w, "/elsewhere", None);
     assert_eq!(reply["account"], Value::Null);
-    assert_eq!(reply["env"], json!({}));
+    assert_eq!(
+        reply["env"],
+        json!({"LLMPOOL_SESSION": reply["session_id"]})
+    );
 }
 
 #[test]
@@ -339,7 +343,7 @@ fn ending_the_last_session_saves_the_login_and_removes_the_profile() {
     let again = start(&w, "/x", Some("a@x.io"));
     let dir = PathBuf::from(again["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap());
     assert_eq!(
-        Profile::at(&dir).read(&NoKeychain).unwrap().oauth["accessToken"],
+        Profile::at(&dir).read(&NoKeychain).unwrap().unwrap().oauth["accessToken"],
         "a-9"
     );
 }
@@ -486,6 +490,7 @@ fn http_api_requires_the_token_and_serves_json() {
 fn default_token(w: &World) -> String {
     Profile::default_in(&w.home)
         .read(&NoKeychain)
+        .unwrap()
         .unwrap()
         .oauth["accessToken"]
         .as_str()
@@ -888,4 +893,167 @@ fn next_switches_to_the_free_account_with_the_most_room() {
     assert_eq!(w.daemon.swap_next(sid).unwrap()["label"], "home@x.io");
     w.daemon.remove_account("a@x.io").unwrap();
     assert_eq!(w.daemon.swap_next(sid).unwrap_err().status, 409);
+}
+
+// ---- findings from the second review ----------------------------------------
+
+#[test]
+fn a_session_in_the_users_profile_follows_the_login_that_is_really_there() {
+    let w = world();
+    let payload = json!({"session_id": "agent-1", "cwd": "/x"});
+    w.daemon.hook("-", "SessionStart", "", &payload);
+    // The user runs /login as another pool account.
+    Profile::default_in(&w.home)
+        .write(&NoKeychain, &secret("a@x.io", "a-live"))
+        .unwrap();
+
+    w.daemon.statusline("-", &json!({"session_id": "agent-1", "rate_limits": {"five_hour": {"used_percentage": 95, "resets_at": 4_000_000_000i64}}}));
+    let accounts = w.daemon.list_accounts().unwrap();
+    let by = |email: &str| {
+        accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["email"] == email)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("a@x.io")["usage"]["windows"]["5h"]["used_percent"], 95.0);
+    assert_eq!(
+        by("home@x.io")["usage"],
+        Value::Null,
+        "the reading belongs to the login that made it"
+    );
+
+    w.daemon
+        .hook("-", "StopFailure", "authentication_failed", &payload);
+    let accounts = w.daemon.list_accounts().unwrap();
+    let by = |email: &str| {
+        accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["email"] == email)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        by("home@x.io")["health"],
+        "ok",
+        "a healthy account must not be blamed for another's failure"
+    );
+    assert_eq!(by("a@x.io")["health"], "relogin_required");
+
+    // Logged in to something outside the pool: the session is let go.
+    Profile::default_in(&w.home)
+        .write(&NoKeychain, &secret("stranger@x.io", "s-1"))
+        .unwrap();
+    w.daemon.statusline("-", &json!({"session_id": "agent-1"}));
+    assert_eq!(w.daemon.list_sessions().unwrap(), json!([]));
+}
+
+#[test]
+fn a_launched_session_with_no_account_is_one_session_and_becomes_switchable() {
+    let w = world();
+    let reply = start(&w, "/elsewhere", None);
+    let sid = reply["session_id"].as_str().unwrap();
+    // Its hooks carry the id llmpool gave it.
+    w.daemon.hook(
+        sid,
+        "SessionStart",
+        "",
+        &json!({"session_id": "agent-9", "cwd": "/elsewhere"}),
+    );
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["account_label"], "home@x.io");
+    w.daemon.swap_session(sid, "a@x.io").unwrap();
+}
+
+#[test]
+fn a_session_that_is_only_ending_is_not_adopted() {
+    let w = world();
+    w.daemon.hook(
+        "-",
+        "SessionEnd",
+        "",
+        &json!({"session_id": "never-seen", "cwd": "/x"}),
+    );
+    assert_eq!(w.daemon.list_sessions().unwrap(), json!([]));
+    assert!(!w
+        .daemon
+        .events()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "adopt"));
+}
+
+#[test]
+fn import_does_not_trust_the_file() {
+    let w = world();
+    let pass = "correct horse battery";
+    let bundle = |entries: Value| {
+        // Built the way a hostile file would be: valid encryption, false contents.
+        let text = serde_json::to_string(&entries).unwrap();
+        let recipient =
+            age::Encryptor::with_user_passphrase(age::secrecy::Secret::new(pass.to_owned()));
+        let mut out = Vec::new();
+        let armor =
+            age::armor::ArmoredWriter::wrap_output(&mut out, age::armor::Format::AsciiArmor)
+                .unwrap();
+        let mut writer = recipient.wrap_output(armor).unwrap();
+        std::io::Write::write_all(&mut writer, text.as_bytes()).unwrap();
+        writer.finish().and_then(|a| a.finish()).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let account = |id: &str, label: &str| {
+        json!({"id": id, "provider": "claude", "kind": "oauth", "label": label, "email": "evil@x.io",
+        "organization": "org", "tags": [], "enabled": true, "health": "ok", "usage": null, "login_expires_at": null})
+    };
+    let login = serde_json::to_string(&secret("evil@x.io", "tok-SECRET-123")).unwrap();
+
+    // An id that is a path, an id that is another account's name, and a login that is not a login.
+    for (id, stored) in [
+        ("../escaped", login.as_str()),
+        ("home@x.io", login.as_str()),
+        ("claude-00000000", "\"tok-SECRET-123\""),
+    ] {
+        let err = w
+            .daemon
+            .import(
+                &bundle(json!([{"account": account(id, "x"), "secret": stored}])),
+                pass,
+                true,
+            )
+            .unwrap_err();
+        assert_eq!(err.status, 400, "{id}");
+        assert!(!err.message.contains("SECRET"), "{}", err.message);
+    }
+    assert!(!w.data.join("escaped").exists());
+    assert_eq!(
+        w.daemon.list_accounts().unwrap().as_array().unwrap().len(),
+        3
+    );
+
+    // An honest entry whose label collides with an existing account keeps its own email as its name.
+    let real_id = {
+        let other = world();
+        Profile::default_in(&other.home)
+            .write(&NoKeychain, &secret("evil@x.io", "tok"))
+            .unwrap();
+        other.daemon.capture(CaptureReq::default()).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let result = w
+        .daemon
+        .import(
+            &bundle(json!([{"account": account(&real_id, "home@x.io"), "secret": login}])),
+            pass,
+            false,
+        )
+        .unwrap();
+    assert_eq!(result["added"], json!(["evil@x.io"]));
 }

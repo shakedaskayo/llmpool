@@ -82,6 +82,14 @@ function meter(usage, name, title) {
 
 // ---- pool -------------------------------------------------------------------
 
+// A login runs out on a known day; say so while there is still time to act.
+function expiryBadge(a) {
+  if (!a.login_expires_at || a.health !== "ok") return "";
+  const days = Math.floor((a.login_expires_at * 1000 - Date.now()) / 86400000);
+  if (days > 7) return "";
+  return `<span class="badge warn">⚠ login expires ${days <= 0 ? "today" : `in ${plural(days, "day")}`}</span>`;
+}
+
 function accountBadge(a) {
   if (!a.enabled) return `<span class="badge">⏸ disabled</span>`;
   if (a.health !== "ok") return `<span class="badge bad">⚠ needs a new login</span>`;
@@ -113,7 +121,7 @@ function renderPool() {
     .map((a) => {
       const used = a.sessions.length ? `<div class="muted">in use by ${plural(a.sessions.length, "session")}</div>` : "";
       return `<tr>
-        <td><strong>${esc(a.label)}</strong> ${accountBadge(a)}${used}</td>
+        <td><strong>${esc(a.label)}</strong> ${accountBadge(a)} ${expiryBadge(a)}${used}</td>
         <td><input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" /></td>
         <td>${meter(a.usage, "5h", "5-hour window")}</td>
         <td>${meter(a.usage, "7d", "7-day window")}</td>
@@ -304,7 +312,8 @@ function renderPolicies() {
       ${state.dirty ? `<span class="badge warn">unsaved changes</span><button data-act="revert">Discard</button>` : ""}
       <button class="primary" data-act="save"${state.dirty ? "" : " disabled"}>Save</button>
     </div>
-    ${state.policyError ? `<div class="callout bad" role="alert"><strong>⚠ Not saved.</strong><p>${esc(state.policyError)}</p></div>` : ""}`;
+    ${state.policyError ? `<div class="callout bad" role="alert"><strong>⚠ Not saved.</strong><p>${esc(state.policyError)}</p></div>` : ""}
+    ${state.policyView === "rules" && state.dirty && state.hasComments ? `<div class="callout" role="note"><strong>The file has comments.</strong><p>Saving from this view rewrites the file and drops them. Switch to TOML to keep them.</p></div>` : ""}`;
   let body;
   if (state.policyView === "toml") {
     body = `<textarea class="toml" data-act="toml" spellcheck="false" aria-label="Policy as TOML">${esc(state.policyText)}</textarea>`;
@@ -359,12 +368,19 @@ function typed(change) {
   change();
   if (!state.dirty) {
     state.dirty = true;
+    // The redraw (for the "unsaved" badge) replaces the field being typed in;
+    // put the caret and the scroll position back exactly where they were.
     const active = document.activeElement;
     const { act, i, key } = active?.dataset ?? {};
+    const textual = active && active.type !== "number" && active.type !== "time" && active.selectionStart !== undefined;
+    const place = textual ? [active.selectionStart, active.selectionEnd, active.scrollTop] : null;
     renderPolicies();
     const again = [...document.querySelectorAll(`[data-act="${act}"]`)].find((el) => el.dataset.i === i && el.dataset.key === key);
     again?.focus();
-    if (again?.setSelectionRange && again.type !== "number" && again.type !== "time") again.setSelectionRange(again.value.length, again.value.length);
+    if (again && place) {
+      again.setSelectionRange(place[0], place[1]);
+      again.scrollTop = place[2];
+    }
   }
 }
 
@@ -516,6 +532,8 @@ async function loadPolicy() {
   const loaded = await api("GET", "/policies");
   state.policy = loaded.policy;
   state.policyText = loaded.text;
+  // Comments live only in the text; the rules view cannot carry them.
+  state.hasComments = loaded.text.split("\n").some((line) => line.trim().startsWith("#"));
   state.dirty = false;
   state.results = {};
 }
