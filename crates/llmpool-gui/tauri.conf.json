@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.llmpool.app",
   "build": {
-    "frontendDist": "./ui",
-    "beforeBuildCommand": "sh ../../scripts/prepare-sidecar.sh"
+    "frontendDist": "./ui"
   },
   "app": {
     "withGlobalTauri": true,

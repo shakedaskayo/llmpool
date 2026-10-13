@@ -2085,3 +2085,28 @@ fn settings_change_from_any_surface_without_touching_the_rest_of_the_file() {
     );
     assert_eq!(w.daemon.policy_text()["text"].as_str().unwrap(), saved);
 }
+
+#[test]
+fn the_advisors_two_views_of_switching_are_read_together() {
+    // What the real service answered for an account at 91% with a roomy alternative:
+    // 64% "yes", but only 19% for staying. Together that is 72.5%, enough at 70%.
+    let real = json!({
+        "switch": {"type": "noul", "noul": 0.64},
+        "target": {"type": "choice", "choice": "A", "probabilities": {"A": 0.77, "B": 0.04, "stay": 0.19}},
+        "urgency": {"type": "score", "score": 1.12, "probabilities": {"0": 0.07, "1": 0.74, "2": 0.19}}
+    });
+    let (url, _) = jev(200, real);
+    let w = world();
+    w.daemon.put_policy(&advisor_policy(&url, "")).unwrap();
+    w.daemon.set_advisor_key(Some("k")).unwrap();
+    let reply = start(&w, "/x", Some("a@x.io"));
+    let sid = reply["session_id"].as_str().unwrap();
+    w.daemon.statusline(sid, &usage(91.0));
+    let advice = w.daemon.advise_session(sid).unwrap();
+    assert_eq!((advice["switch"].as_f64().unwrap() * 1000.0).round(), 725.0);
+    assert_eq!(advice["acted"], true);
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["picked_by"],
+        "advisor, 72% sure"
+    );
+}

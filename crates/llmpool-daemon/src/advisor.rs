@@ -321,7 +321,17 @@ impl Daemon {
         match answered {
             Err(e) => advice.error = Some(e),
             Ok(answers) => {
-                advice.switch = number(&answers["switch"], &["noul", "probability", "value"]);
+                // Two views of the same question: how likely "yes, move" is, and
+                // how firmly "stay" is rejected among the choices. The model
+                // spreads its confidence across both, so they are averaged.
+                let yes = number(&answers["switch"], &["noul", "probability", "value"]);
+                let not_stay = answers["target"]["probabilities"]["stay"]
+                    .as_f64()
+                    .map(|stay| 1.0 - stay);
+                advice.switch = match (yes, not_stay) {
+                    (Some(yes), Some(not_stay)) => Some((yes + not_stay) / 2.0),
+                    (yes, _) => yes,
+                };
                 advice.urgency = number(&answers["urgency"], &["score", "value"]);
                 let chosen = answers["target"]["choice"]
                     .as_str()
