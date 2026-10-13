@@ -18,6 +18,8 @@ const HOOKS: [(&str, Option<&str>, &str); 5] = [
 /// again.
 const MARK: &str = " hook claude ";
 const STATUS_MARK: &str = " statusline claude";
+/// Settings `env` key naming extra plugin folders Claude Code loads.
+const PLUGIN_DIRS: &str = "CLAUDE_CODE_PLUGIN_DIRS";
 
 fn quoted(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
@@ -64,10 +66,26 @@ fn remove_hooks(settings: &mut Value) {
     }
 }
 
+fn plugin_dirs(settings: &Value) -> Vec<String> {
+    settings["env"][PLUGIN_DIRS].as_str().unwrap_or_default().split(':').filter(|d| !d.is_empty()).map(str::to_string).collect()
+}
+
+fn set_plugin_dirs(settings: &mut Value, dirs: Vec<String>) {
+    if !dirs.is_empty() {
+        settings["env"][PLUGIN_DIRS] = json!(dirs.join(":"));
+    } else if let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) {
+        env.remove(PLUGIN_DIRS);
+        if env.is_empty() {
+            settings.as_object_mut().unwrap().remove("env");
+        }
+    }
+}
+
 /// Install into `settings`. The user's previous status line command is kept in
 /// `previous_status` so `llmpool statusline` can still run it and `uninstall`
-/// can restore it. Returns whether the file changed. Repeating is a no-op.
-pub fn install(settings: &Path, exe: &Path, previous_status: &Path) -> io::Result<bool> {
+/// can restore it. `plugin_dir` is the folder holding llmpool's Claude Code
+/// mod. Returns whether the file changed. Repeating is a no-op.
+pub fn install(settings: &Path, exe: &Path, previous_status: &Path, plugin_dir: &Path) -> io::Result<bool> {
     let before = load(settings)?;
     if !before.is_object() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} is not a JSON object", settings.display())));
@@ -95,6 +113,13 @@ pub fn install(settings: &Path, exe: &Path, previous_status: &Path) -> io::Resul
     }
     after["statusLine"] = json!({"type": "command", "command": format!("{exe}{STATUS_MARK}")});
 
+    let plugin_dir = plugin_dir.to_string_lossy().into_owned();
+    let mut dirs = plugin_dirs(&after);
+    if !dirs.contains(&plugin_dir) {
+        dirs.push(plugin_dir);
+        set_plugin_dirs(&mut after, dirs);
+    }
+
     if after == before {
         return Ok(false);
     }
@@ -106,10 +131,15 @@ pub fn install(settings: &Path, exe: &Path, previous_status: &Path) -> io::Resul
 }
 
 /// Remove what `install` added and put the previous status line back.
-pub fn uninstall(settings: &Path, previous_status: &Path) -> io::Result<bool> {
+pub fn uninstall(settings: &Path, previous_status: &Path, plugin_dir: &Path) -> io::Result<bool> {
     let before = load(settings)?;
     let mut after = before.clone();
     remove_hooks(&mut after);
+    let ours = plugin_dir.to_string_lossy();
+    let dirs = plugin_dirs(&after);
+    if dirs.iter().any(|d| *d == ours) {
+        set_plugin_dirs(&mut after, dirs.into_iter().filter(|d| *d != ours).collect());
+    }
     if status_is_ours(&after) {
         let previous = std::fs::read_to_string(previous_status).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
         match previous {
@@ -156,7 +186,7 @@ mod tests {
         let (settings, prev) = paths(dir.path());
         std::fs::write(&settings, EXISTING).unwrap();
 
-        assert!(install(&settings, Path::new("/opt/it's/llmpool"), &prev).unwrap());
+        assert!(install(&settings, Path::new("/opt/it's/llmpool"), &prev, Path::new("/data/mod")).unwrap());
         let s = load(&settings).unwrap();
         assert_eq!(s["model"], "opus");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -169,6 +199,7 @@ mod tests {
         assert_eq!(failures[0]["matcher"], "rate_limit");
         assert!(s["statusLine"]["command"].as_str().unwrap().ends_with("llmpool' statusline claude"));
         assert_eq!(previous_status_command(&prev).as_deref(), Some("my-status.sh"));
+        assert_eq!(s["env"]["CLAUDE_CODE_PLUGIN_DIRS"], "/data/mod");
         assert!(settings.with_extension("json.llmpool-backup").exists());
     }
 
@@ -177,9 +208,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (settings, prev) = paths(dir.path());
         std::fs::write(&settings, EXISTING).unwrap();
-        install(&settings, Path::new("/bin/llmpool"), &prev).unwrap();
+        install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).unwrap();
         let once = std::fs::read_to_string(&settings).unwrap();
-        assert!(!install(&settings, Path::new("/bin/llmpool"), &prev).unwrap());
+        assert!(!install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).unwrap());
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), once);
         assert_eq!(previous_status_command(&prev).as_deref(), Some("my-status.sh"));
     }
@@ -190,20 +221,20 @@ mod tests {
         let (settings, prev) = paths(dir.path());
         std::fs::write(&settings, EXISTING).unwrap();
         let original = load(&settings).unwrap();
-        install(&settings, Path::new("/bin/llmpool"), &prev).unwrap();
-        assert!(uninstall(&settings, &prev).unwrap());
+        install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).unwrap();
+        assert!(uninstall(&settings, &prev, Path::new("/data/mod")).unwrap());
         assert_eq!(load(&settings).unwrap(), original);
         assert!(!prev.exists());
-        assert!(!uninstall(&settings, &prev).unwrap());
+        assert!(!uninstall(&settings, &prev, Path::new("/data/mod")).unwrap());
     }
 
     #[test]
     fn works_without_an_existing_settings_file() {
         let dir = tempfile::tempdir().unwrap();
         let (settings, prev) = paths(dir.path());
-        assert!(install(&settings, Path::new("/bin/llmpool"), &prev).unwrap());
+        assert!(install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).unwrap());
         assert_eq!(previous_status_command(&prev), None);
-        assert!(uninstall(&settings, &prev).unwrap());
+        assert!(uninstall(&settings, &prev, Path::new("/data/mod")).unwrap());
         assert_eq!(load(&settings).unwrap(), json!({}));
     }
 
@@ -212,7 +243,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (settings, prev) = paths(dir.path());
         std::fs::write(&settings, "{ broken").unwrap();
-        assert!(install(&settings, Path::new("/bin/llmpool"), &prev).is_err());
+        assert!(install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).is_err());
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{ broken");
+    }
+
+    #[test]
+    fn plugin_dir_joins_and_leaves_an_existing_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, prev) = paths(dir.path());
+        std::fs::write(&settings, r#"{"env": {"CLAUDE_CODE_PLUGIN_DIRS": "/mine", "OTHER": "1"}}"#).unwrap();
+        install(&settings, Path::new("/bin/llmpool"), &prev, Path::new("/data/mod")).unwrap();
+        assert_eq!(load(&settings).unwrap()["env"]["CLAUDE_CODE_PLUGIN_DIRS"], "/mine:/data/mod");
+        uninstall(&settings, &prev, Path::new("/data/mod")).unwrap();
+        assert_eq!(load(&settings).unwrap()["env"], json!({"CLAUDE_CODE_PLUGIN_DIRS": "/mine", "OTHER": "1"}));
     }
 }

@@ -342,6 +342,33 @@ fn previous_status_path() -> PathBuf {
     data_dir().join("claude-statusline-previous.json")
 }
 
+/// llmpool's Claude Code mod, compiled into the binary so installing needs
+/// nothing but the binary.
+const MOD_FILES: [(&str, &str); 6] = [
+    (".claude-plugin/plugin.json", include_str!("../../../claude-plugin/llmpool/.claude-plugin/plugin.json")),
+    ("hooks/hooks.json", include_str!("../../../claude-plugin/llmpool/hooks/hooks.json")),
+    ("hooks/register.tsx", include_str!("../../../claude-plugin/llmpool/hooks/register.tsx")),
+    ("hooks/view.ts", include_str!("../../../claude-plugin/llmpool/hooks/view.ts")),
+    ("hooks/view.test.ts", include_str!("../../../claude-plugin/llmpool/hooks/view.test.ts")),
+    ("types/index.d.ts", include_str!("../../../claude-plugin/llmpool/types/index.d.ts")),
+];
+
+fn mod_dir() -> PathBuf {
+    data_dir().join("claude-plugin").join("llmpool")
+}
+
+/// Write the mod, pointing it at this binary.
+fn write_mod(dir: &Path, exe: &Path) -> std::io::Result<()> {
+    // The path lands inside a single-quoted TypeScript string.
+    let exe = exe.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'");
+    for (name, text) in MOD_FILES {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
+        std::fs::write(path, text.replace("__LLMPOOL_BIN__", &exe))?;
+    }
+    Ok(())
+}
+
 fn shell_rc() -> Result<PathBuf, String> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     match shell.rsplit('/').next() {
@@ -374,8 +401,10 @@ fn install_claude(shim: bool) -> Result<ExitCode, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let settings = claude_settings();
     std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
-    let changed = install::install(&settings, &exe, &previous_status_path()).map_err(|e| e.to_string())?;
+    write_mod(&mod_dir(), &exe).map_err(|e| e.to_string())?;
+    let changed = install::install(&settings, &exe, &previous_status_path(), &mod_dir()).map_err(|e| e.to_string())?;
     println!("{} {}", if changed { "updated" } else { "already installed in" }, settings.display());
+    println!("installed the llmpool mod; in Claude Code run /llmpool to see accounts and switch");
     if shim {
         let rc = shell_rc()?;
         let text = without_shim(&std::fs::read_to_string(&rc).unwrap_or_default());
@@ -389,7 +418,8 @@ fn install_claude(shim: bool) -> Result<ExitCode, String> {
 
 fn uninstall_claude() -> Result<ExitCode, String> {
     let settings = claude_settings();
-    let changed = install::uninstall(&settings, &previous_status_path()).map_err(|e| e.to_string())?;
+    let changed = install::uninstall(&settings, &previous_status_path(), &mod_dir()).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(data_dir().join("claude-plugin"));
     println!("{} {}", if changed { "restored" } else { "nothing to remove from" }, settings.display());
     if let Ok(rc) = shell_rc() {
         if let Ok(text) = std::fs::read_to_string(&rc) {
@@ -561,6 +591,16 @@ mod tests {
         assert_eq!(without_shim(&rc), "export A=1\nalias k=kubectl\n");
         assert_eq!(without_shim("export A=1\n"), "export A=1\n");
         assert_eq!(without_shim(""), "");
+    }
+
+    #[test]
+    fn mod_is_written_with_the_binary_path_filled_in() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mod(dir.path(), Path::new("/opt/it's/llmpool")).unwrap();
+        let module = fs::read_to_string(dir.path().join("hooks/register.tsx")).unwrap();
+        assert!(module.contains(r"const INSTALLED = '/opt/it\'s/llmpool'"), "binary path not filled in");
+        assert!(!module.contains("__LLMPOOL_BIN__"));
+        assert!(dir.path().join(".claude-plugin/plugin.json").exists());
     }
 
     #[test]

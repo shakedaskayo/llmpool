@@ -1,0 +1,6 @@
+{
+  "name": "llmpool",
+  "version": "0.1.0",
+  "description": "See the llmpool account this session runs as, its usage against the limits, and switch accounts from a pane",
+  "types": "./types/index.d.ts"
+}
