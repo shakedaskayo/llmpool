@@ -1629,12 +1629,22 @@ fn team(command: Option<TeamCommand>) -> Result<ExitCode, String> {
 fn serve(listen: &str) -> Result<ExitCode, String> {
     use llmpool_daemon::team_server;
     let config = team_server::Config::from_env()?;
-    if let Some(running) = Client::existing(Duration::from_secs(5)) {
-        // One daemon per data directory; the serving one replaces the plain one.
-        let _ = running.call("POST", "/shutdown", None);
-        std::thread::sleep(Duration::from_millis(600));
-    }
-    let lock = http::instance_lock(&data_dir()).map_err(|e| e.to_string())?;
+    // One daemon per data directory; the serving one replaces the plain one.
+    // The app and running sessions start a plain daemon whenever none
+    // answers, so taking its place can need more than one try.
+    let started = std::time::Instant::now();
+    let lock = loop {
+        match http::instance_lock(&data_dir()) {
+            Ok(lock) => break lock,
+            Err(e) if started.elapsed() > Duration::from_secs(20) => return Err(e.to_string()),
+            Err(_) => {
+                if let Some(running) = Client::existing(Duration::from_secs(5)) {
+                    let _ = running.call("POST", "/shutdown", None);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     let mut daemon = Daemon::open_default().map_err(|e| e.message)?;
     daemon.set_keep_fresh(true);
     let daemon = Arc::new(daemon);

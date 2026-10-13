@@ -25,6 +25,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and .Values.oidc.clientId (not .Values.oidc.allowedDomains) (not .Values.oidc.allowedEmails) }}
 {{- fail "set oidc.allowedDomains or oidc.allowedEmails: with neither, nobody may sign in" }}
 {{- end }}
+{{- if and .Values.vaultKey (lt (len .Values.vaultKey) 32) }}
+{{- fail "vaultKey is shorter than 32 characters" }}
+{{- end }}
 {{- range $name, $key := .Values.apiKeys }}
 {{- if lt (len $key) 24 }}
 {{- fail (printf "apiKeys.%s is shorter than 24 characters" $name) }}

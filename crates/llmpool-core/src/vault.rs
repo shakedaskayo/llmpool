@@ -264,6 +264,156 @@ impl Vault for FileVault {
     }
 }
 
+/// Another vault with everything in it encrypted under a key held elsewhere
+/// (an environment variable from a secret manager, say). For a server, whose
+/// vault is files on a volume: whoever gets the volume alone gets nothing.
+///
+/// Each secret is sealed with XChaCha20-Poly1305 under a random nonce and
+/// bound to its id, so one account's secret cannot be passed off as another's.
+/// A secret stored before the key was set is still read, and sealed the next
+/// time it is written.
+pub struct SealedVault {
+    inner: Box<dyn Vault>,
+    key: [u8; 32],
+}
+
+const SEALED: &str = "llmpool-sealed:1:";
+/// Shorter than this is a password, not a key.
+pub const MIN_VAULT_KEY: usize = 32;
+
+impl SealedVault {
+    pub fn new(inner: Box<dyn Vault>, key: &str) -> Result<Self, VaultError> {
+        use sha2::Digest;
+        if key.trim().len() < MIN_VAULT_KEY {
+            return Err(VaultError::Backend(format!(
+                "the vault key must be at least {MIN_VAULT_KEY} characters of random text"
+            )));
+        }
+        Ok(Self {
+            inner,
+            key: sha2::Sha256::digest(key.trim().as_bytes()).into(),
+        })
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    text.len()
+        .is_multiple_of(2)
+        .then(|| {
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+                .collect()
+        })
+        .flatten()
+}
+
+impl Vault for SealedVault {
+    fn put(&self, id: &str, secret: &str) -> Result<(), VaultError> {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        let mut nonce = [0u8; 24];
+        getrandom::getrandom(&mut nonce).map_err(|e| VaultError::Backend(e.to_string()))?;
+        let sealed = chacha20poly1305::XChaCha20Poly1305::new(&self.key.into())
+            .encrypt(
+                &nonce.into(),
+                Payload {
+                    msg: secret.as_bytes(),
+                    aad: id.as_bytes(),
+                },
+            )
+            .map_err(|_| VaultError::Backend("could not seal the secret".into()))?;
+        self.inner
+            .put(id, &format!("{SEALED}{}{}", hex(&nonce), hex(&sealed)))
+    }
+
+    fn get(&self, id: &str) -> Result<Option<String>, VaultError> {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        let Some(stored) = self.inner.get(id)? else {
+            return Ok(None);
+        };
+        let Some(body) = stored.strip_prefix(SEALED) else {
+            return Ok(Some(stored));
+        };
+        let wrong = || {
+            VaultError::Backend(
+                "a stored secret could not be opened: the vault key is not the one it was sealed with"
+                    .into(),
+            )
+        };
+        let bytes = unhex(body).filter(|b| b.len() > 24).ok_or_else(wrong)?;
+        let (nonce, sealed) = bytes.split_at(24);
+        let opened = chacha20poly1305::XChaCha20Poly1305::new(&self.key.into())
+            .decrypt(
+                chacha20poly1305::XNonce::from_slice(nonce),
+                Payload {
+                    msg: sealed,
+                    aad: id.as_bytes(),
+                },
+            )
+            .map_err(|_| wrong())?;
+        String::from_utf8(opened).map(Some).map_err(|_| wrong())
+    }
+
+    fn remove(&self, id: &str) -> Result<(), VaultError> {
+        self.inner.remove(id)
+    }
+}
+
+#[cfg(test)]
+mod sealed_tests {
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn what_is_stored_is_unreadable_without_the_key_and_bound_to_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = || Box::new(FileVault(dir.path().to_path_buf()));
+        let vault = SealedVault::new(files(), KEY).unwrap();
+        vault.put("a", "refresh-token-value").unwrap();
+        assert_eq!(
+            vault.get("a").unwrap().as_deref(),
+            Some("refresh-token-value")
+        );
+        let on_disk = std::fs::read_to_string(dir.path().join("a")).unwrap();
+        assert!(on_disk.starts_with(SEALED) && !on_disk.contains("refresh-token"));
+
+        // Sealed twice, it does not look the same twice.
+        vault.put("b", "refresh-token-value").unwrap();
+        assert_ne!(
+            on_disk[SEALED.len()..],
+            std::fs::read_to_string(dir.path().join("b")).unwrap()[SEALED.len()..]
+        );
+
+        // Another key, a moved file, a changed byte: all refused, none garbled.
+        let other = SealedVault::new(files(), "ffffffffffffffffffffffffffffffff").unwrap();
+        assert!(other.get("a").is_err());
+        std::fs::copy(dir.path().join("a"), dir.path().join("c")).unwrap();
+        assert!(vault.get("c").is_err());
+        let last = if on_disk.ends_with('0') { "1" } else { "0" };
+        let tampered = format!("{}{last}", &on_disk[..on_disk.len() - 1]);
+        std::fs::write(dir.path().join("a"), tampered).unwrap();
+        assert!(vault.get("a").is_err());
+
+        // What was there before the key was set still reads, and is sealed
+        // when next written.
+        FileVault(dir.path().to_path_buf())
+            .put("old", "plain")
+            .unwrap();
+        assert_eq!(vault.get("old").unwrap().as_deref(), Some("plain"));
+        vault.put("old", "plain").unwrap();
+        assert!(std::fs::read_to_string(dir.path().join("old"))
+            .unwrap()
+            .starts_with(SEALED));
+        assert!(vault.get("missing").unwrap().is_none());
+        assert!(SealedVault::new(files(), "short").is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

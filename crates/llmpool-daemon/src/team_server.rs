@@ -33,6 +33,7 @@ const SEAT_SECS: i64 = 180;
 const MAX_PENDING: usize = 256;
 const MAX_BODY: u64 = 1 << 20;
 
+#[derive(Default)]
 pub struct Config {
     /// Where people's browsers reach this server, e.g. `https://pool.example.com`.
     pub public_url: String,
@@ -49,6 +50,12 @@ pub struct Config {
     /// Let several people run on one subscription login at once. Off, a login
     /// in use by one person is not handed to another.
     pub share_logins: bool,
+    /// Which accounts each member may use: a member pattern (an address or
+    /// key name, `*@domain`, or `*`) and the tags it opens (`*` for all).
+    /// Empty: every member may use every account.
+    pub access: Vec<(String, Vec<String>)>,
+    /// Members turned away whatever else admits them.
+    pub blocked: Vec<String>,
 }
 
 pub struct Oidc {
@@ -91,6 +98,8 @@ impl Config {
             domains: list("LLMPOOL_ALLOWED_DOMAINS"),
             emails: list("LLMPOOL_ALLOWED_EMAILS"),
             share_logins: var("LLMPOOL_SHARE_LOGINS").is_some_and(|v| v == "1" || v == "true"),
+            access: Self::access(&var("LLMPOOL_ACCESS").unwrap_or_default())?,
+            blocked: list("LLMPOOL_BLOCKED"),
         };
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
@@ -125,6 +134,47 @@ impl Config {
             keys.insert(name.to_string(), sha256_hex(key));
         }
         Ok(keys)
+    }
+
+    /// `pattern=tag,tag` entries, separated by semicolons or line breaks.
+    pub fn access(text: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+        text.split([';', '\n'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let (who, tags) = entry
+                    .split_once('=')
+                    .ok_or("LLMPOOL_ACCESS: each entry is `member=tag,tag`")?;
+                let tags: Vec<String> = tags
+                    .split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if who.trim().is_empty() || tags.is_empty() {
+                    return Err("LLMPOOL_ACCESS: each entry is `member=tag,tag`".to_string());
+                }
+                Ok((who.trim().to_lowercase(), tags))
+            })
+            .collect()
+    }
+
+    /// Whether `who` may use an account carrying `tags`.
+    fn opens(&self, who: &str, tags: &std::collections::BTreeSet<String>) -> bool {
+        if self.access.is_empty() {
+            return true;
+        }
+        let who = who.to_lowercase();
+        self.access
+            .iter()
+            .filter(|(pattern, _)| match pattern.strip_prefix("*@") {
+                Some(domain) => who.rsplit_once('@').is_some_and(|(_, d)| d == domain),
+                None => pattern == "*" || *pattern == who,
+            })
+            .any(|(_, open)| open.iter().any(|t| t == "*" || tags.contains(t)))
+    }
+
+    fn blocks(&self, who: &str) -> bool {
+        self.blocked.contains(&who.to_lowercase())
     }
 
     fn admits(&self, email: &str) -> bool {
@@ -162,6 +212,8 @@ struct State {
     members: BTreeMap<String, Member>,
     /// Who runs how many sessions on which account, and when they last said so.
     seats: BTreeMap<AccountId, BTreeMap<String, (i64, usize)>>,
+    /// Who has been lent what since the server started, so each is recorded once.
+    lent: std::collections::BTreeSet<(String, AccountId)>,
 }
 
 pub struct TeamServer {
@@ -262,6 +314,26 @@ impl TeamServer {
             }),
             provider: Mutex::new(None),
             members_path,
+        }
+    }
+
+    /// One line per thing worth knowing afterwards: who came in, who was
+    /// turned away, who was lent or took which account. To standard error
+    /// (a container's log) and to `team-audit.log`. Never a secret.
+    fn audit(&self, event: &str, who: &str, detail: &str) {
+        use std::io::Write;
+        let line = json!({
+            "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "event": event, "who": who, "detail": detail,
+        })
+        .to_string();
+        eprintln!("audit {line}");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.daemon.data_dir().join("team-audit.log"))
+        {
+            let _ = writeln!(file, "{line}");
         }
     }
 
@@ -447,7 +519,7 @@ impl TeamServer {
                 "the provider has not verified an email address for you",
             ));
         }
-        if !self.config.admits(&email) {
+        if !self.config.admits(&email) || self.config.blocks(&email) {
             return Err(denied(&format!("{email} is not allowed to use this pool")));
         }
         let code = random_hex(24);
@@ -493,6 +565,8 @@ impl TeamServer {
             },
         );
         self.save_members(&state);
+        drop(state);
+        self.audit("sign_in", &grant.email, "");
         Ok(Reply::Json(
             json!({"token": token, "email": grant.email, "expires_at": expires_at}),
         ))
@@ -502,6 +576,9 @@ impl TeamServer {
         let key = sha256_hex(bearer.unwrap_or_default());
         // A key member is whoever the server's configuration says holds it.
         if let Some((name, _)) = self.config.api_keys.iter().find(|(_, hash)| **hash == key) {
+            if self.config.blocks(name) {
+                return Err(fail(401, "you are no longer allowed to use this pool"));
+            }
             return Ok((key, name.clone()));
         }
         let member = self
@@ -512,7 +589,7 @@ impl TeamServer {
             .cloned()
             .ok_or_else(|| fail(401, "sign in to this pool again"))?;
         // Leaving the allow list ends the session, not only future sign-ins.
-        if !self.config.admits(&member.email) {
+        if !self.config.admits(&member.email) || self.config.blocks(&member.email) {
             return Err(fail(401, "you are no longer allowed to use this pool"));
         }
         Ok((key, member.email))
@@ -530,10 +607,20 @@ impl TeamServer {
         let accounts = d.accounts(&g)?;
         let mut state = self.state();
         let t = now();
+        let seated = |state: &State| -> std::collections::BTreeSet<AccountId> {
+            state
+                .seats
+                .iter()
+                .filter(|(_, holders)| holders.contains_key(email))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let before = seated(&state);
         for holders in state.seats.values_mut() {
             holders.retain(|who, (seen, _)| who != email && t - *seen < SEAT_SECS);
         }
         let mut rows = Vec::new();
+        let mut news = Vec::new();
         for mut account in accounts {
             if !account.usable() || g.renewing.contains(&account.id) {
                 continue;
@@ -541,6 +628,9 @@ impl TeamServer {
             // Another agent's own login renews itself wherever it runs, so a
             // copy on every member's machine would end it: it is not lent.
             if account.kind == Kind::Oauth && account.provider != "claude" {
+                continue;
+            }
+            if !self.config.opens(email, &account.tags) {
                 continue;
             }
             let holders = state.seats.entry(account.id.clone()).or_default();
@@ -586,10 +676,35 @@ impl TeamServer {
                     Err(_) => continue,
                 }
             };
+            if !secret.is_null() && state.lent.insert((email.to_string(), account.id.clone())) {
+                news.push(("lent", account.label.clone()));
+            }
             account.login_expires_at = None;
             rows.push(
                 json!({"account": account, "secret": secret, "others": others, "held": held}),
             );
+        }
+        let after = seated(&state);
+        let label = |id: &AccountId| {
+            g.store
+                .get(id)
+                .ok()
+                .flatten()
+                .map_or_else(|| id.clone(), |a| a.label)
+        };
+        news.extend(
+            after
+                .difference(&before)
+                .map(|id| ("seat_taken", label(id))),
+        );
+        news.extend(
+            before
+                .difference(&after)
+                .map(|id| ("seat_released", label(id))),
+        );
+        drop(state);
+        for (event, account) in news {
+            self.audit(event, email, &account);
         }
         let policy = std::fs::read_to_string(d.policy_path()).unwrap_or_default();
         Ok(Reply::Json(
@@ -619,8 +734,12 @@ impl TeamServer {
             ("POST", "/auth/logout") => {
                 let (key, _) = self.member(bearer)?;
                 let mut state = self.state();
-                state.members.remove(&key);
+                let gone = state.members.remove(&key);
                 self.save_members(&state);
+                drop(state);
+                if let Some(member) = gone {
+                    self.audit("sign_out", &member.email, "");
+                }
                 Ok(Reply::Json(json!({})))
             }
             ("POST", "/v1/sync") => {
@@ -651,6 +770,9 @@ impl TeamServer {
             bearer.as_deref(),
             &body,
         );
+        if let (Err(e), "/auth/callback") = (&result, path.as_str()) {
+            self.audit("sign_in_denied", "", &e.message);
+        }
         let reply = match result {
             Ok(reply) => reply,
             // A person is looking at this one.
@@ -731,7 +853,26 @@ mod tests {
             domains: domains.iter().map(|s| s.to_string()).collect(),
             emails: emails.iter().map(|s| s.to_string()).collect(),
             share_logins: false,
+            ..Config::default()
         }
+    }
+
+    #[test]
+    fn access_rules_open_accounts_by_tag_per_member() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect();
+        let mut c = config(&["x.io"], &[]);
+        assert!(c.opens("ann@x.io", &tags(&["anything"])));
+        c.access = Config::access("*@x.io=work; Ann@x.io = vip ;ci=ci\nboss@x.io=*").unwrap();
+        assert!(c.opens("bob@x.io", &tags(&["work"])));
+        assert!(!c.opens("bob@x.io", &tags(&["vip"])));
+        assert!(c.opens("ann@x.io", &tags(&["vip"])));
+        assert!(c.opens("boss@x.io", &tags(&[])));
+        assert!(c.opens("ci", &tags(&["ci", "x"])));
+        assert!(!c.opens("ci", &tags(&["work"])));
+        assert!(!c.opens("eve@y.io", &tags(&["work"])));
+        assert!(!c.opens("bob@x.io", &tags(&[])));
+        assert!(Config::access("nonsense").is_err());
+        assert!(Config::access("a=").is_err());
     }
 
     #[test]

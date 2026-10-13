@@ -99,6 +99,7 @@ fn serve(pool: &Machine, provider: &Provider, share_logins: bool) -> (Serving, S
         domains: vec!["x.io".into()],
         emails: vec![],
         share_logins,
+        ..Config::default()
     };
     let serving = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", serving.port);
@@ -477,4 +478,67 @@ fn keys_for_other_providers_are_lent_and_run_any_agent() {
         ..StartReq::default()
     };
     assert_eq!(ann.daemon.start_session(none).unwrap_err().status, 409);
+}
+
+#[test]
+fn members_only_get_what_their_tags_open_and_it_is_all_recorded() {
+    let pool = machine(&[("a@x.io", "a-1"), ("b@x.io", "b-1")]);
+    pool.daemon
+        .patch_account(
+            "b@x.io",
+            PatchReq {
+                label: None,
+                tags: Some(["vip".to_string()].into()),
+                enabled: None,
+            },
+        )
+        .unwrap();
+    let idp = provider();
+    let config = Config {
+        public_url: "http://127.0.0.1:1".into(),
+        api_keys: Config::keys(&format!("ci:{KEY},gone:gone-key-0123456789abcdefgh")).unwrap(),
+        access: Config::access("ci=work").unwrap(),
+        blocked: vec!["gone".into()],
+        ..Config::default()
+    };
+    let serving = team_server::start(pool.daemon.clone(), config, "127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", serving.port);
+    let _ = idp;
+
+    let ci = machine(&[]);
+    ci.daemon.team_connect(&url, Some(KEY)).unwrap();
+    assert_eq!(accounts(&ci).keys().collect::<Vec<_>>(), ["a@x.io"]);
+    // A blocked member is out even with a key that is still configured.
+    let gone = machine(&[]);
+    assert_eq!(
+        gone.daemon
+            .team_connect(&url, Some("gone-key-0123456789abcdefgh"))
+            .unwrap_err()
+            .status,
+        401
+    );
+    // With no sign-in configured, signing in is not offered.
+    assert_eq!(
+        gone.daemon.team_connect(&url, None).unwrap_err().status,
+        400
+    );
+
+    let session = start_on(&ci, "a@x.io");
+    ci.daemon.team_sync();
+    ci.daemon
+        .end_session(session["session_id"].as_str().unwrap());
+    ci.daemon.team_sync();
+    let log = std::fs::read_to_string(pool.data.join("team-audit.log")).unwrap();
+    for event in [
+        "\"event\":\"lent\"",
+        "\"event\":\"seat_taken\"",
+        "\"event\":\"seat_released\"",
+    ] {
+        assert!(log.contains(event), "{event} missing from {log}");
+    }
+    assert!(log.contains("\"who\":\"ci\"") && log.contains("a@x.io"));
+    assert!(
+        !log.contains("a-1"),
+        "the audit log must never hold a token"
+    );
 }

@@ -479,6 +479,14 @@ impl Daemon {
             Some(_) => Box::new(FileVault(data.join("vault"))),
             None => Box::new(KeychainVault),
         };
+        // A server's vault is files on a volume; with a key from elsewhere
+        // they are sealed, so the volume alone gives nothing away.
+        let vault: Box<dyn Vault> = match std::env::var("LLMPOOL_VAULT_KEY") {
+            Ok(key) if !key.trim().is_empty() => {
+                Box::new(llmpool_core::vault::SealedVault::new(vault, &key)?)
+            }
+            _ => vault,
+        };
         let keychain: Box<dyn Keychain> = if cfg!(target_os = "macos")
             && std::env::var_os("LLMPOOL_NO_CLAUDE_KEYCHAIN").is_none()
         {
