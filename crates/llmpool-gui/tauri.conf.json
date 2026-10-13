@@ -3,11 +3,38 @@
   "productName": "llmpool",
   "version": "0.1.0",
   "identifier": "dev.llmpool.app",
-  "build": { "frontendDist": "./ui" },
+  "build": {
+    "frontendDist": "./ui"
+  },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "llmpool", "width": 1000, "height": 700, "minWidth": 760, "minHeight": 480 }],
-    "security": { "csp": null }
+    "windows": [
+      {
+        "label": "main",
+        "title": "llmpool",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 760,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
   },
-  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.png"] }
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "A pool of LLM provider logins for coding agents"
+  }
 }

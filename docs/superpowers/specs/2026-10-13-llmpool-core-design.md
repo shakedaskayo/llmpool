@@ -1,7 +1,7 @@
 # llmpool core design
 
 Date: 2026-10-13
-Status: awaiting review
+Status: implemented; see “As built” at the end for where the code differs
 
 ## Purpose
 
@@ -460,3 +460,26 @@ previous statusline command. Running install twice changes nothing.
   only after the first response. Until then the daemon uses its last polled
   reading.
 - Provider terms, as described above.
+
+## As built
+
+Where the implementation differs from the design above, and why.
+
+| Design | As built | Why |
+|---|---|---|
+| Session keeps the user's config dir; only the credential store is separate (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) | Each managed session gets its own `CLAUDE_CONFIG_DIR` with the user's settings, skills, plugins, history and markdown linked in, and user-scope MCP servers copied | Identity lives in the config dir's `.claude.json`; a separate credential store alone would pair one account's token with another's identity |
+| Sessions exist only when started by `llmpool run` | Claude Code started on its own is adopted on its first hook, in the user's own profile; all such sessions share one login and switch together | Lets the status line, the mod and auto-switching work without changing how Claude Code is launched |
+| Daemon refreshes tokens of idle accounts and polls their usage | The daemon makes no provider requests at all | Claude Code refreshes its own token on use; avoiding provider calls keeps llmpool out of the request path. Cost: an idle account shows its last reading until its window resets |
+| `http` hooks | `command` hooks (`llmpool hook claude <event>`) | The launcher's session id reaches a command through its environment; a command can also fail silently, which a hook must |
+| Unix socket for CLI and GUI, loopback for hooks | Loopback TCP only, one bearer token, file mode 0600 | One transport to secure and test |
+| `schedule` takes a cron expression | `schedule = { at = "HH:MM", days = [...] }` | Covers switching at a time of day without a cron parser; the engine is ticked once a minute |
+| Import from claude-swap | Not built. Migrate with `cswap switch N` followed by `llmpool add claude --from-current`, once per account | Avoids reading another tool's credential store and its changing formats |
+| GUI in React and TypeScript, live via server-sent events, tray with per-session switching | Plain HTML, CSS and JavaScript with no build step, polling every three seconds; tray lists sessions with a submenu of accounts to switch to | Fewer moving parts for the same screens |
+| `ask` on a running session opens a GUI picker | It queues a notice naming the candidates; the choice is made in `/llmpool`, the GUI or `llmpool switch` | One place to choose from, already present in every surface |
+| Account health `quarantined` | Unused; a login that fails is `relogin_required` | One state was enough |
+| Windows | Not supported: process, lock and permission handling use Unix calls | macOS and Linux first |
+
+Verified against real Claude Code on macOS: install, capture of the current
+login, a managed session, adoption of plain sessions, hook delivery and usage
+readings. Not yet verified against real Claude Code: a swap between two real
+accounts.

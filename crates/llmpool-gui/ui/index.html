@@ -7,20 +7,22 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <a class="skip" href="#main">Skip to content</a>
     <header>
       <h1>llmpool</h1>
-      <nav role="tablist">
-        <button role="tab" data-tab="pool" aria-selected="true">Pool</button>
-        <button role="tab" data-tab="sessions" aria-selected="false">Sessions</button>
-        <button role="tab" data-tab="policies" aria-selected="false">Policies</button>
-      </nav>
-      <span id="health" aria-live="polite"></span>
+      <div role="tablist" aria-label="Sections" id="tabs">
+        <button role="tab" id="tab-pool" aria-controls="pool" aria-selected="true">Pool</button>
+        <button role="tab" id="tab-sessions" aria-controls="sessions" aria-selected="false" tabindex="-1">Sessions</button>
+        <button role="tab" id="tab-policies" aria-controls="policies" aria-selected="false" tabindex="-1">Policies</button>
+      </div>
+      <p id="summary" class="muted"></p>
     </header>
-    <main>
-      <section id="pool" role="tabpanel"></section>
-      <section id="sessions" role="tabpanel" hidden></section>
-      <section id="policies" role="tabpanel" hidden></section>
+    <main id="main">
+      <section id="pool" role="tabpanel" aria-labelledby="tab-pool" tabindex="0"></section>
+      <section id="sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="0" hidden></section>
+      <section id="policies" role="tabpanel" aria-labelledby="tab-policies" tabindex="0" hidden></section>
     </main>
+    <div id="toasts" role="status" aria-live="polite"></div>
     <script src="app.js"></script>
   </body>
 </html>

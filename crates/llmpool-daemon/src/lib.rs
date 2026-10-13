@@ -1418,6 +1418,7 @@ impl Daemon {
             "conditions": ["cwd", "git_remote", "model", "account_tag"],
             "actions": ["assign", "swap", "ask", "notify", "hold"],
             "picks": ["most_quota", "soonest_reset", "round_robin"],
+            "home": self.home,
         })
     }
 
