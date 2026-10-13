@@ -361,7 +361,7 @@ a.buttonlike:hover { border-color: var(--muted); }
 /* Old numbers stay marked as old however far the page has scrolled. */
 #offline { position: sticky; top: 0; z-index: 3; }
 @media (max-width: 720px) {
-  #offline { top: 64px; }
+  #offline { top: 61px; }
   /* The chosen tab is not parked under the way out. */
   .side { scroll-padding-right: 96px; }
 }

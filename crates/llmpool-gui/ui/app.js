@@ -332,7 +332,7 @@ function accountCard(a) {
     : `${a.health !== "ok" && !SERVER ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
        ${!SERVER && state.team.state === "connected" && state.team.admin ? `<button class="quiet" data-act="share" data-id="${esc(a.id)}" ${a.kind === "oauth" ? `data-confirm="Move it to the team?"` : ""} title="${a.kind === "oauth" ? "Moves this login to the team's pool; you then get it from there" : "Copies this key to the team's pool"}" aria-label="Add ${esc(a.label)} to the team's pool">Share with team</button>` : ""}
        <button class="quiet" data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
-       <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`;
+       <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" data-confirm="Really remove?" aria-label="Remove ${esc(a.label)}">Remove</button>`;
   return `<li class="card acct${live ? "" : " off"}">
       ${avatar(a.label, a.provider)}
       <div class="who"><div class="name"><strong>${esc(a.label)}</strong> ${accountBadge(a)} ${expiryBadge(a)}</div>
@@ -366,7 +366,6 @@ function renderPool() {
       ${addPanel()}
     </dialog>`;
   const dialog = $("add");
-  dialog.onclose = () => (state.adding = false);
   if (state.adding && !dialog.open) dialog.showModal();
 }
 
@@ -409,7 +408,7 @@ function renderRequests() {
         : `For <strong>${esc(d.who)}</strong>: <span class="muted">${esc(d.note ?? "no answer")}</span>`
     }</span></li>`)
     .join("");
-  $("sessions").innerHTML = `${pageHead("Requests", `What members' agents sent through this server. ${n(r.in_flight)} in flight now, of ${n(r.limit)} at once.${t.since ? ` The numbers below count from ${new Date(t.since * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.` : ""}`, `<button data-act="report-refresh">Refresh</button>`)}
+  $("sessions").innerHTML = `${pageHead("Requests", `What members' agents sent through this server. ${n(r.in_flight)} in flight now, of ${n(r.limit)} at once.${t.since ? ` The oldest request counted below is from ${new Date(t.since * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.` : ""}`, `<button data-act="report-refresh">Refresh</button>`)}
     <div class="tiles">
       ${tile(n(t.requests), "requests")}
       ${tile(n(t.input_tokens), "tokens in")}
@@ -1159,7 +1158,11 @@ async function poolAction(el) {
     state.adding = act === "add-open";
     state.addBaseline = state.accounts.map((a) => a.id);
     // Closed by hand: a drawing that has not changed is not made again.
-    if (!state.adding) $("add")?.close();
+    if (!state.adding) {
+      // What was typed, a key above all, does not wait in a closed dialog.
+      for (const field of $("add")?.querySelectorAll("input, textarea") ?? []) field.value = "";
+      $("add")?.close();
+    }
     return renderPool();
   }
   if (act === "add-kind") {
@@ -1178,7 +1181,9 @@ async function poolAction(el) {
       const r = await api("POST", "/import", { bundle, passphrase: $("import-pass").value, replace: false });
       toast(`Added ${r.added.length}${r.skipped.length ? `, left ${r.skipped.length} as they were` : ""}`);
     });
-    if (ok) state.adding = false;
+    // Refused, the file and passphrase stay for another try.
+    if (!ok) return;
+    state.adding = false;
     return refresh(true);
   }
   if (act === "add-agent") {
@@ -1200,12 +1205,6 @@ async function poolAction(el) {
     return refresh(true);
   }
   if (["login", "relogin", "fix", "login-cancel", "login-code"].includes(act)) return loginAction(el, account);
-  if (act === "remove" && el.dataset.armed !== "yes") {
-    // Two presses, so a slip does not drop a login.
-    el.dataset.armed = "yes";
-    el.textContent = "Really remove?";
-    return setTimeout(() => el.isConnected && ((el.dataset.armed = ""), (el.textContent = "Remove")), 4000);
-  }
   const done = await attempt(
     async () => {
       if (act === "capture") await api("POST", "/accounts/capture", {});
@@ -1295,12 +1294,23 @@ for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
         const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
         for (const row of table.tBodies[0]?.rows ?? []) [...row.cells].forEach((cell, i) => heads[i] && (cell.dataset.label = heads[i]));
       }
-      // A button gets its focus back. A select or a switch does not: its
+      // A button or a switch gets its focus back. A select does not: its
       // choice is made, and focus left there would hold the next refresh up.
-      if (had?.dataset.act && had.tagName === "BUTTON") [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
+      if (had?.dataset.act && (had.tagName === "BUTTON" || had.type === "checkbox")) [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
     },
   });
 }
+// However the add dialog closes (its button, Esc), it is no longer in use,
+// and what was typed in it, a key above all, does not wait there.
+document.addEventListener(
+  "close",
+  (e) => {
+    if (e.target.id !== "add") return;
+    state.adding = false;
+    for (const field of e.target.querySelectorAll("input, textarea")) field.value = "";
+  },
+  true,
+);
 // A second press for what cannot be taken back with one.
 document.addEventListener(
   "click",
@@ -1335,7 +1345,8 @@ function renderSummary() {
   // Said once, not every three seconds, to whoever is listening.
   if ($("offline").textContent !== stale) $("offline").textContent = stale;
   $("summary").className = state.offline ? "offline" : "muted online";
-  const problems = (SERVER ? 0 : state.issues.length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
+  // Not being set up yet is not a problem with an account.
+  const problems = (SERVER ? 0 : state.issues.filter((i) => i.action !== "install").length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
     pool: problems ? "!" : state.accounts.length || "",
     sessions: SERVER ? (state.report?.in_flight ? state.report.in_flight : "") : state.sessions.length || "",
@@ -1404,15 +1415,15 @@ async function refresh(force = false) {
   }
   renderSummary();
   // Redrawing would take the field out from under someone using it.
-  if (force || !busy()) {
+  if (force || owed || !busy()) {
     redrawing = Boolean(force) || owed;
-    owed = false;
     try {
       renderPool();
       renderSessions();
       renderAgents();
       renderTeam();
       renderSettings();
+      owed = false;
     } finally {
       redrawing = false;
     }
