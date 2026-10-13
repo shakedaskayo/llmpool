@@ -7,7 +7,7 @@ const windowOf = (row: Json, name: string): Json | undefined => row?.usage?.wind
 /** The fuller of the two windows. */
 export const peak = (row: Row): number => Math.max(row.h5 ?? 0, row.d7 ?? 0)
 
-export const isUsable = (row: Row): boolean => row.state === 'ok'
+export const isUsable = (row: Row): boolean => row.state === 'ok' && !row.isElsewhere
 
 /** Reduce `llmpool status --json` to what the pane draws: the current
  * account first, then accounts that can be switched to with the emptiest
@@ -26,6 +26,10 @@ export const toSnapshot = (status: Json): Snapshot => {
     state: a.enabled === false ? 'disabled' : String(a.health ?? 'ok').replace(/_/g, ' '),
     sessions: (a.sessions ?? []).length,
     isCurrent: a.id === current,
+    // Live somewhere this session cannot share: in another session's
+    // profile, or in the user's own while this one has a separate profile.
+    isElsewhere:
+      a.id !== current && ((a.sessions ?? []).length > 0 || (a.is_default === true && status?.session?.store !== 'default')),
   }))
   const rank = (row: Row) => (row.isCurrent ? 0 : isUsable(row) ? 1 : 2)
   rows.sort((a, b) => rank(a) - rank(b) || peak(a) - peak(b) || a.label.localeCompare(b.label))
@@ -92,7 +96,7 @@ export const stateMark = (row: Row): { icon: string; text: string } => {
     return { icon: '●', text: 'this session' }
   }
   if (row.state === 'ok') {
-    return { icon: '○', text: '' }
+    return row.isElsewhere ? { icon: '◐', text: 'in use by another session' } : { icon: '○', text: '' }
   }
   if (row.state === 'disabled') {
     return { icon: '⏸', text: 'disabled · enable with `llmpool enable`' }

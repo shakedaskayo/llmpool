@@ -147,7 +147,13 @@ fn tray_menu(app: &AppHandle, sessions: &Value, accounts: &Value) -> tauri::Resu
             let id = account["id"].as_str().unwrap_or_default();
             let current = session["account_id"].as_str() == Some(id);
             // An account live in another profile cannot be put in this one too.
-            let free = current || account["sessions"].as_array().is_none_or(Vec::is_empty);
+            // Nor can the login in the user's own profile be copied into a
+            // session's separate one.
+            let elsewhere = account["sessions"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty())
+                || (account["is_default"] == true && session["store"] != "default");
+            let free = current || !elsewhere;
             let usable = account["enabled"] == true && account["health"] == "ok" && free;
             let mut label = account["label"].as_str().unwrap_or_default().to_string();
             for part in ["5h", "7d"]

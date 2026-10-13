@@ -13,6 +13,8 @@ export type Row = {
   state: string
   sessions: number
   isCurrent: boolean
+  /** Its login is live where this session cannot share it. */
+  isElsewhere: boolean
 }
 
 export type Snapshot = {

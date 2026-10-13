@@ -10,6 +10,7 @@ const STATUS = {
     { id: 'b', label: 'work-2', tags: ['work'], enabled: true, health: 'ok', sessions: [], usage: null },
     { id: 'c', label: 'spare', tags: [], enabled: false, health: 'ok', sessions: [], usage: null },
     { id: 'd', label: 'old', tags: [], enabled: true, health: 'relogin_required', sessions: [], usage: null },
+    { id: 'e', label: 'busy', tags: [], enabled: true, health: 'ok', sessions: ['s2'], usage: null },
   ],
   sessions: [{ id: 's1', account_label: 'work-1', cwd: '/w' }],
 }
@@ -48,6 +49,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ key: 'use-a' })).toBeUndefined()
     expect(await ui.find({ key: 'use-c' })).toBeUndefined()
     expect(await ui.find({ key: 'use-d' })).toBeUndefined()
+    // Nor one whose login is live in another session.
+    expect(await ui.find({ key: 'use-e' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /in use by another session/ })).toBeDefined()
 
     await ui.press({ key: 'use-b' })
     const switched = calls.find(argv => argv[1] === 'switch')

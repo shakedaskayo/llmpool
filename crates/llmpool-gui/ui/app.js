@@ -159,7 +159,9 @@ function renderSessions() {
       const picker = s.store
         ? `<select data-act="swap" data-id="${esc(s.id)}" aria-label="Account for the session in ${esc(short(s.cwd))}">${usable
             .map((a) => {
-              const elsewhere = a.id !== s.account_id && a.sessions.length > 0;
+              // In use by another session, or it is the login in your own
+              // profile, which a separately managed session cannot share.
+              const elsewhere = a.id !== s.account_id && (a.sessions.length > 0 || (a.is_default && s.store !== "default"));
               return `<option value="${esc(a.id)}"${a.id === s.account_id ? " selected" : ""}${elsewhere ? " disabled" : ""}>${esc(a.label)}${elsewhere ? " (in use)" : ""}</option>`;
             })
             .join("")}</select>`

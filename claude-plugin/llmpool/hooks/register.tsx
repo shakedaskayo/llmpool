@@ -181,18 +181,13 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" marginTop={1}>
           <Box gap={1}>
-            <Text color={row.isCurrent ? 'success' : usable ? 'text' : 'warning'} bold={row.isCurrent}>
+            <Text color={row.isCurrent ? 'success' : usable || row.isElsewhere ? 'text' : 'warning'} bold={row.isCurrent}>
               {mark.icon} {row.label}
             </Text>
-            {mark.text !== '' && <Text color={row.isCurrent ? 'success' : 'warning'}>{mark.text}</Text>}
+            {mark.text !== '' && <Text color={row.isCurrent ? 'success' : row.isElsewhere ? 'inactive' : 'warning'}>{mark.text}</Text>}
             {row.tags.length > 0 && <Text dimColor>{row.tags.map(tag => `#${tag}`).join(' ')}</Text>}
-            {row.sessions > 0 && !row.isCurrent && (
-              <Text dimColor>
-                in use by {row.sessions} session{row.sessions > 1 ? 's' : ''}
-              </Text>
-            )}
           </Box>
-          {(usable || row.isCurrent) && (
+          {(usable || row.isCurrent || row.isElsewhere) && (
             <Box flexDirection="column" marginLeft={2}>
               {meter('5h', row.h5, row.reset5)}
               {meter('7d', row.d7, row.reset7)}
