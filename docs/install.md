@@ -15,7 +15,7 @@ The script builds from source, so it needs git and [Rust](https://rustup.rs). Th
 | macOS | The menu-bar app in `/Applications`, the `llmpool` command in `~/.local/bin`, Claude Code connected (hooks, status line, `/llmpool`), your current login added, start at login |
 | Linux | The `llmpool` command in `~/.local/bin`, and Claude Code connected if it is installed |
 
-Windows is not supported.
+On Linux the build also needs the D-Bus development files (`sudo apt install libdbus-1-dev pkg-config`, or `sudo dnf install dbus-devel pkgconf-pkg-config`); the script says so if they are missing. Windows is not supported.
 
 ## First steps
 

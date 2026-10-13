@@ -30,6 +30,13 @@ case "$(uname -s)" in
     exec "$src/scripts/install-macos.sh"
     ;;
   *)
+    # The system keyring is reached over D-Bus; its headers are needed to build.
+    if ! pkg-config --exists dbus-1 2>/dev/null; then
+      echo "llmpool needs the D-Bus development files to build:" >&2
+      echo "  Debian, Ubuntu:  sudo apt install libdbus-1-dev pkg-config" >&2
+      echo "  Fedora:          sudo dnf install dbus-devel pkgconf-pkg-config" >&2
+      exit 1
+    fi
     echo "== Building the llmpool command (a few minutes the first time)"
     cargo install --quiet --locked --path "$src/crates/llmpool-cli" --root "$HOME/.local"
     if command -v claude >/dev/null 2>&1; then
