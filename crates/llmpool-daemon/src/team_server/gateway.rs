@@ -287,7 +287,11 @@ impl TeamServer {
         let preferred = state.preferred.get(&pair).map(|(id, _)| id.clone());
         let mut found = Vec::new();
         for account in d.accounts(&g)? {
-            if account.provider != provider
+            // A Claude session runs on a subscription login or, when those are
+            // full, on an Anthropic key: the same API behind another door.
+            let serves = account.provider == provider
+                || (provider == "claude" && account.provider == "anthropic");
+            if !serves
                 || !account.usable()
                 || g.renewing.contains(&account.id)
                 || state.cooling.contains_key(&account.id)
@@ -344,6 +348,9 @@ impl TeamServer {
         found.sort_by_key(|u| {
             (
                 u.account.peak_used() >= CEILING,
+                // A key is paid for by the request: it is where requests
+                // overflow to, not where they start.
+                u.account.provider != provider,
                 preferred.as_ref() != Some(&u.account.id),
                 sticky.as_ref() != Some(&u.account.id),
                 u.account.peak_used() as u64,
@@ -355,6 +362,11 @@ impl TeamServer {
 
     fn trace(&self, line: Value) {
         eprintln!("gateway {line}");
+        if let Some(collector) = &self.otlp {
+            // Never waited for: a collector that is slow or away loses spans,
+            // and costs no request anything.
+            let _ = collector.try_send(line.clone());
+        }
         append_line(
             &self.daemon.data_dir().join("gateway-traces.log"),
             &line.to_string(),
@@ -691,7 +703,7 @@ impl TeamServer {
                     call = call.set(name, value);
                 }
             }
-            call = match (provider.as_str(), upstream.account.kind) {
+            call = match (upstream.account.provider.as_str(), upstream.account.kind) {
                 // A subscription token is a bearer token, and says so.
                 ("claude", _) => {
                     let mut betas: Vec<&str> = beta

@@ -10,6 +10,7 @@
 
 mod admin;
 mod gateway;
+pub mod otlp;
 
 use crate::http::percent_decode;
 use crate::{fail, now, Api, ApiError, Daemon};
@@ -80,6 +81,8 @@ pub struct Config {
     /// a proxy of the organisation's, a compatible endpoint, or a provider
     /// llmpool has not heard of. Provider name to base address.
     pub upstreams: BTreeMap<String, String>,
+    /// An OpenTelemetry collector that gets a span for every gateway request.
+    pub otlp: Option<otlp::Otlp>,
 }
 
 /// What an administrator can change while the server runs. It starts as the
@@ -148,6 +151,7 @@ impl Config {
                     (!url.is_empty()).then(|| (provider.to_lowercase().replace('_', "-"), url))
                 })
                 .collect(),
+            otlp: otlp::Otlp::from_env(var),
         };
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
@@ -285,6 +289,7 @@ pub struct TeamServer {
     active: std::sync::atomic::AtomicUsize,
     /// Every other request being answered right now.
     busy: std::sync::atomic::AtomicUsize,
+    otlp: Option<std::sync::mpsc::SyncSender<Value>>,
 }
 
 enum Reply {
@@ -455,6 +460,7 @@ impl TeamServer {
             name: String::new(),
         });
         Ok(Self {
+            otlp: config.otlp.clone().map(otlp::start),
             settings: Mutex::new(settings),
             gateway: Mutex::new(gateway::Gateway::restored(daemon.data_dir())),
             active: std::sync::atomic::AtomicUsize::new(0),
@@ -945,6 +951,10 @@ impl TeamServer {
         for account in d.accounts(&g)? {
             let lendable = account.kind != Kind::Oauth || account.provider == "claude";
             if account.usable() && lendable && settings.opens(email, &account.tags) {
+                // An Anthropic key can carry a Claude session too.
+                if account.provider == "anthropic" {
+                    providers.insert("claude".to_string());
+                }
                 providers.insert(account.provider);
             }
         }

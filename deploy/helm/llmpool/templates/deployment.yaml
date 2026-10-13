@@ -54,6 +54,10 @@ spec:
               value: {{ ternary "1" "0" .Values.gateway.enabled | quote }}
             - name: LLMPOOL_GATEWAY_MAX
               value: {{ .Values.gateway.maxInFlight | quote }}
+            {{- if .Values.gateway.otlp.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.gateway.otlp.endpoint | quote }}
+            {{- end }}
             {{- range $provider, $url := .Values.gateway.upstreams }}
             - name: LLMPOOL_UPSTREAM_{{ $provider | upper | replace "-" "_" }}
               value: {{ $url | quote }}

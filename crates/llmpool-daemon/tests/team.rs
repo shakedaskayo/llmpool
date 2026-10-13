@@ -1565,3 +1565,102 @@ fn an_invitation_page_says_who_invites_to_what_with_the_line_to_run() {
     let named = get("/join").into_string().unwrap();
     assert!(named.contains("You are invited to the Acme &lt;b&gt;Labs&lt;/b&gt; LLM pool"));
 }
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() {
+    use llmpool_daemon::team_server::otlp::Otlp;
+    use llmpool_daemon::KeyReq;
+    let provider = upstream();
+    // A collector that keeps what it is sent.
+    let collector = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let collector_url = format!(
+        "http://127.0.0.1:{}",
+        collector.server_addr().to_ip().unwrap().port()
+    );
+    let taken = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    let keep = taken.clone();
+    std::thread::spawn(move || {
+        for mut request in collector.incoming_requests() {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("x-team"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            keep.lock()
+                .unwrap()
+                .push((request.url().to_string(), auth, body));
+            let _ = request.respond(tiny_http::Response::from_string("{}"));
+        }
+    });
+
+    // One subscription login, which the provider says is nearly full, and a key.
+    let pool = machine(&[("a@x.io", "a-1")]);
+    pool.daemon
+        .add_key(KeyReq {
+            provider: "anthropic".into(),
+            label: Some("paid".into()),
+            tags: vec![],
+            env: [("ANTHROPIC_API_KEY".to_string(), "sk-over".to_string())].into(),
+        })
+        .unwrap();
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        gateway: true,
+        upstreams: [
+            ("claude".to_string(), provider.url.clone()),
+            ("anthropic".to_string(), provider.url.clone()),
+        ]
+        .into(),
+        otlp: Some(Otlp {
+            endpoint: collector_url.clone(),
+            headers: vec![("x-team".into(), "t-1".into())],
+        }),
+        ..Config::default()
+    });
+    let ask = || {
+        ureq::post(&format!("{url}/gateway/claude/v1/messages"))
+            .set("Authorization", &format!("Bearer {KEY}"))
+            .send_json(json!({"model": "m-9", "messages": []}))
+            .unwrap()
+            .status()
+    };
+    // The first runs on the subscription; its answer says that is 95% used,
+    // so the next is carried by the key, as a key and not as a login.
+    assert_eq!(ask(), 200);
+    assert_eq!(ask(), 200);
+    let seen = provider.seen.lock().unwrap().clone();
+    assert_eq!(seen[0]["authorization"], "Bearer a-1");
+    assert_eq!(seen[1]["x-api-key"], "sk-over");
+    assert!(!seen[1].contains_key("authorization"));
+    assert!(!seen[1]
+        .get("anthropic-beta")
+        .is_some_and(|b| b.contains("oauth")));
+
+    // A pool with nothing but the key still carries Claude sessions.
+    let ann = machine(&[]);
+    ann.daemon.team_connect(&url, Some(KEY)).unwrap();
+    assert!(accounts(&ann).contains_key("team gateway (claude)"));
+
+    // Both requests reached the collector, with its header, as spans.
+    let began = std::time::Instant::now();
+    while taken.lock().unwrap().is_empty() && began.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let taken = taken.lock().unwrap().clone();
+    let (path, header, body) = &taken[0];
+    assert_eq!(path, "/v1/traces");
+    assert_eq!(header, "t-1");
+    let sent: Value = serde_json::from_str(body).unwrap();
+    let span = &sent["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+    assert_eq!(span["name"], "chat m-9");
+    assert_eq!(span["traceId"].as_str().unwrap().len(), 32);
+    let attributes = span["attributes"].to_string();
+    assert!(attributes.contains("gen_ai.request.model"), "{attributes}");
+    assert!(attributes.contains("\"ci\""), "{attributes}");
+    assert!(!body.contains("sk-over") && !body.contains("a-1"));
+}

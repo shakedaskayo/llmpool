@@ -41,6 +41,14 @@ gateway:
   # How many requests may be in flight at once. Each is a thread while it
   # runs; raise the memory limit with it.
   maxInFlight: 256
+  # Send a span for every request to an OpenTelemetry collector (OTLP over
+  # HTTP): who, which account and model, how long, how many tokens. Never
+  # what was said. `headers` are what the collector asks for, e.g. a key;
+  # with existingSecret, put them there as OTEL_EXPORTER_OTLP_HEADERS
+  # (`name=value,name=value`).
+  otlp:
+    endpoint: ""
+    headers: {}
 
 # Who may run the server from its web page (at publicUrl): addresses that may
 # sign in, or names of API keys. Empty: the page is closed to everyone.
