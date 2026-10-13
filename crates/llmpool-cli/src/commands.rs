@@ -1718,8 +1718,20 @@ fn serve(listen: &str) -> Result<ExitCode, String> {
         "llmpool: serving the pool on {listen} (port {})",
         serving.port
     );
+    // Asked to stop (a rollout, a node drain): take no new requests, let the
+    // answers in flight finish, then stop the daemon so its state is saved.
+    let terminating = team_server::watch_for_termination();
+    std::thread::spawn(move || {
+        while !terminating.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("llmpool: stopping; letting requests in flight finish");
+        serving.drain(Duration::from_secs(30));
+        if let Some(client) = Client::existing(Duration::from_secs(5)) {
+            let _ = client.call("POST", "/shutdown", None);
+        }
+    });
     local.wait();
-    serving.stop();
     Ok(ExitCode::SUCCESS)
 }
 

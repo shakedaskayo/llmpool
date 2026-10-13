@@ -20,6 +20,8 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      # Longer than the server gives requests in flight to finish.
+      terminationGracePeriodSeconds: 45
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}

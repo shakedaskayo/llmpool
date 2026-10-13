@@ -35,6 +35,11 @@ const SESSION_SECS: i64 = 30 * 24 * 3600;
 const SEAT_SECS: i64 = 180;
 const MAX_PENDING: usize = 256;
 const MAX_BODY: u64 = 1 << 20;
+/// Requests other than the gateway's answered at once.
+const MAX_CONTROL: usize = 64;
+/// Wrong tokens tolerated in ten seconds before everyone without a right one
+/// is told to wait: guessing must be slow even from many addresses at once.
+const MAX_FAILURES: usize = 40;
 
 #[derive(Default)]
 pub struct Config {
@@ -252,6 +257,8 @@ struct State {
     members: BTreeMap<String, Member>,
     /// Who runs how many sessions on which account, and when they last said so.
     seats: BTreeMap<AccountId, BTreeMap<String, (i64, usize)>>,
+    /// When tokens that opened nothing were last shown to us.
+    failures: std::collections::VecDeque<i64>,
     /// Who has been lent what since the server started, so each is recorded once.
     lent: std::collections::BTreeSet<(String, AccountId)>,
 }
@@ -267,6 +274,8 @@ pub struct TeamServer {
     gateway: Mutex<gateway::Gateway>,
     /// Gateway requests in flight right now.
     active: std::sync::atomic::AtomicUsize,
+    /// Every other request being answered right now.
+    busy: std::sync::atomic::AtomicUsize,
 }
 
 enum Reply {
@@ -291,6 +300,46 @@ struct Ask<'a> {
     ours: bool,
     body: &'a Value,
     text: &'a str,
+}
+
+/// A log file is started afresh at this size; the one before is kept beside it.
+const LOG_MAX: u64 = 32 << 20;
+
+/// Add a line to a log, keeping the file and its predecessor to a bounded
+/// size: a full volume would stop the server from saving anything else.
+pub(crate) fn append_line(path: &std::path::Path, line: &str) {
+    append_bounded(path, line, LOG_MAX)
+}
+
+fn append_bounded(path: &std::path::Path, line: &str, max: u64) {
+    use std::io::Write;
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > max) {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// Set when the process is asked to stop (SIGTERM or SIGINT).
+static TERMINATING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn note_termination(_signal: libc::c_int) {
+    TERMINATING.store(true, Ordering::SeqCst);
+}
+
+/// Start noticing requests to stop. Returns the flag that says one came.
+pub fn watch_for_termination() -> &'static AtomicBool {
+    let handler = note_termination as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+    &TERMINATING
 }
 
 pub(crate) fn random_hex(bytes: usize) -> String {
@@ -380,6 +429,7 @@ impl TeamServer {
             settings: Mutex::new(settings),
             gateway: Mutex::new(gateway::Gateway::restored(daemon.data_dir())),
             active: std::sync::atomic::AtomicUsize::new(0),
+            busy: std::sync::atomic::AtomicUsize::new(0),
             config,
             daemon,
             state: Mutex::new(State {
@@ -395,20 +445,13 @@ impl TeamServer {
     /// turned away, who was lent or took which account. To standard error
     /// (a container's log) and to `team-audit.log`. Never a secret.
     fn audit(&self, event: &str, who: &str, detail: &str) {
-        use std::io::Write;
         let line = json!({
             "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "event": event, "who": who, "detail": detail,
         })
         .to_string();
         eprintln!("audit {line}");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.daemon.data_dir().join("team-audit.log"))
-        {
-            let _ = writeln!(file, "{line}");
-        }
+        append_line(&self.daemon.data_dir().join("team-audit.log"), &line);
     }
 
     fn settings(&self) -> Settings {
@@ -678,6 +721,22 @@ impl TeamServer {
     }
 
     fn member(&self, bearer: Option<&str>) -> Api<(String, String)> {
+        let found = self.member_of(bearer);
+        if found.as_ref().is_err_and(|e| e.status == 401) {
+            let mut state = self.state();
+            let t = now();
+            state.failures.push_back(t);
+            while state.failures.front().is_some_and(|at| t - at > 10) {
+                state.failures.pop_front();
+            }
+            if state.failures.len() > MAX_FAILURES {
+                return Err(fail(429, "too many wrong tokens; wait a little"));
+            }
+        }
+        found
+    }
+
+    fn member_of(&self, bearer: Option<&str>) -> Api<(String, String)> {
         let key = sha256_hex(bearer.unwrap_or_default());
         // A key member is whoever the server's configuration says holds it.
         if let Some((name, _)) = self.config.api_keys.iter().find(|(_, hash)| **hash == key) {
@@ -938,6 +997,50 @@ impl TeamServer {
         }
     }
 
+    /// Take a request off the accepting thread. A slow or stalled client then
+    /// holds a thread of its own, never one of the few that accept.
+    /// What every page of ours tells the browser: run only our own scripts,
+    /// show us in no frame, send no referrer, guess no types, and come back
+    /// over TLS only.
+    fn guarded<R: std::io::Read>(
+        &self,
+        response: tiny_http::Response<R>,
+    ) -> tiny_http::Response<R> {
+        let response = response
+            .with_header(header(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+                 object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            ))
+            .with_header(header("X-Frame-Options", "DENY"))
+            .with_header(header("X-Content-Type-Options", "nosniff"))
+            .with_header(header("Referrer-Policy", "no-referrer"))
+            .with_header(header("Cache-Control", "no-store"));
+        if self.config.public_url.starts_with("https://") {
+            response.with_header(header(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            ))
+        } else {
+            response
+        }
+    }
+
+    fn dispatch(self: &Arc<Self>, request: tiny_http::Request) {
+        if request.url().starts_with("/gateway/") {
+            return self.handle(request);
+        }
+        if self.busy.fetch_add(1, Ordering::SeqCst) >= MAX_CONTROL {
+            self.busy.fetch_sub(1, Ordering::SeqCst);
+            return gateway::refuse(request, 503, "the server is busy; try again");
+        }
+        let server = self.clone();
+        std::thread::spawn(move || {
+            server.handle(request);
+            server.busy.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+
     fn handle(self: &Arc<Self>, mut request: tiny_http::Request) {
         if request.url().starts_with("/gateway/") {
             // A request to a model can run for minutes; each gets a thread of
@@ -1021,18 +1124,15 @@ impl TeamServer {
                     .with_header(header("Cache-Control", "no-store")),
             ),
             Reply::Page(status, html) => request.respond(
-                tiny_http::Response::from_string(html)
-                    .with_status_code(status)
-                    .with_header(header("Content-Type", "text/html; charset=utf-8"))
-                    .with_header(header("Cache-Control", "no-store")),
+                self.guarded(
+                    tiny_http::Response::from_string(html)
+                        .with_status_code(status)
+                        .with_header(header("Content-Type", "text/html; charset=utf-8")),
+                ),
             ),
-            Reply::Asset(kind, text) => request.respond(
-                tiny_http::Response::from_string(text)
-                    .with_header(header("Content-Type", kind))
-                    .with_header(header("Cache-Control", "no-store"))
-                    .with_header(header("X-Content-Type-Options", "nosniff"))
-                    .with_header(header("X-Frame-Options", "DENY")),
-            ),
+            Reply::Asset(kind, text) => request.respond(self.guarded(
+                tiny_http::Response::from_string(text).with_header(header("Content-Type", kind)),
+            )),
             Reply::Session(token, to) => {
                 // Readable by no script, sent to no other site, and only
                 // over TLS wherever the server is reached over TLS.
@@ -1055,10 +1155,11 @@ impl TeamServer {
                     escape(&to)
                 );
                 request.respond(
-                    tiny_http::Response::from_string(html)
-                        .with_header(header("Content-Type", "text/html; charset=utf-8"))
-                        .with_header(header("Set-Cookie", &cookie))
-                        .with_header(header("Cache-Control", "no-store")),
+                    self.guarded(
+                        tiny_http::Response::from_string(html)
+                            .with_header(header("Content-Type", "text/html; charset=utf-8"))
+                            .with_header(header("Set-Cookie", &cookie)),
+                    ),
                 )
             }
         };
@@ -1073,11 +1174,24 @@ pub(crate) fn header(name: &str, value: &str) -> tiny_http::Header {
 pub struct Serving {
     pub port: u16,
     stop: Arc<AtomicBool>,
+    team: Arc<TeamServer>,
 }
 
 impl Serving {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop taking new requests and give those in flight up to `patience`
+    /// to finish: an answer half-streamed to an agent is worth waiting for.
+    pub fn drain(&self, patience: Duration) {
+        self.stop();
+        let until = std::time::Instant::now() + patience;
+        while std::time::Instant::now() < until
+            && self.team.active.load(Ordering::SeqCst) + self.team.busy.load(Ordering::SeqCst) > 0
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -1092,12 +1206,12 @@ pub fn start(daemon: Arc<Daemon>, config: Config, listen: &str) -> std::io::Resu
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(300)) {
-                    team.handle(request);
+                    team.dispatch(request);
                 }
             }
         });
     }
-    Ok(Serving { port, stop })
+    Ok(Serving { port, stop, team })
 }
 
 #[cfg(test)]
@@ -1149,6 +1263,26 @@ mod tests {
         assert!(!c.admits("ann@evilx.io"));
         assert!(!c.admits("ann@x.io.evil.com"));
         assert!(!config(&[], &[]).admits("ann@x.io"));
+    }
+
+    #[test]
+    fn a_log_starts_afresh_when_it_is_big_and_keeps_the_one_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("x.log");
+        for i in 0..40 {
+            append_bounded(&log, &format!("line {i:03} of some length"), 200);
+        }
+        let now = std::fs::read_to_string(&log).unwrap();
+        let before = std::fs::read_to_string(dir.path().join("x.log.1")).unwrap();
+        assert!(
+            now.len() < 260 && before.len() < 260,
+            "{} {}",
+            now.len(),
+            before.len()
+        );
+        assert!(now.contains("line 039") && !now.contains("line 000"));
+        // Nothing but the two files, however long it runs.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]

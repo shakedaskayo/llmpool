@@ -103,7 +103,8 @@ resources:
     cpu: 20m
     memory: 32Mi
   limits:
-    memory: 128Mi
+    # Room for many requests in flight at once; raise it with gateway.maxInFlight.
+    memory: 512Mi
 
 podAnnotations: {}
 nodeSelector: {}

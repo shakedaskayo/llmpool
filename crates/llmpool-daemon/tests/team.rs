@@ -1237,3 +1237,87 @@ fn the_gateway_carries_many_requests_at_once_and_follows_the_decision_model() {
     );
     assert_eq!(report(json!({"result": "failed"}))["totals"]["requests"], 0);
 }
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn the_server_tells_browsers_to_be_careful_slows_guessing_and_stops_gently() {
+    use llmpool_daemon::KeyReq;
+    let provider = upstream();
+    let pool = machine(&[]);
+    pool.daemon
+        .add_key(KeyReq {
+            provider: "openai".into(),
+            label: None,
+            tags: vec![],
+            env: [
+                ("OPENAI_API_KEY".to_string(), "k-good".to_string()),
+                ("OPENAI_BASE_URL".to_string(), provider.url.clone()),
+            ]
+            .into(),
+        })
+        .unwrap();
+    let (serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        admins: vec!["ci".into()],
+        gateway: true,
+        ..Config::default()
+    });
+
+    // Pages come with instructions for the browser.
+    let page = ureq::get(&format!("{url}/login")).call().unwrap();
+    let policy = page.header("Content-Security-Policy").unwrap();
+    assert!(policy.contains("default-src 'self'") && policy.contains("frame-ancestors 'none'"));
+    assert_eq!(page.header("X-Frame-Options"), Some("DENY"));
+    assert_eq!(page.header("Referrer-Policy"), Some("no-referrer"));
+
+    // An answer that is on its way when the server is told to stop still
+    // arrives whole; nothing new is taken.
+    let streaming = {
+        let url = url.clone();
+        std::thread::spawn(move || {
+            ureq::post(&format!("{url}/gateway/openai/v1/stream"))
+                .set("Authorization", &format!("Bearer {KEY}"))
+                .send_json(json!({"model": "m"}))
+                .unwrap()
+                .into_string()
+                .unwrap()
+        })
+    };
+    std::thread::sleep(Duration::from_millis(250));
+    let began = std::time::Instant::now();
+    serving.drain(Duration::from_secs(5));
+    assert!(
+        began.elapsed() >= Duration::from_millis(200),
+        "it did not wait for the answer in flight"
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "it waited after the answer was done"
+    );
+    assert!(streaming.join().unwrap().contains("output_tokens"));
+}
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn guessing_tokens_gets_slow_for_everyone_who_is_guessing() {
+    let pool = machine(&[]);
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        ..Config::default()
+    });
+    let try_token = |token: &str| match ureq::get(&format!("{url}/v1/me"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("{e}"),
+    };
+    let answers: Vec<u16> = (0..60).map(|i| try_token(&format!("guess-{i}"))).collect();
+    assert_eq!(answers[0], 401);
+    assert_eq!(*answers.last().unwrap(), 429);
+    // Someone with the right token is not slowed down by the guessing.
+    assert_eq!(try_token(KEY), 200);
+}

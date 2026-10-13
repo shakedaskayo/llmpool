@@ -26,6 +26,8 @@ const CEILING: f64 = 90.0;
 /// passed over, when the provider does not say.
 const COOL_SECS: i64 = 60;
 const ATTEMPTS: usize = 3;
+/// How long an account the provider refused outright is passed over.
+const REFUSED_SECS: i64 = 300;
 /// Requests remembered for the server's page; the log file keeps them all.
 const KEPT: usize = 2000;
 /// The decision model is asked about one member and provider no more often
@@ -285,13 +287,10 @@ impl TeamServer {
 
     fn trace(&self, line: Value) {
         eprintln!("gateway {line}");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.daemon.data_dir().join("gateway-traces.log"))
-        {
-            let _ = writeln!(file, "{line}");
-        }
+        append_line(
+            &self.daemon.data_dir().join("gateway-traces.log"),
+            &line.to_string(),
+        );
         let mut state = self.gateway_state();
         state.recent.push_front(line);
         state.recent.truncate(KEPT);
@@ -634,6 +633,26 @@ impl TeamServer {
             // Refusals that are about the account, not the request: try the
             // next account, and leave this one alone for a while.
             if matches!(status, 401 | 403 | 429) || status >= 500 {
+                if matches!(status, 401 | 403) {
+                    // The provider no longer takes this login or key. It is
+                    // passed over for a while rather than tried first on
+                    // every request, and an administrator is told once.
+                    let fresh = self
+                        .gateway_state()
+                        .cooling
+                        .insert(upstream.account.id.clone(), now() + REFUSED_SECS)
+                        .is_none();
+                    if fresh {
+                        self.audit(
+                            "account_refused",
+                            &who,
+                            &format!(
+                                "{provider}: the provider answered {status} for {}",
+                                upstream.account.label
+                            ),
+                        );
+                    }
+                }
                 if status == 429 {
                     let wait = response
                         .header("retry-after")
