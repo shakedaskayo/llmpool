@@ -108,18 +108,20 @@ impl TeamServer {
         } else {
             format!(
                 "{sign_in}<form method=post action=\"/admin/login\">\
-                 <input name=key type=password autocomplete=off placeholder=\"API key\" aria-label=\"API key\" required>\
+                 <label for=key class=m>API key</label>\
+                 <input id=key name=key type=password autocomplete=off required>\
                  <button>Continue with a key</button></form>"
             )
         };
         format!(
-            "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
+            "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\">\
              <title>llmpool server</title><style>\
              body{{font:14px/1.5 -apple-system,system-ui,sans-serif;background:#0f1011;color:#ededee;display:grid;place-items:center;min-height:100vh;margin:0}}\
              main{{width:min(360px,90vw)}}h1{{font-size:20px;margin:0 0 4px}}.m{{color:#98a1b0;margin:6px 0}}\
-             input,button,.b{{font:inherit;display:block;width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid #33363b;background:#17181a;color:inherit;margin:8px 0;text-align:center;text-decoration:none}}\
+             input,button,.b{{font:inherit;display:block;width:100%;box-sizing:border-box;padding:11px 12px;border-radius:8px;border:1px solid #33363b;background:#17181a;color:inherit;margin:8px 0;text-align:center;text-decoration:none}}\
              input{{text-align:left}}.b{{background:#ededee;color:#0f1011;border-color:#ededee;font-weight:600}}\
-             code{{background:#17181a;padding:1px 5px;border-radius:4px}}.n{{color:#e9b955}}</style>\
+             code{{background:#17181a;padding:1px 5px;border-radius:4px}}.n{{color:#e9b955}}label{{display:block;margin:10px 0 -4px}}\
+             @media(prefers-color-scheme:light){{body{{background:#fafafa;color:#111113}}input,button,.b{{background:#fff;border-color:#d4d4d8}}.b{{background:#111113;color:#fff;border-color:#111113}}.m{{color:#6b6b76}}code{{background:#f4f4f5}}.n{{color:#a15c00}}}}</style>\
              <main><h1>llmpool server</h1><p class=m>Administrators of this pool sign in here. Members connect from their own llmpool.</p>\
              {}{body}</main></html>",
             if note.is_empty() {

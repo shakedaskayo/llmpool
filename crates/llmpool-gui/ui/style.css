@@ -318,7 +318,7 @@ a.buttonlike:hover { border-color: var(--muted); }
   .side { position: sticky; top: 0; z-index: 4; flex-direction: row; align-items: center; gap: 6px; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
   .side h1 { font-size: 0; gap: 0; margin: 0 4px 0 0; }
   [role="tablist"] { flex-direction: row; }
-  [role="tab"] { width: auto; white-space: nowrap; min-height: 36px; padding: 6px 10px; }
+  [role="tab"] { width: auto; white-space: nowrap; min-height: 44px; padding: 6px 12px; }
   [role="tab"] .icon { display: none; }
   .side-foot { margin: 0 0 0 auto; padding: 0 4px; white-space: nowrap; }
   .side-foot p { margin: 0; }
@@ -334,10 +334,27 @@ a.buttonlike:hover { border-color: var(--muted); }
   .acct > :nth-child(n+3), .sess > :nth-child(n+3) { grid-column: 2; }
   .acct .actions { justify-content: flex-start; }
   .card { overflow-x: auto; }
-  .card td, .card th { white-space: nowrap; }
+  /* A table with headings becomes one card a row, each cell under its heading's name. */
+  .card table:has(thead) thead { display: none; }
+  .card table:has(thead), .card table:has(thead) tbody, .card table:has(thead) tr, .card table:has(thead) td { display: block; width: auto; }
+  .card table:has(thead) tr { padding: 10px 0; border-top: 1px solid var(--line); }
+  .card table:has(thead) tr:first-child { border-top: 0; padding-top: 0; }
+  .card table:has(thead) td { border: 0 !important; padding: 2px 0; text-align: left; overflow-wrap: anywhere; }
+  .card table:has(thead) td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 96px; margin-right: 8px; color: var(--muted); font-size: 12px; }
   /* Big enough for a thumb, and for iOS not to zoom in on focus. */
-  button, select, a.buttonlike, input:not([type="checkbox"]):not([type="radio"]) { min-height: 36px; }
+  button, select, a.buttonlike, input:not([type="checkbox"]):not([type="radio"]) { min-height: 44px; }
+  a.buttonlike { display: inline-flex; align-items: center; }
+  .side-foot a { display: inline-flex; align-items: center; min-height: 44px; }
   input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px; max-width: 100%; }
   .indent { margin-left: 0; }
   #toasts { left: 12px; right: 12px; max-width: none; }
+}
+
+/* A field's name sits above it, and stays there once the field is filled. */
+.field { display: inline-flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); font-weight: 500; }
+/* A passing note is ink on paper like the rest: `.ok` elsewhere means a green tick. */
+.toast.ok { color: var(--bg); }
+@media (max-width: 720px) {
+  .seg { display: flex; flex-wrap: wrap; max-width: 100%; }
+  dialog .callout { overflow-x: visible; }
 }

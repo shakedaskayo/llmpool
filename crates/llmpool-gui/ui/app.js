@@ -233,23 +233,26 @@ function addAgent() {
     <p class="muted">An agent that is not listed: describe it in <code>harnesses.toml</code> (see <code>llmpool agents</code>), or give it an API key.</p>`;
 }
 
+// A field with its name above it, where it stays once the field is filled.
+const field = (label, control) => `<label class="field"><span>${esc(label)}</span>${control}</label>`;
+
 // A key for any provider; the agent reads it from its environment.
 function addKey() {
   const known = state.providers.find((p) => p.name === state.keyProvider);
   const options = state.providers.map((p) => `<option value="${esc(p.name)}"${p.name === state.keyProvider ? " selected" : ""}>${esc(p.title)}</option>`).join("");
   const fields = known
-    ? known.env.map((name) => `<input class="wide keyvar" data-var="${esc(name)}" type="${SECRET_VAR.test(name) ? "password" : "text"}" autocomplete="off" placeholder="${esc(name)}" aria-label="${esc(name)}" />`).join("")
-    : `<input class="tags" id="key-provider" placeholder="provider, e.g. together" aria-label="Provider name, short and lowercase" />
-       <input class="wide" id="key-var" placeholder="variable, e.g. TOGETHER_API_KEY" aria-label="The environment variable the agent reads the key from" />
-       <input class="wide" id="key-value" type="password" autocomplete="off" placeholder="key" aria-label="The key" />`;
+    ? known.env.map((name) => field(name, `<input class="wide keyvar" data-var="${esc(name)}" type="${SECRET_VAR.test(name) ? "password" : "text"}" autocomplete="off" />`)).join("")
+    : `${field("Provider", `<input class="tags" id="key-provider" placeholder="e.g. together" />`)}
+       ${field("Variable the agent reads", `<input class="wide" id="key-var" placeholder="e.g. TOGETHER_API_KEY" />`)}
+       ${field("Key", `<input class="wide" id="key-value" type="password" autocomplete="off" />`)}`;
   return `<p class="muted">Works with any agent that reads its key from the environment (Codex CLI, OpenCode, Gemini CLI, Grok, Aider, your own scripts). The key is stored in your keychain and handed to the agent llmpool starts.</p>
     <div class="copy">
-      <select data-act="key-provider" aria-label="Provider">${options}<option value=""${known ? "" : " selected"}>Another provider…</option></select>
+      ${field("Provider", `<select data-act="key-provider">${options}<option value=""${known ? "" : " selected"}>Another provider…</option></select>`)}
       ${fields}
     </div>
     <div class="copy">
-      <input class="tags" id="key-label" placeholder="name (optional)" aria-label="Name for this account, optional" />
-      <input class="tags" id="key-tags" placeholder="tags, e.g. work" aria-label="Tags, comma separated, optional" />
+      ${field("Name (optional)", `<input class="tags" id="key-label" />`)}
+      ${field("Tags (optional)", `<input class="tags" id="key-tags" placeholder="e.g. work" />`)}
       <button class="primary" data-act="add-key">Add key</button>
     </div>`;
 }
@@ -458,10 +461,10 @@ function renderSessions() {
       const verdict = !a
         ? ""
         : a.error
-          ? `<div class="muted">advisor: ${esc(a.error)}</div>`
+          ? `<div class="muted">decision model: ${esc(a.error)}</div>`
           : a.switch == null
-            ? `<div class="muted">advisor: asking…</div>`
-            : `<div class="muted">advisor: ${Math.round(a.switch * 100)}% for switching${a.target ? ` to ${esc(a.target)}` : ""}${a.acted ? " · switched" : ""}</div>`;
+            ? `<div class="muted">decision model: asking…</div>`
+            : `<div class="muted">decision model: ${Math.round(a.switch * 100)}% for switching${a.target ? ` to ${esc(a.target)}` : ""}${a.acted ? " · switched" : ""}</div>`;
       const ask = state.config.advisor_enabled && state.config.has_key && s.store ? ` <button class="quiet" data-act="advise" data-id="${esc(s.id)}">Ask advisor</button>` : "";
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
       const agent = isClaude ? "Claude Code" : agentTitle(s.agent);
@@ -967,7 +970,7 @@ function renderServer() {
   const codes = (items) => (items?.length ? items.map((i) => `<code>${esc(i)}</code>`).join(" ") : `<span class="muted">none</span>`);
   const when = (at) => new Date(at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const members = v.members
-    .map((m) => `<tr><td><strong>${esc(m.email)}</strong>${m.email === v.you ? ` <span class="badge">you</span>` : ""}</td><td class="muted">${m.by_key ? "an API key, on this page" : "signed in"}</td><td class="muted">until ${esc(when(m.expires_at))}</td>
+    .map((m) => `<tr><td><strong>${esc(m.email)}</strong>${m.email === v.you ? ` <span class="badge">you</span>` : ""}</td><td class="muted">${m.by_key ? "an API key" : "their account"}</td><td class="muted">${esc(when(m.expires_at))}</td>
         <td class="actions"><button class="quiet danger" data-act="srv-revoke" data-email="${esc(m.email)}" data-confirm="Really sign them out?">Sign out everywhere</button></td></tr>`)
     .join("");
   const seats = v.seats.map((x) => `<tr><td><strong>${esc(x.account)}</strong></td><td>${esc(x.who)}</td><td class="muted">${plural(x.sessions, "session")}</td></tr>`).join("");
@@ -980,7 +983,7 @@ function renderServer() {
 
     <h3 class="section">Gateway</h3>
     <div class="card pad">
-      <label class="switch"><input type="checkbox" data-act="srv-gateway"${v.settings.gateway ? " checked" : ""} />
+      <label class="switch"><input type="checkbox" data-act="srv-gateway" data-confirm="This changes how every member's agents connect. Press again to go ahead."${v.settings.gateway ? " checked" : ""} />
         <span><strong>Send members' requests through this server</strong><br /><span class="muted">On, no login or key leaves the server: members' agents talk to <code>${esc(v.gateway.base)}/&lt;provider&gt;</code> with their own session, and each request runs on an account chosen here. When one fills up or is refused, the next request runs on another, with nothing to restart. Off, accounts are lent to members' machines instead.</span></span></label>
       ${v.settings.gateway ? `<div class="copy indent"><button data-act="goto-requests">Open requests</button><span class="muted">${v.gateway.recent.length ? `${v.gateway.recent.length >= 200 ? "200+" : v.gateway.recent.length} recorded` : "none yet; members get the gateway the next time their llmpool syncs"} · every request is one line in <code>gateway-traces.log</code>: who, account, model, tokens, time. Never what was said.</span></div>` : ""}
     </div>
@@ -989,10 +992,10 @@ function renderServer() {
     <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="advisor"${state.config.advisor_enabled ? " checked" : ""} />
         <span><strong>Let a decision model place heavy use</strong><br /><span class="muted">When a member's account passes half of a window and there is another to choose, the server shows the model the whole pool, with how many members are on each account, and asks where that member's requests should go next. Accounts are named by letter; nothing that was said is sent. It is asked after a request has been answered, never on its time, and its choice holds for ten minutes. Off, the fixed rules place every request.</span></span></label>
-      <p class="indent">${state.config.has_key ? `<span class="ok" aria-hidden="true">✓</span> A key is stored on the server. <button class="quiet danger" data-act="key-clear">Forget it</button>` : `<span class="warnmark" aria-hidden="true">⚠</span> No key yet.`}
+      <p class="indent">${state.config.has_key ? `<span class="ok" aria-hidden="true">✓</span> A key is stored on the server. <button class="quiet danger" data-act="key-clear" data-confirm="Really forget it?">Forget it</button>` : `<span class="warnmark" aria-hidden="true">⚠</span> No key yet.`}
         <span class="muted"> · ${esc(state.config.calls_today ?? 0)} of ${esc(state.config.max_calls_per_day ?? 200)} questions used today</span></p>
       <div class="copy indent">
-        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${state.config.has_key ? "replace the key" : "Jev API key"}" aria-label="Decision model API key" />
+        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${state.config.has_key ? "replace the key" : "API key for Jev"}" aria-label="API key for Jev, the decision model" />
         <button data-act="key-save">Save key</button>
         <button class="quiet" data-act="goto-requests">See its decisions</button>
       </div>
@@ -1011,7 +1014,7 @@ function renderServer() {
     </div>
 
     <h3 class="section">Members <span class="count">${v.members.length}</span></h3>
-    <div class="card pad">${members ? `<table><caption class="skip">Members with a session</caption><tbody>${members}</tbody></table>` : `<span class="muted">Nobody is signed in. Members who connect with an API key do not appear here; their use shows below.</span>`}</div>
+    <div class="card pad">${members ? `<table><caption class="skip">Members with a session</caption><thead><tr><th>Member</th><th>Signed in with</th><th>Session ends</th><th></th></tr></thead><tbody>${members}</tbody></table>` : `<span class="muted">Nobody is signed in. Members who connect with an API key do not appear here; their use shows below.</span>`}</div>
 
     <h3 class="section">In use now</h3>
     <div class="card pad">${seats ? `<table><caption class="skip">Accounts members are running on</caption><tbody>${seats}</tbody></table>` : `<span class="muted">No member is running on a lent account right now.</span>`}</div>
@@ -1054,15 +1057,15 @@ function renderSettings() {
       <p class="indent"><label>Counts as having room below <input class="num" type="number" min="1" max="100" data-act="own-until" value="${esc(c.own_until ?? 85)}" /> % used</label></p>
     </div>
 
-    <h3 class="section">Advisor <span class="badge">optional</span></h3>
+    <h3 class="section">Decision model <span class="badge">optional</span></h3>
     <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="advisor"${c.advisor_enabled ? " checked" : ""} />
-        <span><strong>Let a decision model advise on switching</strong><br /><span class="muted">When an account passes half of a window, llmpool sends Jev a small picture of the pool, with accounts named by letter only, and asks whether to switch and where to. It acts only when the model is sure enough, and never outside your rules' limits. Off, your rules decide alone.</span></span></label>
+        <span><strong>Let a decision model advise on switching</strong><br /><span class="muted">When an account passes half of a window, llmpool sends the decision model (Jev) a small picture of the pool, with accounts named by letter only, and asks whether to switch and where to. It acts only when the model is sure enough, and never outside your rules' limits. Off, your rules decide alone.</span></span></label>
       <p class="indent"><label>Act when it is at least <input class="num" type="number" min="50" max="100" data-act="switch-above" value="${esc(Math.round((c.switch_above ?? 0.7) * 100))}" /> % sure</label>
         <span class="muted"> · ${esc(c.calls_today ?? 0)} of ${esc(c.max_calls_per_day ?? 200)} questions used today</span></p>
-      <p class="indent">${c.has_key ? `<span class="ok">✓</span> A key is stored in your keychain. <button class="quiet danger" data-act="key-clear">Forget it</button>` : `<span class="warnmark">⚠</span> No key yet.`}</p>
+      <p class="indent">${c.has_key ? `<span class="ok">✓</span> A key is stored in your keychain. <button class="quiet danger" data-act="key-clear" data-confirm="Really forget it?">Forget it</button>` : `<span class="warnmark">⚠</span> No key yet.`}</p>
       <div class="copy indent">
-        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${c.has_key ? "replace the key" : "Jev API key"}" aria-label="Advisor API key" />
+        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${c.has_key ? "replace the key" : "API key for Jev"}" aria-label="API key for Jev, the decision model" />
         <button data-act="key-save">Save key</button>
       </div>
     </div>
@@ -1088,7 +1091,7 @@ async function settingsAction(el) {
   const put = (change, ok) => attempt(() => api("PUT", "/config", change), ok);
   if (act === "prefer-own") await put({ prefer_own: el.checked }, el.checked ? "Your own account comes first" : "All accounts are treated alike");
   if (act === "own-until") await put({ own_until: Number(el.value) }, "Saved");
-  if (act === "advisor") await put({ advisor_enabled: el.checked }, el.checked ? "The advisor is on" : "The advisor is off; your rules decide alone");
+  if (act === "advisor") await put({ advisor_enabled: el.checked }, el.checked ? "The decision model is on" : "The decision model is off; your rules decide alone");
   if (act === "switch-above") await put({ switch_above: Number(el.value) / 100 }, "Saved");
   if (act === "key-save") {
     const key = $("advisor-key").value.trim();
@@ -1273,7 +1276,14 @@ for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
       // The control that had focus has it again in the new drawing.
       const had = page.contains(document.activeElement) ? document.activeElement : null;
       const key = had && ["act", "id", "email", "i", "name"].map((k) => had.dataset[k] ?? "").join("|");
+      const typed = new Map([...page.querySelectorAll("dialog input, dialog textarea")].filter((el) => el.value && (el.id || el.dataset.var)).map((el) => [el.id || el.dataset.var, el.value]));
       html.set.call(page, (last = next));
+      for (const el of page.querySelectorAll("dialog input, dialog textarea")) if (!el.value && typed.has(el.id || el.dataset.var)) el.value = typed.get(el.id || el.dataset.var);
+      // On a phone a row is a card: each cell says which column it was.
+      for (const table of page.querySelectorAll("table:has(thead)")) {
+        const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+        for (const row of table.tBodies[0]?.rows ?? []) [...row.cells].forEach((cell, i) => heads[i] && (cell.dataset.label = heads[i]));
+      }
       if (had?.dataset.act) [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
     },
   });
@@ -1283,10 +1293,16 @@ $("main").addEventListener("input", (e) => e.target.matches('input:not([type="ch
 document.addEventListener(
   "click",
   (e) => {
-    const el = e.target.closest?.("button[data-confirm]");
+    const el = e.target.closest?.("button[data-confirm], input[data-confirm]");
     if (!el || el.dataset.armed === "yes") return;
     e.stopImmediatePropagation();
     e.preventDefault();
+    if (el.tagName === "INPUT") {
+      // A switch has no words of its own to change: say it beside it.
+      el.dataset.armed = "yes";
+      toast(el.dataset.confirm);
+      return setTimeout(() => el.isConnected && (el.dataset.armed = ""), 5000);
+    }
     const was = el.textContent;
     el.dataset.armed = "yes";
     el.textContent = el.dataset.confirm;
