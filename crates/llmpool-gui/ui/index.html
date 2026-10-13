@@ -21,7 +21,7 @@
     <div class="app">
       <nav class="side" aria-label="Sections">
         <h1><span class="mark" aria-hidden="true"></span>llmpool</h1>
-        <div role="tablist" aria-orientation="vertical" aria-label="Sections" id="tabs">
+        <div role="tablist" aria-orientation="vertical" aria-label="Pages" id="tabs">
           <button role="tab" id="tab-pool" aria-controls="pool" aria-selected="true"><svg class="icon" aria-hidden="true"><use href="#i-pool" /></svg><span>Accounts</span><span class="count" id="n-pool"></span></button>
           <button role="tab" id="tab-sessions" aria-controls="sessions" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-sessions" /></svg><span>Sessions</span><span class="count" id="n-sessions"></span></button>
           <button role="tab" id="tab-policies" aria-controls="policies" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-rules" /></svg><span>Rules</span><span class="count" id="n-policies"></span></button>
@@ -35,6 +35,7 @@
         </div>
       </nav>
       <main id="main">
+        <div id="offline" class="callout bad" role="alert" hidden></div>
         <section id="pool" role="tabpanel" aria-labelledby="tab-pool" tabindex="0"></section>
         <section id="sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="0" hidden></section>
         <section id="policies" role="tabpanel" aria-labelledby="tab-policies" tabindex="0" hidden></section>

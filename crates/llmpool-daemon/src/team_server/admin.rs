@@ -33,9 +33,16 @@ window.__TAURI__ = {
 /// our pages run no script written into them.
 const JOIN_JS: &str = r#"for (const button of document.querySelectorAll("button[data-copy]")) {
   button.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(document.getElementById(button.dataset.copy).textContent);
+    const line = document.getElementById(button.dataset.copy);
     const was = button.textContent;
-    button.textContent = "Copied";
+    try {
+      await navigator.clipboard.writeText(line.textContent);
+      button.textContent = "Copied";
+    } catch {
+      // No clipboard without https: leave the line selected, ready to copy.
+      getSelection().selectAllChildren(line);
+      button.textContent = "Selected: now copy it";
+    }
     setTimeout(() => (button.textContent = was), 1600);
   });
 }"#;

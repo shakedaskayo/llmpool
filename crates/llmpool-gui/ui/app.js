@@ -47,14 +47,28 @@ const short = (path) => (state.schema.home && path.startsWith(state.schema.home)
 // Activity lines as a person would say them: no prefix, home as `~`.
 const tidy = (message) => (state.schema.home ? message.replaceAll(state.schema.home, "~") : message).replace(/^llmpool: /, "");
 
+// How long something took, in the unit a person would say it in.
+const took = (ms) => (ms == null ? "–" : ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`);
+
+// A browser's own words for a dead connection help nobody.
+const unreachable = (e) => `⚠ ${/failed to fetch|networkerror|load failed/i.test(String(e)) ? "Cannot reach llmpool" : String(e).replace(/^Error: /, "")}`;
+
 // ---- feedback ---------------------------------------------------------------
 
 function toast(text, kind = "ok") {
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
   el.textContent = String(text).replace(/^Error: /, "");
+  // What went wrong stays until it has been read; a press puts it away.
+  if (kind === "error") {
+    el.setAttribute("role", "alert");
+    el.tabIndex = 0;
+    el.title = "Dismiss";
+    el.addEventListener("click", () => el.remove());
+    el.addEventListener("keydown", (e) => ["Enter", " ", "Escape"].includes(e.key) && el.remove());
+  }
   $("toasts").append(el);
-  setTimeout(() => el.remove(), kind === "error" ? 9000 : 4000);
+  setTimeout(() => el.remove(), kind === "error" ? 60000 : 4000);
 }
 
 async function attempt(work, success) {
@@ -69,6 +83,8 @@ async function attempt(work, success) {
 }
 
 async function copy(text) {
+  // Browsers only hand out the clipboard over https; say what to do instead.
+  if (!navigator.clipboard) return toast("This page cannot reach the clipboard here: select the text and copy it.", "error");
   await attempt(() => navigator.clipboard.writeText(text), "Copied");
 }
 
@@ -166,8 +182,8 @@ function issuesPanel() {
     .map((issue, i) => {
       const label = { add_current: "Add this login to the pool", login: issue.email ? `Sign in as ${issue.email}` : "Sign in" }[issue.action];
       const button = label ? `<div class="copy"><button class="primary" data-act="fix" data-i="${i}">${esc(label)}</button></div>` : "";
-      const command = issue.action === "install" ? `<div class="copy"><button class="primary" data-act="goto-setup">Set up llmpool on this Mac</button></div>` : "";
-      return `<div class="callout bad" role="alert"><strong>⚠ ${esc(issue.text)}</strong>${button}${command}</div>`;
+      const command = issue.action === "install" ? `<div class="copy"><button class="primary" data-act="goto-setup">Open Settings to set it up</button></div>` : "";
+      return `<div class="callout bad" role="alert"><strong>⚠ ${esc(issue.text).replace(/`([^`]+)`/g, "<code>$1</code>")}</strong>${button}${command}</div>`;
     })
     .join("");
 }
@@ -291,7 +307,7 @@ function statTiles() {
     ${tile(state.sessions.length, state.sessions.length === 1 ? "session" : "sessions")}
     ${free == null ? tile("–", "5-hour allowance free") : tile(`${Math.round(free)}%`, "5-hour allowance free", free < 15 ? "bad" : free < 35 ? "warn" : "ok")}
     ${tile(near, "near the limit", near ? "warn" : "")}
-    ${tile(state.stats.switches_24h ?? 0, "switches today")}
+    ${tile(state.stats.switches_24h ?? 0, "switches, last 24 h")}
   </div>`;
 }
 
@@ -309,7 +325,7 @@ function accountCard(a) {
   const actions = a.shared
     ? `<span class="muted">managed by your team</span>`
     : `${a.health !== "ok" && !SERVER ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
-       ${!SERVER && state.team.state === "connected" && state.team.admin ? `<button class="quiet" data-act="share" data-id="${esc(a.id)}" title="${a.kind === "oauth" ? "Moves this login to the team's pool; you then get it from there" : "Copies this key to the team's pool"}" aria-label="Add ${esc(a.label)} to the team's pool">Share with team</button>` : ""}
+       ${!SERVER && state.team.state === "connected" && state.team.admin ? `<button class="quiet" data-act="share" data-id="${esc(a.id)}" ${a.kind === "oauth" ? `data-confirm="Move it to the team?"` : ""} title="${a.kind === "oauth" ? "Moves this login to the team's pool; you then get it from there" : "Copies this key to the team's pool"}" aria-label="Add ${esc(a.label)} to the team's pool">Share with team</button>` : ""}
        <button class="quiet" data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
        <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`;
   return `<li class="card acct${live ? "" : " off"}">
@@ -393,8 +409,8 @@ function renderRequests() {
       ${tile(n(t.requests), "requests")}
       ${tile(n(t.input_tokens), "tokens in")}
       ${tile(n(t.output_tokens), "tokens out")}
-      ${tile(t.p50_ms == null ? "–" : `${n(t.p50_ms)} ms`, `typical · ${t.p95_ms == null ? "–" : n(t.p95_ms) + " ms"} slowest 5%`)}
-      ${tile(n(t.failed), `failed · ${n(t.moved)} moved to another account`, t.failed ? "warn" : "")}
+      ${tile(took(t.p50_ms), `median time · ${took(t.p95_ms)} for the slowest 5%`)}
+      ${tile(n(t.failed), `failed · ${n(t.moved)} retried on another account`, t.failed ? "warn" : "")}
     </div>
     <div class="card pad chart"><h3>Requests a minute, last hour</h3>
       <svg viewBox="0 0 600 46" preserveAspectRatio="none" role="img" aria-label="Requests per minute over the last hour, ${n(r.per_minute.reduce((a, b) => a + b, 0))} in all, at most ${peak} in a minute">${bars}</svg></div>
@@ -897,7 +913,7 @@ function teamPanel() {
       <p class="muted">The team's accounts and rules arrive read-only. Its rules are tried before yours; your own account still comes first if Settings says so.</p>
       <div class="copy"><button data-act="team-sync">Sync now</button>
         ${t.message ? `<button class="primary" data-act="team-again">Connect again</button>` : ""}
-        <button class="quiet danger" data-act="team-leave">Leave the team's pool</button></div>`;
+        <button class="quiet danger" data-act="team-leave" data-confirm="Really leave?">Leave the team's pool</button></div>`;
   }
   if (t.state === "waiting") {
     return `<p role="status"><strong>◌ Waiting for you to finish signing in in your browser…</strong></p>
@@ -952,7 +968,7 @@ function renderServer() {
   const when = (at) => new Date(at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const members = v.members
     .map((m) => `<tr><td><strong>${esc(m.email)}</strong>${m.email === v.you ? ` <span class="badge">you</span>` : ""}</td><td class="muted">${m.by_key ? "an API key, on this page" : "signed in"}</td><td class="muted">until ${esc(when(m.expires_at))}</td>
-        <td class="actions"><button class="quiet danger" data-act="srv-revoke" data-email="${esc(m.email)}">Sign out everywhere</button></td></tr>`)
+        <td class="actions"><button class="quiet danger" data-act="srv-revoke" data-email="${esc(m.email)}" data-confirm="Really sign them out?">Sign out everywhere</button></td></tr>`)
     .join("");
   const seats = v.seats.map((x) => `<tr><td><strong>${esc(x.account)}</strong></td><td>${esc(x.who)}</td><td class="muted">${plural(x.sessions, "session")}</td></tr>`).join("");
   const audit = v.audit
@@ -1234,12 +1250,57 @@ async function sessionAction(el) {
 const busy = () => {
   const active = document.activeElement;
   if (state.adding && state.addKind === "machine") return false;
-  return document.querySelector("dialog[open]") || (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName));
+  return (
+    document.querySelector("dialog[open]") ||
+    (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName)) ||
+    // Something typed and not yet saved, or a press waiting for its second.
+    document.querySelector('main [data-dirty], main [data-armed="yes"]')
+  );
 };
+let redrawing = false;
+// A page whose content has not changed is left as it is: focus, scrolling and
+// a half-made choice all survive a refresh that found nothing new.
+for (const id of ["pool", "sessions", "agents", "team", "settings"]) {
+  const page = $(id);
+  const html = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML");
+  let last;
+  Object.defineProperty(page, "innerHTML", {
+    get: () => html.get.call(page),
+    set: (next) => {
+      // Asked for outright, it is drawn afresh: an action may have left a
+      // control in a state only a new drawing clears.
+      if (next === last && !redrawing) return;
+      // The control that had focus has it again in the new drawing.
+      const had = page.contains(document.activeElement) ? document.activeElement : null;
+      const key = had && ["act", "id", "email", "i", "name"].map((k) => had.dataset[k] ?? "").join("|");
+      html.set.call(page, (last = next));
+      if (had?.dataset.act) [...page.querySelectorAll(`[data-act="${had.dataset.act}"]`)].find((el) => ["act", "id", "email", "i", "name"].map((k) => el.dataset[k] ?? "").join("|") === key)?.focus();
+    },
+  });
+}
+$("main").addEventListener("input", (e) => e.target.matches('input:not([type="checkbox"]), textarea') && (e.target.value ? (e.target.dataset.dirty = "yes") : delete e.target.dataset.dirty));
+// A second press for what cannot be taken back with one.
+document.addEventListener(
+  "click",
+  (e) => {
+    const el = e.target.closest?.("button[data-confirm]");
+    if (!el || el.dataset.armed === "yes") return;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    const was = el.textContent;
+    el.dataset.armed = "yes";
+    el.textContent = el.dataset.confirm;
+    setTimeout(() => el.isConnected && ((el.dataset.armed = ""), (el.textContent = was)), 5000);
+  },
+  true,
+);
 
 function renderSummary() {
   const free = state.stats.headroom_5h == null ? "" : `${Math.round(state.stats.headroom_5h)}% of the 5-hour allowance free`;
   $("summary").textContent = state.offline ?? (free || "llmpool is running");
+  // Old numbers must not pass for live ones, on a phone least of all.
+  $("offline").hidden = !state.offline;
+  if (state.offline) $("offline").textContent = `${state.offline} · ${state.loadedAt ? `showing what was loaded at ${state.loadedAt}` : "nothing has loaded yet"}; trying again every few seconds.`;
   $("summary").className = state.offline ? "offline" : "muted online";
   const problems = (SERVER ? 0 : state.issues.length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
@@ -1301,18 +1362,21 @@ async function refresh(force = false) {
       }
     }
     state.offline = null;
+    state.loadedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch (e) {
-    state.offline = `⚠ ${String(e).replace(/^Error: /, "")}`;
+    state.offline = unreachable(e);
     return renderSummary();
   }
   renderSummary();
   // Redrawing would take the field out from under someone using it.
   if (force || !busy()) {
+    redrawing = Boolean(force);
     renderPool();
     renderSessions();
     renderAgents();
     renderTeam();
     renderSettings();
+    redrawing = false;
   }
 }
 
@@ -1326,18 +1390,22 @@ function selectTab(tab) {
     $(t.getAttribute("aria-controls")).hidden = !on;
   }
   tab.focus();
+  tab.scrollIntoView({ inline: "nearest", block: "nearest" });
   // A new page starts at its top, whichever of the two is scrolling.
   $("main").scrollTop = 0;
   window.scrollTo(0, 0);
 }
 $("tabs").addEventListener("click", (e) => e.target.closest('[role="tab"]') && selectTab(e.target.closest('[role="tab"]')));
 const go = (name) => selectTab($(`tab-${name}`));
+// A server shows fewer pages; the hidden ones are not there for keys either.
+const shown = () => tabs.filter((t) => !t.hidden);
 $("tabs").addEventListener("keydown", (e) => {
-  const at = tabs.indexOf(document.activeElement);
-  const next = { ArrowDown: at + 1, ArrowUp: at - 1, ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  const live = shown();
+  const at = live.indexOf(document.activeElement);
+  const next = { ArrowDown: at + 1, ArrowUp: at - 1, ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: live.length - 1 }[e.key];
   if (at < 0 || next === undefined) return;
   e.preventDefault();
-  selectTab(tabs[(next + tabs.length) % tabs.length]);
+  selectTab(live[(next + live.length) % live.length]);
 });
 
 $("pool").addEventListener("click", (e) => {
@@ -1387,7 +1455,9 @@ $("policies").addEventListener("input", (e) => e.target.matches("textarea[data-a
 // Keys inside the window: ⌘1–3 sections, ⌘S save rules, ⌘R refresh.
 window.addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-  const tab = tabs[Number(e.key) - 1];
+  // In a browser, reload and the tab numbers are the browser's.
+  if (SERVER && e.key !== "s") return;
+  const tab = shown()[Number(e.key) - 1];
   if (tab) {
     e.preventDefault();
     selectTab(tab);
@@ -1429,7 +1499,7 @@ if (SERVER) {
 }
 
 // A section can be opened by address: `#sessions`, `#team`, ...
-const fromHash = () => $(`tab-${location.hash.slice(1)}`) && go(location.hash.slice(1));
+const fromHash = () => shown().includes($(`tab-${location.hash.slice(1)}`)) && go(location.hash.slice(1));
 window.addEventListener("hashchange", fromHash);
 fromHash();
 
@@ -1441,7 +1511,7 @@ window.addEventListener("beforeunload", (e) => state.dirty && e.preventDefault()
     state.schema = await api("GET", "/policies/schema");
     await loadPolicy();
   } catch (e) {
-    state.offline = `⚠ ${String(e).replace(/^Error: /, "")}`;
+    state.offline = unreachable(e);
   }
   await refresh(true);
   renderPolicies();

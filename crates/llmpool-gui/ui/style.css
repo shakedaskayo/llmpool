@@ -55,7 +55,7 @@ body { margin: 0; background: var(--bg); color: var(--text); -webkit-font-smooth
 .skip { position: absolute; left: -999px; }
 .skip:focus { left: 8px; top: 8px; background: var(--surface); padding: 6px 10px; z-index: 10; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-[role="tabpanel"]:focus { outline: none; }
+[role="tabpanel"]:focus:not(:focus-visible) { outline: none; }
 
 /* ---- frame ------------------------------------------------------------------ */
 
@@ -121,7 +121,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--line-strong); color: var(--text); font-weight: 600; }
 
 select, input, textarea { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 4px 9px; min-height: 30px; }
-input::placeholder { color: color-mix(in srgb, var(--muted) 75%, transparent); }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 input[type="checkbox"] { min-height: 0; accent-color: var(--accent); }
 input.tags { width: 118px; }
 input.wide { width: 230px; }
@@ -154,7 +154,6 @@ ul.cards > .card:hover { background: color-mix(in srgb, var(--text) 3%, transpar
 .acct .actions { display: flex; justify-content: flex-end; gap: 2px; white-space: nowrap; }
 /* Always there, for the keyboard and for anyone who has not hovered yet;
    quiet until the row is the one being looked at. */
-.acct .actions button.quiet { opacity: 0.55; }
 .acct:hover .actions button.quiet, .acct:focus-within .actions button.quiet, .acct.off .actions button.quiet { opacity: 1; }
 
 .avatar { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: hsl(var(--h) 55% 90%); color: hsl(var(--h) 55% 28%); }
@@ -275,7 +274,7 @@ pre.log { margin: 10px 0 0; padding: 10px; background: var(--sunken); border: 1p
 
 #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; max-width: 420px; z-index: 5; }
 .toast { background: var(--text); color: var(--bg); border: 0; border-radius: 10px; padding: 9px 14px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25); font-weight: 500; }
-.toast.error { background: var(--bad); color: #fff; }
+.toast.error { background: #c0271f; color: #fff; cursor: pointer; }
 
 .avatar.brand { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); border: 0; }
 .agentname { display: flex; align-items: center; gap: 10px; }
@@ -324,6 +323,11 @@ a.buttonlike:hover { border-color: var(--muted); }
   .side-foot { margin: 0 0 0 auto; padding: 0 4px; white-space: nowrap; }
   .side-foot p { margin: 0; }
   #summary, .keys:not(:has(#sign-out)) { display: none; }
+  /* The way out stays in reach however far the pages scroll. */
+  .side-foot { position: sticky; right: 0; background: var(--side); padding-left: 10px; }
+  [role="tablist"] { padding-right: 8px; }
+  input[type="checkbox"] { width: 20px; height: 20px; }
+  .acct .actions { gap: 14px; }
   main { overflow: visible; padding: 18px 16px 36px; }
   .head { flex-wrap: wrap; }
   .acct, .sess { grid-template-columns: 32px minmax(0, 1fr); row-gap: 8px; }
