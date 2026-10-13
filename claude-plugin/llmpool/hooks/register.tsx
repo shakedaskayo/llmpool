@@ -15,6 +15,7 @@ import {
   miniBar,
   peak,
   percentText,
+  quick,
   resetsIn,
   spark,
   stateMark,
@@ -37,6 +38,7 @@ const WARN_AT = 80
 
 const EMPTY: Snapshot = {
   session: null,
+  pickedBy: null,
   rows: [],
   others: [],
   error: null,
@@ -45,6 +47,11 @@ const EMPTY: Snapshot = {
   stats: { headroom5: null, headroom7: null, switches24h: 0, lastSwitch: null },
 }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
+
+// The quick-switch row and the pane opening by itself can each be turned off
+// with `/llmpool row off` and `/llmpool pane off`; the choice is remembered.
+let showRow = true
+let autoPane = true
 
 // What the last look at a sign-in said, so its ending is announced once.
 let lastLogin = 'idle'
@@ -131,6 +138,20 @@ const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE, foc
 
 /** `/llmpool next`, `/llmpool add`, `/llmpool <account>`: act without the pane. */
 const byCommand = async ($: EngineInterface, wanted: string): Promise<string> => {
+  const toggle = wanted.match(/^(row|pane) (on|off)$/)
+  if (toggle) {
+    const isOn = toggle[2] === 'on'
+    if (toggle[1] === 'row') {
+      showRow = isOn
+    } else {
+      autoPane = isOn
+    }
+    await $.store.set(toggle[1] === 'row' ? 'showRow' : 'autoPane', isOn)
+
+    return toggle[1] === 'row'
+      ? `The quick-switch row above the prompt is ${isOn ? 'on' : 'off'}.`
+      : `The accounts pane ${isOn ? 'opens' : 'no longer opens'} by itself on wide terminals.`
+  }
   if (wanted === 'add' || wanted === 'login') {
     await signIn($, null)
 
@@ -152,9 +173,17 @@ export const register: Register = on => {
     await $.command.register({
       name: 'llmpool',
       description: 'Accounts and usage; switch this session, or sign in to another account',
-      argumentHint: '[next | add | <account>]',
+      argumentHint: '[next | add | <account> | row on|off | pane on|off]',
     })
+    showRow = (await $.store.get('showRow')) !== false
+    autoPane = (await $.store.get('autoPane')) !== false
     void refresh($)
+    // Where there is room beside the conversation, the dashboard is simply
+    // there. The engine seats an unasked pane only on wide terminals, and it
+    // does not take the focus.
+    if (autoPane) {
+      void $.ui.open({ id: PANE, title: TITLE })
+    }
     $.clock.every(WAITING_MS, async () => {
       // One timer, two paces: often while a sign-in waits, seldom otherwise.
       const waiting = (await read($, snapshot)).login.state === 'waiting'
@@ -222,23 +251,33 @@ export const register: Register = on => {
       )
     }
     const row = snap.rows.find(r => r.isCurrent)
-    if (!row || peak(row) < WARN_AT) {
+    const hot = row !== undefined && peak(row) >= WARN_AT
+    const offers = showRow || hot ? quick(snap) : []
+    // Nothing pressing and nowhere to switch to: no row at all.
+    if (!hot && offers.length === 0) {
       return next(e)
     }
-    const full = fullest(row)
-    const tone = level(full.percent)
-    const target = snap.session === null ? undefined : best(snap)
+    const full = row === undefined ? null : fullest(row)
 
     return (
       <Box gap={1}>
-        <Text color={tone.color} bold>
-          ⚠ {row.label}: {Math.round(full.percent)}% of the {full.name} limit
-        </Text>
-        <Text dimColor>{resetsIn(full.resetAt, await $.clock.now())}</Text>
-        {target !== undefined && (
-          <Button key="band-switch" label={`Switch to ${target.label}`} onPress={() => use($, snap.session ?? '', target)} />
+        {hot && row !== undefined && full !== null ? (
+          <Text color={level(full.percent).color} bold>
+            ⚠ {row.label}: {Math.round(full.percent)}% of the {full.name} limit
+          </Text>
+        ) : (
+          <Text dimColor>⇄ switch to</Text>
         )}
-        <Button key="band-open" label="Accounts" onPress={() => void openPane($)} />
+        {hot && full !== null && <Text dimColor>{resetsIn(full.resetAt, await $.clock.now())}</Text>}
+        {offers.map((offer, index) => (
+          <Button
+            key={index === 0 ? 'band-switch' : `band-switch-${index}`}
+            hotkey={String(index + 1)}
+            label={`${offer.label} ${offer.h5 === null ? '' : `${Math.round(offer.h5)}%`}`.trim()}
+            onPress={() => use($, snap.session ?? '', offer)}
+          />
+        ))}
+        <Button key="band-open" hotkey="l" label="Accounts" onPress={() => void openPane($)} />
       </Box>
     )
   })
@@ -411,6 +450,7 @@ export const register: Register = on => {
                 ● {current.label}
               </Text>
               <Text color="success">this session</Text>
+              {snap.pickedBy !== null && <Text dimColor>· {snap.pickedBy}</Text>}
               {current.tags.length > 0 && <Text dimColor>{current.tags.map(tag => `#${tag}`).join(' ')}</Text>}
             </Box>
             {big('5h', current.h5, current.reset5)}

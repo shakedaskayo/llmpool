@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 // What `llmpool status --json` answers for a session on work-1 at 91%, with
 // one account to switch to, one disabled and one that needs a login.
 const STATUS = {
-  session: { id: 's1', account_id: 'a' },
+  session: { id: 's1', account_id: 'a', picked_by: 'rule "work repos"' },
   accounts: [
     { id: 'a', label: 'work-1', tags: ['work'], enabled: true, health: 'ok', sessions: ['s1'],
       // The clock in these tests reads 1_700_000_000: the 5-hour window is half over.
@@ -23,6 +23,8 @@ const STATUS = {
 // The test stands in for the host: these are the calls the mod makes that a
 // real session answers itself.
 const host = (on: any) => {
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
@@ -54,6 +56,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ type: 'Text', text: /┃/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /at this pace full in 1[45]m/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /▂▅█/ })).toBeDefined()
+    // Why this session is on this account.
+    expect(await ui.find({ type: 'Text', text: /rule "work repos"/ })).toBeDefined()
     // The pool as a whole.
     expect(await ui.find({ type: 'Text', text: /70% free/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /3 switches in the last 24h/ })).toBeDefined()
@@ -83,6 +87,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.command.run({ command: 'llmpool', args: '' } as never)
     const ui = await $.ui.mount({ plugin: 'llmpool', surface, component: 'AbovePrompt', props: {} as never })
     expect(await ui.find({ type: 'Text', text: /91% of the 5-hour limit/ })).toBeDefined()
+    // The way to the dashboard is on the row too.
+    expect(await ui.find({ key: 'band-open' })).toBeDefined()
     await ui.press({ key: 'band-switch' })
     expect(calls.some(argv => argv[1] === 'switch' && argv[2] === 'b')).toBe(true)
     await ui.unmount()
@@ -191,4 +197,34 @@ test('the way in is a tail on the hint line, and nothing is pinned twice', async
   await $.command.run({ command: 'llmpool', args: '' } as never)
   // The status line already shows the account; the mod must not pin a copy.
   expect(pinned).toEqual([])
+})
+
+test('with room to spare the row above the prompt is a quiet quick switch, and it can be turned off', async ($, on) => {
+  host(on)
+  const calm = { ...STATUS, accounts: STATUS.accounts.map(a => (a.id === 'a' ? { ...a, usage: { windows: { '5h': { used_percent: 20, resets_at: 1_700_009_000 } } } } : a)) }
+  const calls: string[][] = []
+  on('process.run', (_$, e) => {
+    calls.push([...e.argv].slice(1))
+
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? JSON.stringify(calm) : 'ok', stderr: '' } } as never
+  })
+  await $.command.run({ command: 'llmpool', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'llmpool', surface: 'terminal', component: 'AbovePrompt', props: {} as never })
+  // No warning, just the accounts one press away.
+  expect(await ui.find({ type: 'Text', text: /limit/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /switch to/ })).toBeDefined()
+  await ui.press({ key: 'band-switch' })
+  expect(calls).toContainEqual(['switch', 'b', '--session', 's1'])
+
+  const said = await $.command.run({ command: 'llmpool', args: 'row off' } as never)
+  expect(JSON.stringify(said)).toContain('row above the prompt is off')
+  // Turned off, the mod draws nothing there and hands the row back to the
+  // engine; in this kit nothing stands beneath it, which is how that shows.
+  let handedBack = ''
+  try {
+    await ui.redraw()
+  } catch (error) {
+    handedBack = String(error)
+  }
+  expect(handedBack).toContain('no implementation for ui.render')
 })

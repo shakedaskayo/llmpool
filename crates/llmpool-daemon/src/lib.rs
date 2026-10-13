@@ -84,6 +84,13 @@ pub struct Managed {
     /// Last notice queued, so a rule that keeps firing says it once.
     #[serde(default)]
     pub last_notice: Option<String>,
+    /// Why this session runs on the account it does, in words for the user:
+    /// which rule chose it, or that they did.
+    #[serde(default)]
+    pub picked_by: Option<String>,
+    /// Whether the session has been told which account it got.
+    #[serde(default)]
+    pub greeted: bool,
     /// Started as plain `claude`, not by `llmpool run`: it runs in the
     /// user's own profile and shares its login with every other such session.
     #[serde(default)]
@@ -287,6 +294,19 @@ fn status_line(account: &Account, colored: bool) -> String {
         }
     }
     line
+}
+
+/// How many running sessions each account carries.
+fn busy(g: &Inner) -> BTreeMap<AccountId, usize> {
+    let mut load = BTreeMap::new();
+    for id in
+        g.p.sessions
+            .values()
+            .filter_map(|m| m.session.account_id.as_ref())
+    {
+        *load.entry(id.clone()).or_insert(0) += 1;
+    }
+    load
 }
 
 /// When this machine started, in epoch seconds.
@@ -1039,6 +1059,7 @@ impl Daemon {
     ) -> Decision {
         let local = Local::now();
         let home = self.home.to_string_lossy();
+        let busy = busy(g);
         engine::evaluate(
             policy,
             event,
@@ -1051,6 +1072,7 @@ impl Daemon {
                 minute: local.minute() as u8,
                 home: &home,
                 rr_cursor: g.p.rr_cursor.as_deref(),
+                busy: &busy,
             },
         )
     }
@@ -1086,6 +1108,7 @@ impl Daemon {
             };
             let policy = PolicyFile::default();
             let home = self.home.to_string_lossy();
+            let load = busy(&g);
             let ctx = Context {
                 session: &session,
                 accounts: &accounts,
@@ -1095,6 +1118,7 @@ impl Daemon {
                 minute: 0,
                 home: &home,
                 rr_cursor: None,
+                busy: &load,
             };
             let _ = &policy;
             Some(
@@ -1102,6 +1126,7 @@ impl Daemon {
                     Pick::MostQuota,
                     select::candidates(&target, &ctx, None),
                     None,
+                    &load,
                 )
                 .ok_or_else(|| fail(409, format!("no usable account is tagged `{tag}`")))?
                 .clone(),
@@ -1139,6 +1164,13 @@ impl Daemon {
                 notices: Vec::new(),
                 last_notice: None,
                 native: false,
+                picked_by: match (&req.account, &req.tag, &rule) {
+                    (Some(_), _, _) => Some("you chose it".into()),
+                    (_, Some(tag), _) => Some(format!("most quota among accounts tagged {tag}")),
+                    (_, _, Some(rule)) => Some(format!("rule \"{rule}\"")),
+                    _ => None,
+                },
+                greeted: false,
                 last_seen: now(),
             },
         );
@@ -1171,6 +1203,9 @@ impl Daemon {
             Some(_) => {}
         }
         let env = self.attach(&mut g, sid, &account)?;
+        if let Some(m) = g.p.sessions.get_mut(sid) {
+            m.picked_by = Some("you picked it".into());
+        }
         self.save(&g);
         Ok(json!({"session_id": sid, "env": env, "account": account}))
     }
@@ -1324,6 +1359,7 @@ impl Daemon {
         {
             s.session.account_id = Some(to.id.clone());
             s.session.last_swap_at = Some(at);
+            s.picked_by = Some(reason.to_string());
             s.notices.push(text.clone());
             s.last_notice = Some(text.clone());
         }
@@ -1373,6 +1409,17 @@ impl Daemon {
             profile.write(&*self.keychain, &self.secret_of(&account.id)?)?;
             account.clone()
         };
+        let text = format!(
+            "llmpool: the login of {} was written afresh. Nothing else changed.",
+            account.label
+        );
+        for s in
+            g.p.sessions
+                .values_mut()
+                .filter(|s| s.store.as_ref() == Some(&store_id))
+        {
+            s.notices.push(text.clone());
+        }
         self.log(
             &mut g,
             "repair",
@@ -1568,6 +1615,8 @@ impl Daemon {
                 notices: Vec::new(),
                 last_notice: None,
                 native: true,
+                picked_by: Some("it is the login Claude Code uses".into()),
+                greeted: false,
                 last_seen: t,
             },
         );
@@ -1704,6 +1753,14 @@ impl Daemon {
                     m.agent_session_id = payload["session_id"].as_str().map(str::to_string);
                 }
                 let source = payload["source"].as_str().unwrap_or("startup").to_string();
+                // Told once, at the start, which account this session got and why.
+                let greeting = (!m.greeted).then(|| m.session.account_id.clone()).flatten().and_then(|id| {
+                    let label = g.store.get(&id).ok().flatten()?.label;
+                    let m = g.p.sessions.get_mut(sid)?;
+                    m.greeted = true;
+                    let why = m.picked_by.as_deref().map(|why| format!(" ({why})")).unwrap_or_default();
+                    Some(format!("llmpool: this session runs as {label}{why}. /llmpool shows usage and switches account."))
+                });
                 self.log(
                     &mut g,
                     "agent",
@@ -1711,6 +1768,9 @@ impl Daemon {
                     format!("Claude Code reported in ({source})"),
                 );
                 self.save(&g);
+                if let Some(text) = greeting {
+                    return json!({"systemMessage": text});
+                }
             }
             ("UserPromptSubmit", _) => {
                 let notices = std::mem::take(&mut m.notices);
@@ -1911,7 +1971,7 @@ impl Daemon {
             "triggers": triggers::all().iter().map(|t| json!({"kind": t.kind(), "fields": t.schema()})).collect::<Vec<_>>(),
             "conditions": ["cwd", "git_remote", "model", "account_tag"],
             "actions": ["assign", "swap", "ask", "notify", "hold"],
-            "picks": ["most_quota", "soonest_reset", "round_robin"],
+            "picks": ["most_quota", "least_busy", "soonest_reset", "round_robin"],
             "home": self.home,
         })
     }

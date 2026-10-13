@@ -48,6 +48,8 @@ export type Login = {
 export type Snapshot = {
   /** This session's llmpool id; null when llmpool does not manage it. */
   session: string | null
+  /** Why this session runs on its account: the rule that chose it, or "you chose it". */
+  pickedBy: string | null
   rows: Row[]
   others: { id: string; label: string; cwd: string }[]
   error: string | null

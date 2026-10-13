@@ -205,8 +205,9 @@ function renderSessions() {
             })
             .join("")}</select>`
         : `<span class="muted">your own login, not managed</span>`;
+      const why = s.picked_by ? `<div class="muted">${esc(s.picked_by)}</div>` : "";
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
-      return `<tr><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}</td>
+      return `<tr><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${why}</td>
         <td>${meter(s.usage, "5h", "5-hour window")}</td><td>${meter(s.usage, "7d", "7-day window")}</td></tr>`;
     })
     .join("");
@@ -237,16 +238,19 @@ const TRIGGER_LABELS = {
   auth_failed: "the login stops working",
   cwd_changed: "the directory changes",
   schedule: "the time is",
+  pressure: "usage is climbing fast",
 };
 const CONDITION_LABELS = { cwd: "directory matches", git_remote: "git remote matches", model: "model matches", account_tag: "current account is tagged" };
 const CONDITION_HINTS = { cwd: "~/work/acme/**", git_remote: "*github.com:acme/*", model: "*opus*", account_tag: "work" };
 const ACTION_LABELS = { assign: "use", swap: "switch to", ask: "ask me, among", notify: "only tell me", hold: "do nothing" };
-const PICK_LABELS = { most_quota: "with the most quota left", soonest_reset: "whose week resets soonest", round_robin: "next in turn" };
-const TRIGGER_EVENT = { usage_above: "usage_updated", schedule: "tick" };
+const PICK_LABELS = { least_busy: "used by the fewest sessions", most_quota: "with the most quota left", soonest_reset: "whose week resets soonest", round_robin: "next in turn" };
+const TRIGGER_EVENT = { usage_above: "usage_updated", pressure: "usage_updated", schedule: "tick" };
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 const TEMPLATES = {
   "Switch before the limit": { name: "switch before the limit", enabled: true, on: { usage_above: { window: "5h", percent: 90 } }, do: { swap: { tag: "same", pick: "most_quota" }, notify: true, hold: false } },
+  "Relieve a subscription under pressure": { name: "relieve pressure", enabled: true, on: { pressure: { window: "5h", full_within_minutes: 30, min_sessions: 2 } }, do: { swap: { pick: "least_busy" }, notify: true, hold: false } },
+  "Spread new sessions across accounts": { name: "spread sessions", enabled: true, on: "session_start", do: { assign: { pick: "least_busy" }, notify: false, hold: false } },
   "Switch when rate limited": { name: "switch when rate limited", enabled: true, on: "rate_limited", do: { swap: { pick: "most_quota" }, notify: true, hold: false } },
   "Use tagged accounts in a directory": { name: "work repos use work accounts", enabled: true, on: "session_start", when: { cwd: "~/work/**" }, do: { assign: { tag: "work", pick: "most_quota" }, notify: false, hold: false } },
   "Ask me when a session starts": { name: "ask at start", enabled: true, on: "session_start", do: { ask: { pick: "most_quota" }, notify: false, hold: false } },
@@ -272,6 +276,14 @@ function triggerControls(rule, i) {
     return `<input class="num" type="number" min="1" max="100" data-act="percent" data-i="${i}" value="${esc(params.percent ?? 90)}" aria-label="Percent used" />
       <span>% of the</span>
       <select data-act="window" data-i="${i}" aria-label="Usage window">${options(["5h", "7d"], params.window ?? "5h", { "5h": "5-hour window", "7d": "7-day window" })}</select>`;
+  if (kind === "pressure")
+    return `<span>: at this pace the</span>
+      <select data-act="p-window" data-i="${i}" aria-label="Usage window">${options(["5h", "7d"], params.window ?? "5h", { "5h": "5-hour window", "7d": "7-day window" })}</select>
+      <span>is full within</span>
+      <input class="num" type="number" min="1" data-act="p-minutes" data-i="${i}" value="${esc(params.full_within_minutes ?? 30)}" aria-label="Minutes until full" />
+      <span>minutes, with at least</span>
+      <input class="num" type="number" min="1" data-act="p-sessions" data-i="${i}" value="${esc(params.min_sessions ?? 1)}" aria-label="Sessions sharing the account" />
+      <span>session(s) on the account</span>`;
   if (kind === "schedule") {
     const days = params.days ?? [];
     return `<input type="time" data-act="at" data-i="${i}" value="${esc(params.at ?? "09:00")}" aria-label="Time of day" />
@@ -426,7 +438,14 @@ function typed(change) {
 }
 
 function setTrigger(rule, kind) {
-  rule.on = kind === "usage_above" ? { usage_above: { window: "5h", percent: 90 } } : kind === "schedule" ? { schedule: { at: "09:00" } } : kind;
+  rule.on =
+    kind === "usage_above"
+      ? { usage_above: { window: "5h", percent: 90 } }
+      : kind === "schedule"
+        ? { schedule: { at: "09:00" } }
+        : kind === "pressure"
+          ? { pressure: { window: "5h", full_within_minutes: 30, min_sessions: 2 } }
+          : kind;
   // `assign` only makes sense when a session starts, `swap` only after.
   const action = actionKind(rule);
   if (kind === "session_start" && action === "swap") setAction(rule, "assign");
@@ -522,6 +541,12 @@ async function policyAction(el) {
       return typed(() => (rule.on.usage_above.percent = Number(el.value)));
     case "window":
       return edit(() => (rule.on.usage_above.window = el.value));
+    case "p-window":
+      return edit(() => (rule.on.pressure.window = el.value));
+    case "p-minutes":
+      return typed(() => (rule.on.pressure.full_within_minutes = Number(el.value)));
+    case "p-sessions":
+      return typed(() => (rule.on.pressure.min_sessions = Number(el.value)));
     case "at":
       return typed(() => (rule.on.schedule.at = el.value));
     case "day":

@@ -51,6 +51,7 @@ pub fn all() -> Vec<Box<dyn Trigger>> {
         Box::new(OnEvent("cwd_changed", Event::CwdChanged)),
         Box::new(UsageAbove),
         Box::new(Schedule),
+        Box::new(Pressure),
     ]
 }
 
@@ -133,6 +134,90 @@ impl Trigger for Schedule {
             name: "at",
             kind: FieldKind::Text,
         }]
+    }
+
+    fn check(&self, params: &toml::Table) -> Result<(), String> {
+        Self::parse(params).map(|_| ())
+    }
+}
+
+/// Fires when an account is being spent so fast that its window will be full
+/// before it resets: `{ window = "5h", full_within_minutes = 30 }`. With
+/// `min_sessions = 2` only when that many sessions share the account, which is
+/// the case of several people or agents leaning on one subscription.
+struct Pressure;
+
+impl Pressure {
+    fn parse(params: &toml::Table) -> Result<(String, i64, f64, usize), String> {
+        if let Some(key) = params.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "window" | "full_within_minutes" | "min_sessions"
+            )
+        }) {
+            return Err(format!("`pressure` takes no parameter `{key}`"));
+        }
+        let (window, secs) = match params.get("window").map(|v| v.as_str()) {
+            None | Some(Some("5h")) => ("5h", 5 * 3600),
+            Some(Some("7d")) => ("7d", 7 * 24 * 3600),
+            _ => return Err("`pressure.window` must be \"5h\" or \"7d\"".into()),
+        };
+        let number = |key: &str, default: f64| match params.get(key) {
+            None => Ok(default),
+            Some(toml::Value::Integer(i)) => Ok(*i as f64),
+            Some(toml::Value::Float(f)) => Ok(*f),
+            Some(_) => Err(format!("`pressure.{key}` must be a number")),
+        };
+        let minutes = number("full_within_minutes", 30.0)?;
+        let sessions = number("min_sessions", 1.0)?;
+        if !(1.0..=10_000.0).contains(&minutes) || !(1.0..=1000.0).contains(&sessions) {
+            return Err(
+                "`pressure`: `full_within_minutes` and `min_sessions` must be at least 1".into(),
+            );
+        }
+        Ok((window.to_string(), secs, minutes, sessions as usize))
+    }
+}
+
+impl Trigger for Pressure {
+    fn kind(&self) -> &'static str {
+        "pressure"
+    }
+
+    fn matches(&self, params: &toml::Table, event: Event, ctx: &Context) -> bool {
+        let (Event::UsageUpdated, Ok((window, window_secs, minutes, sessions)), Some(current)) =
+            (event, Self::parse(params), ctx.current())
+        else {
+            return false;
+        };
+        let (used, Some(reset)) = (current.used(&window), current.reset(&window)) else {
+            return false;
+        };
+        let left = (reset - ctx.now) as f64;
+        let spent = window_secs as f64 - left;
+        // Too early in the window, or too little used, for the pace to mean anything.
+        if spent < 600.0 || used < 5.0 || left <= 0.0 || ctx.load(&current.id) < sessions {
+            return false;
+        }
+        let until_full = (100.0 - used) / (used / spent);
+        until_full < minutes * 60.0 && until_full < left
+    }
+
+    fn schema(&self) -> ParamSchema {
+        vec![
+            Field {
+                name: "window",
+                kind: FieldKind::Text,
+            },
+            Field {
+                name: "full_within_minutes",
+                kind: FieldKind::Text,
+            },
+            Field {
+                name: "min_sessions",
+                kind: FieldKind::Text,
+            },
+        ]
     }
 
     fn check(&self, params: &toml::Table) -> Result<(), String> {
@@ -279,6 +364,59 @@ mod tests {
             "days = ['mon']",
             "at = '09:00'\ndays = ['funday']",
             "at = '09:00'\nextra = 1",
+        ] {
+            assert!(t.check(&params(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pressure_fires_on_pace_not_on_a_fixed_percent() {
+        use crate::model::Window;
+        use std::collections::BTreeMap;
+        let t = find("pressure").unwrap();
+        // The fixture clock reads 1_000_000. Half of a 5-hour window is gone.
+        let reading = |used: f64| {
+            let mut a = account("a", &[], Some(used));
+            a.usage.as_mut().unwrap().windows.insert(
+                "5h".into(),
+                Window {
+                    used_percent: used,
+                    resets_at: Some(1_000_000 + 9000),
+                },
+            );
+            [a]
+        };
+        let s = session("/w", Some("a"));
+        let fires = |used: f64, text: &str, busy: &BTreeMap<String, usize>| {
+            let accounts = reading(used);
+            let mut c = ctx(&s, &accounts);
+            c.busy = busy;
+            t.matches(&params(text), Event::UsageUpdated, &c)
+        };
+        let one: BTreeMap<String, usize> = [("a".to_string(), 1)].into();
+        let two: BTreeMap<String, usize> = [("a".to_string(), 2)].into();
+        // 90% in half the window: full in about 17 minutes, well before the reset.
+        assert!(fires(90.0, "full_within_minutes = 30", &one));
+        assert!(!fires(90.0, "full_within_minutes = 10", &one));
+        // 40% in half the window lasts to the reset: no pressure, whatever the percent rule would say.
+        assert!(!fires(40.0, "full_within_minutes = 600", &one));
+        // Only when several sessions lean on the same account.
+        assert!(!fires(90.0, "min_sessions = 2", &one));
+        assert!(fires(90.0, "min_sessions = 2", &two));
+        // Too little used to judge a pace.
+        assert!(!fires(3.0, "full_within_minutes = 600", &one));
+
+        assert!(t
+            .check(&params(
+                "window = '7d'\nfull_within_minutes = 120\nmin_sessions = 2"
+            ))
+            .is_ok());
+        for bad in [
+            "window = '1h'",
+            "full_within_minutes = 0",
+            "min_sessions = 0",
+            "extra = 1",
+            "full_within_minutes = 'soon'",
         ] {
             assert!(t.check(&params(bad)).is_err(), "{bad}");
         }

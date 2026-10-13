@@ -677,7 +677,9 @@ fn a_plain_claude_session_is_adopted_and_can_be_switched() {
     w.daemon.put_policy(POLICY).unwrap();
     let payload = json!({"session_id": "agent-xyz", "cwd": "/work/api"});
 
-    assert_eq!(w.daemon.hook("-", "SessionStart", "", &payload), json!({}));
+    // A plain session is told at once which login it runs on.
+    let hello = w.daemon.hook("-", "SessionStart", "", &payload);
+    assert_eq!(hello["systemMessage"], "llmpool: this session runs as home@x.io (it is the login Claude Code uses). /llmpool shows usage and switches account.");
     let sessions = w.daemon.list_sessions().unwrap();
     assert_eq!(sessions[0]["account_label"], "home@x.io");
     assert_eq!(sessions[0]["native"], true);
@@ -1662,4 +1664,138 @@ fn usage_is_remembered_over_time_and_the_pool_is_summed_up() {
         .as_str()
         .unwrap()
         .contains("swap before the limit"));
+}
+
+// ---- knowing what you got, spreading load, pressure ---------------------------
+
+#[test]
+fn a_session_is_told_once_which_account_it_got_and_why() {
+    let w = world();
+    w.daemon.put_policy(POLICY).unwrap();
+    let reply = start(&w, "/work/api", None);
+    let sid = reply["session_id"].as_str().unwrap();
+    let got = reply["account"]["email"].as_str().unwrap();
+    let hello = w.daemon.hook(
+        sid,
+        "SessionStart",
+        "",
+        &json!({"session_id": "agent-1", "source": "startup"}),
+    );
+    assert_eq!(
+        hello["systemMessage"],
+        format!("llmpool: this session runs as {got} (rule \"work repos\"). /llmpool shows usage and switches account.")
+    );
+    // Not again on resume or /clear, which raise the same hook.
+    assert_eq!(
+        w.daemon.hook(
+            sid,
+            "SessionStart",
+            "",
+            &json!({"session_id": "agent-1", "source": "resume"})
+        ),
+        json!({})
+    );
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["picked_by"],
+        "rule \"work repos\""
+    );
+
+    let chosen = start(&w, "/x", Some("home@x.io"));
+    let hello = w.daemon.hook(
+        chosen["session_id"].as_str().unwrap(),
+        "SessionStart",
+        "",
+        &json!({"session_id": "agent-2"}),
+    );
+    assert!(hello["systemMessage"]
+        .as_str()
+        .unwrap()
+        .contains("home@x.io (you chose it)"));
+
+    // A session llmpool left on the user's own login, outside the pool, is told nothing.
+    Profile::default_in(&w.home)
+        .write(&NoKeychain, &secret("stranger@x.io", "s"))
+        .unwrap();
+    let plain = start(&w, "/elsewhere", None);
+    assert_eq!(
+        w.daemon.hook(
+            plain["session_id"].as_str().unwrap(),
+            "SessionStart",
+            "",
+            &json!({"session_id": "agent-3"})
+        ),
+        json!({})
+    );
+}
+
+#[test]
+fn least_busy_gives_each_new_session_the_emptiest_account() {
+    let w = world();
+    w.daemon
+        .put_policy("[[rule]]\nname = 'spread'\non = 'session_start'\ndo = { assign = { tag = 'work', pick = 'least_busy' } }\n")
+        .unwrap();
+    let first = start(&w, "/one", None);
+    let second = start(&w, "/two", None);
+    let third = start(&w, "/three", None);
+    let on = |reply: &Value| reply["account"]["email"].as_str().unwrap().to_string();
+    // Two work accounts: the second session goes to the other one, the third doubles up.
+    assert_ne!(on(&first), on(&second));
+    assert_eq!(
+        on(&third),
+        on(&first),
+        "ties go to the lower id, which the first session took"
+    );
+    // Sessions on one account share its profile.
+    assert_eq!(
+        first["env"]["CLAUDE_CONFIG_DIR"],
+        third["env"]["CLAUDE_CONFIG_DIR"]
+    );
+}
+
+#[test]
+fn pressure_on_a_shared_account_moves_its_sessions_before_the_window_is_spent() {
+    let w = world();
+    w.daemon
+        .put_policy(
+            "[settings]\ncooldown_secs = 0\n\n[[rule]]\nname = 'relieve'\non = { pressure = { full_within_minutes = 30, min_sessions = 2 } }\ndo = { swap = { pick = 'least_busy' }, notify = true }\n",
+        )
+        .unwrap();
+    let one = start(&w, "/x", Some("a@x.io"));
+    let sid = one["session_id"].as_str().unwrap();
+    // Half of the 5-hour window is gone and 90% is used: full in about a quarter of an hour.
+    let now = chrono::Utc::now().timestamp();
+    let hot =
+        json!({"rate_limits": {"five_hour": {"used_percentage": 90, "resets_at": now + 9000}}});
+
+    // One session alone on the account: the rule asks for two.
+    w.daemon.statusline(sid, &hot);
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "a@x.io"
+    );
+
+    // A second session joins the same account; now it is pressure.
+    let two = start(&w, "/y", Some("a@x.io"));
+    w.daemon.statusline(sid, &hot);
+    let sessions = w.daemon.list_sessions().unwrap();
+    let labels: Vec<&str> = sessions
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["account_label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["b@x.io", "b@x.io"],
+        "they share one login, so they move together"
+    );
+    // Both are told, and why.
+    for id in [sid, two["session_id"].as_str().unwrap()] {
+        let out = w.daemon.hook(id, "UserPromptSubmit", "", &json!({}));
+        assert!(out["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("moved from a@x.io to b@x.io (rule \"relieve\")"));
+    }
+    assert_eq!(sessions[0]["picked_by"], "rule \"relieve\"");
 }

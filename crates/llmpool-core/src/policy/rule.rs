@@ -169,6 +169,9 @@ pub enum Pick {
     MostQuota,
     SoonestReset,
     RoundRobin,
+    /// The account carrying the fewest sessions, then the most quota: spreads
+    /// work instead of piling it onto one login.
+    LeastBusy,
 }
 
 #[cfg(test)]

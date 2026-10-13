@@ -57,7 +57,9 @@ export const toSnapshot = (status: Json): Snapshot => {
     lastSwitch: status?.stats?.last_switch ?? null,
   }
 
-  return { session, rows, others, error: null, issues, login, stats }
+  const pickedBy: string | null = status?.session?.picked_by ?? null
+
+  return { session, pickedBy, rows, others, error: null, issues, login, stats }
 }
 
 /** A ten-cell meter. */
@@ -259,3 +261,7 @@ export const forecast = (percent: number | null, resetAt: number | null, nowMs: 
 /** A label cut to fit a column, never mid-way without saying so. */
 export const fit = (text: string, width: number): string =>
   text.length <= width ? text.padEnd(width) : `${text.slice(0, Math.max(1, width - 1))}…`
+
+/** The accounts worth offering on the quick-switch row: usable, not this
+ * one, the emptiest first, at most three so the row stays one line. */
+export const quick = (snap: Snapshot): Row[] => (snap.session === null ? [] : snap.rows.filter(r => !r.isCurrent && isUsable(r)).slice(0, 3))

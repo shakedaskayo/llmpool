@@ -41,6 +41,9 @@ pub fn session(cwd: &str, account: Option<&str>) -> Session {
 
 use crate::policy::context::Context;
 
+/// No session counts known.
+pub static NOBODY: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
 pub fn ctx<'a>(session: &'a Session, accounts: &'a [Account]) -> Context<'a> {
     Context {
         session,
@@ -51,5 +54,6 @@ pub fn ctx<'a>(session: &'a Session, accounts: &'a [Account]) -> Context<'a> {
         minute: 30,
         home: "/home/u",
         rr_cursor: None,
+        busy: &NOBODY,
     }
 }

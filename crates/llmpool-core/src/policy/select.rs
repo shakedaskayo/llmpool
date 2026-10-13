@@ -1,6 +1,7 @@
 use super::context::Context;
 use super::rule::{Pick, Target};
-use crate::model::Account;
+use crate::model::{Account, AccountId};
+use std::collections::BTreeMap;
 
 /// Accounts a rule may move a session to.
 ///
@@ -36,12 +37,22 @@ pub fn pick<'a>(
     pick: Pick,
     mut candidates: Vec<&'a Account>,
     cursor: Option<&str>,
+    busy: &BTreeMap<AccountId, usize>,
 ) -> Option<&'a Account> {
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
+    let load = |a: &Account| busy.get(&a.id).copied().unwrap_or(0);
     match pick {
-        Pick::MostQuota => candidates
-            .into_iter()
-            .min_by(|a, b| a.peak_used().total_cmp(&b.peak_used())),
+        // Equal quota goes to the less crowded account.
+        Pick::MostQuota => candidates.into_iter().min_by(|a, b| {
+            a.peak_used()
+                .total_cmp(&b.peak_used())
+                .then(load(a).cmp(&load(b)))
+        }),
+        Pick::LeastBusy => candidates.into_iter().min_by(|a, b| {
+            load(a)
+                .cmp(&load(b))
+                .then(a.peak_used().total_cmp(&b.peak_used()))
+        }),
         Pick::SoonestReset => candidates
             .into_iter()
             .min_by_key(|a| a.reset("7d").unwrap_or(i64::MAX)),
@@ -54,7 +65,7 @@ pub fn pick<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{account, ctx, session};
+    use crate::fixtures::{account, ctx, session, NOBODY};
     use crate::model::{Health, Window};
 
     fn target(text: &str) -> Target {
@@ -98,7 +109,7 @@ mod tests {
         let s = session("/w", Some("current"));
         let c = candidates(&target(""), &ctx(&s, &accounts), Some(("5h", 90.0)));
         assert_eq!(ids(c.clone()), ["fresh", "used"]);
-        assert_eq!(pick(Pick::MostQuota, c, None).unwrap().id, "fresh");
+        assert_eq!(pick(Pick::MostQuota, c, None, &NOBODY).unwrap().id, "fresh");
     }
 
     #[test]
@@ -148,7 +159,7 @@ mod tests {
     fn most_quota_breaks_ties_by_id() {
         let accounts = [account("b", &[], Some(10.0)), account("a", &[], Some(10.0))];
         assert_eq!(
-            pick(Pick::MostQuota, accounts.iter().collect(), None)
+            pick(Pick::MostQuota, accounts.iter().collect(), None, &NOBODY)
                 .unwrap()
                 .id,
             "a"
@@ -163,9 +174,22 @@ mod tests {
             account("b", &[], None),
         ];
         let all = || accounts.iter().collect::<Vec<_>>();
-        assert_eq!(pick(Pick::RoundRobin, all(), None).unwrap().id, "a");
-        assert_eq!(pick(Pick::RoundRobin, all(), Some("a")).unwrap().id, "b");
-        assert_eq!(pick(Pick::RoundRobin, all(), Some("c")).unwrap().id, "a");
+        assert_eq!(
+            pick(Pick::RoundRobin, all(), None, &NOBODY).unwrap().id,
+            "a"
+        );
+        assert_eq!(
+            pick(Pick::RoundRobin, all(), Some("a"), &NOBODY)
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            pick(Pick::RoundRobin, all(), Some("c"), &NOBODY)
+                .unwrap()
+                .id,
+            "a"
+        );
     }
 
     #[test]
@@ -188,7 +212,7 @@ mod tests {
             .insert("7d".into(), weekly(100));
         let accounts = [late, soon, account("unknown", &[], None)];
         assert_eq!(
-            pick(Pick::SoonestReset, accounts.iter().collect(), None)
+            pick(Pick::SoonestReset, accounts.iter().collect(), None, &NOBODY)
                 .unwrap()
                 .id,
             "soon"
@@ -196,7 +220,29 @@ mod tests {
     }
 
     #[test]
+    fn least_busy_spreads_sessions_and_most_quota_breaks_ties_by_load() {
+        let accounts = [
+            account("a", &[], Some(10.0)),
+            account("b", &[], Some(60.0)),
+            account("c", &[], Some(10.0)),
+        ];
+        let all = || accounts.iter().collect::<Vec<_>>();
+        let busy: BTreeMap<AccountId, usize> = [
+            ("a".to_string(), 2),
+            ("b".to_string(), 0),
+            ("c".to_string(), 1),
+        ]
+        .into();
+        // The emptiest seat first, even though it has less quota left.
+        assert_eq!(pick(Pick::LeastBusy, all(), None, &busy).unwrap().id, "b");
+        // Same quota on a and c: the one carrying fewer sessions.
+        assert_eq!(pick(Pick::MostQuota, all(), None, &busy).unwrap().id, "c");
+        // Nothing known about load: quota decides, then the id.
+        assert_eq!(pick(Pick::LeastBusy, all(), None, &NOBODY).unwrap().id, "a");
+    }
+
+    #[test]
     fn pick_from_nothing_is_none() {
-        assert!(pick(Pick::MostQuota, Vec::new(), None).is_none());
+        assert!(pick(Pick::MostQuota, Vec::new(), None, &NOBODY).is_none());
     }
 }

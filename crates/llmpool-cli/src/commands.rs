@@ -571,6 +571,7 @@ fn sessions(as_json: bool) -> Result<ExitCode, String> {
                     .to_string(),
                 percent(s, "5h"),
                 percent(s, "7d"),
+                s["picked_by"].as_str().unwrap_or("-").to_string(),
                 s["cwd"].as_str().unwrap_or_default().to_string(),
             ]
         })
@@ -579,7 +580,7 @@ fn sessions(as_json: bool) -> Result<ExitCode, String> {
         return done("no sessions; start one with `llmpool run`".into());
     }
     done(table(
-        &["SESSION", "ACCOUNT", "5H", "7D", "DIRECTORY"],
+        &["SESSION", "ACCOUNT", "5H", "7D", "WHY", "DIRECTORY"],
         rows,
     ))
 }

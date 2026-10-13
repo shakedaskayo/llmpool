@@ -75,7 +75,7 @@ fn run(
     if let Some(target) = &action.assign {
         let found = select::candidates(target, ctx, ceiling);
         return chosen(
-            select::pick(target.pick, found, ctx.rr_cursor),
+            select::pick(target.pick, found, ctx.rr_cursor, ctx.busy),
             Outcome::Assign,
         );
     }
@@ -105,7 +105,7 @@ fn run(
             found.retain(|a| a.used(window) + settings.margin_points <= current.used(window));
         }
         return chosen(
-            select::pick(target.pick, found, ctx.rr_cursor),
+            select::pick(target.pick, found, ctx.rr_cursor, ctx.busy),
             Outcome::Swap,
         );
     }
@@ -138,6 +138,9 @@ pub struct Scenario {
     pub minute: u8,
     #[serde(default)]
     pub home: String,
+    /// Sessions per account id, when the scenario wants load to matter.
+    #[serde(default)]
+    pub busy: std::collections::BTreeMap<AccountId, usize>,
 }
 
 impl Scenario {
@@ -154,6 +157,7 @@ impl Scenario {
                 minute: self.minute,
                 home: &self.home,
                 rr_cursor: None,
+                busy: &self.busy,
             },
         )
     }
