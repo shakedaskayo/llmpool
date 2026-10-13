@@ -34,6 +34,24 @@ The notes the chart prints say how to import accounts.
 | `persistence.*` | The volume the pool lives on |
 | `ingress.*`, `networkPolicy.*` | How traffic gets in |
 
+## Without an ingress controller, on AWS
+
+A load balancer can terminate TLS itself with a certificate from ACM:
+
+```yaml
+service:
+  type: LoadBalancer
+  port: 443
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:...
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+```
+
+Then point your hostname at the load balancer, and keep the secrets in a Secret of your own (`existingSecret`) rather than in values.
+
 ## What the chart takes care of
 
 - **One writer.** One replica with the `Recreate` strategy: the pool's state and its single-use refresh tokens allow no second copy.

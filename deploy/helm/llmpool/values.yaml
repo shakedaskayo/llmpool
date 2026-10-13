@@ -77,6 +77,9 @@ persistence:
 service:
   type: ClusterIP
   port: 80
+  # For a cloud load balancer that terminates TLS itself (type LoadBalancer,
+  # port 443): its certificate and listener settings go here.
+  annotations: {}
 
 ingress:
   enabled: false
