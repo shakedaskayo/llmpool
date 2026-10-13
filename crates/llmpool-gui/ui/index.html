@@ -8,28 +8,41 @@
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <header>
-      <h1>llmpool</h1>
-      <div role="tablist" aria-label="Sections" id="tabs">
-        <button role="tab" id="tab-pool" aria-controls="pool" aria-selected="true">Pool</button>
-        <button role="tab" id="tab-sessions" aria-controls="sessions" aria-selected="false" tabindex="-1">Sessions</button>
-        <button role="tab" id="tab-policies" aria-controls="policies" aria-selected="false" tabindex="-1">Policies</button>
-        <button role="tab" id="tab-settings" aria-controls="settings" aria-selected="false" tabindex="-1">Settings</button>
-      </div>
-      <p id="summary" class="muted"></p>
-    </header>
-    <main id="main">
-      <section id="pool" role="tabpanel" aria-labelledby="tab-pool" tabindex="0"></section>
-      <section id="sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="0" hidden></section>
-      <section id="policies" role="tabpanel" aria-labelledby="tab-policies" tabindex="0" hidden></section>
-      <section id="settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" hidden></section>
-    </main>
-    <footer class="muted">
-      <span><kbd>⌃⌥⌘N</kbd> switch to the account with most quota, from anywhere</span>
-      <span><kbd>⌃⌥⌘L</kbd> open this window</span>
-      <span><kbd>⌘1</kbd>–<kbd>⌘4</kbd> sections</span>
-      <span><kbd>⌘S</kbd> save rules</span>
-    </footer>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-pool" viewBox="0 0 20 20"><circle cx="7" cy="7" r="3.2" /><circle cx="14" cy="13" r="3.2" /><path d="M3 16c.6-2.4 2.2-3.6 4-3.6" /></symbol>
+        <symbol id="i-sessions" viewBox="0 0 20 20"><rect x="2.5" y="4" width="15" height="11" rx="2" /><path d="M6 8.5l2.2 1.8L6 12M10.5 12h3.5" /></symbol>
+        <symbol id="i-rules" viewBox="0 0 20 20"><path d="M4 5h7M4 10h4M4 15h7" /><circle cx="14.5" cy="5" r="1.6" /><circle cx="11.5" cy="10" r="1.6" /><circle cx="14.5" cy="15" r="1.6" /></symbol>
+        <symbol id="i-agents" viewBox="0 0 20 20"><rect x="4" y="6" width="12" height="9" rx="2.5" /><path d="M10 3v3M7.6 10v1.4M12.4 10v1.4M2 10.5h2M16 10.5h2" /></symbol>
+        <symbol id="i-team" viewBox="0 0 20 20"><circle cx="10" cy="5" r="2.3" /><circle cx="4.5" cy="14" r="2.3" /><circle cx="15.5" cy="14" r="2.3" /><path d="M8.6 6.9L5.7 12M11.4 6.9l2.9 5.1M7 14h6" /></symbol>
+        <symbol id="i-settings" viewBox="0 0 20 20"><path d="M3 6h8M15 6h2M3 14h2M9 14h8" /><circle cx="13" cy="6" r="2" /><circle cx="7" cy="14" r="2" /></symbol>
+      </defs>
+    </svg>
+    <div class="app">
+      <nav class="side" aria-label="Sections">
+        <h1><span class="mark" aria-hidden="true"></span>llmpool</h1>
+        <div role="tablist" aria-orientation="vertical" aria-label="Sections" id="tabs">
+          <button role="tab" id="tab-pool" aria-controls="pool" aria-selected="true"><svg class="icon" aria-hidden="true"><use href="#i-pool" /></svg><span>Accounts</span><span class="count" id="n-pool"></span></button>
+          <button role="tab" id="tab-sessions" aria-controls="sessions" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-sessions" /></svg><span>Sessions</span><span class="count" id="n-sessions"></span></button>
+          <button role="tab" id="tab-policies" aria-controls="policies" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-rules" /></svg><span>Rules</span><span class="count" id="n-policies"></span></button>
+          <button role="tab" id="tab-agents" aria-controls="agents" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-agents" /></svg><span>Agents</span><span class="count" id="n-agents"></span></button>
+          <button role="tab" id="tab-team" aria-controls="team" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-team" /></svg><span>Team</span><span class="count" id="n-team"></span></button>
+          <button role="tab" id="tab-settings" aria-controls="settings" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg><span>Settings</span><span class="count" id="n-settings"></span></button>
+        </div>
+        <div class="side-foot">
+          <p id="summary" class="muted"></p>
+          <p class="keys muted"><kbd>⌃⌥⌘N</kbd> switch to the emptiest account<br /><kbd>⌃⌥⌘L</kbd> open this window</p>
+        </div>
+      </nav>
+      <main id="main">
+        <section id="pool" role="tabpanel" aria-labelledby="tab-pool" tabindex="0"></section>
+        <section id="sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="0" hidden></section>
+        <section id="policies" role="tabpanel" aria-labelledby="tab-policies" tabindex="0" hidden></section>
+        <section id="agents" role="tabpanel" aria-labelledby="tab-agents" tabindex="0" hidden></section>
+        <section id="team" role="tabpanel" aria-labelledby="tab-team" tabindex="0" hidden></section>
+        <section id="settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" hidden></section>
+      </main>
+    </div>
     <div id="toasts" role="status" aria-live="polite"></div>
     <script src="app.js"></script>
   </body>

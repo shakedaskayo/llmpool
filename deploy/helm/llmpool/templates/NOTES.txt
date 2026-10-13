@@ -10,7 +10,7 @@ llmpool is serving at {{ .Values.publicUrl }}.
 
    Rules for everyone: `kubectl exec -it $POD -- llmpool policy path` names the file to edit.
 
-2. Members join from the llmpool app (Settings > Team pool) or with:
+2. Members join from the llmpool app (Team) or with:
 
      llmpool team connect {{ .Values.publicUrl }}{{ if not .Values.oidc.clientId }} --key{{ end }}
 {{- if .Values.oidc.clientId }}

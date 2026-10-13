@@ -14,6 +14,7 @@ const state = {
   team: { state: "off" },
   agents: { harnesses: [] },
   providers: [],
+  adding: false, // whether the add-account dialog is open
   addKind: "claude", // which kind of account the add panel shows: claude, agent or key
   keyProvider: "openai",
   remotePolicy: {},
@@ -95,8 +96,8 @@ function meter(usage, name, title) {
 // Usage over time as a small line: enough to see a climb or a reset at a glance.
 function sparkline(history, label) {
   const points = (history ?? []).slice(-24).map((p) => p[1]);
-  if (points.length < 2) return `<span class="muted">collecting…</span>`;
-  const w = 96, h = 22;
+  if (points.length < 2) return "";
+  const w = 80, h = 22;
   const step = w / (points.length - 1);
   const path = points.map((v, i) => `${i ? "L" : "M"}${(i * step).toFixed(1)} ${(h - 1 - (Math.min(100, v) / 100) * (h - 2)).toFixed(1)}`).join(" ");
   const last = Math.round(points[points.length - 1]);
@@ -104,6 +105,19 @@ function sparkline(history, label) {
   return `<svg class="spark ${level}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}: from ${Math.round(points[0])}% to ${last}% over the last ${points.length} readings">
     <path d="${path}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
 }
+
+// ---- pieces every page uses ---------------------------------------------------
+
+const pageHead = (title, sub, actions = "") =>
+  `<header class="head"><div><h2>${title}</h2><p class="muted">${sub}</p></div><div class="actions">${actions}</div></header>`;
+
+// A stable colour per provider or agent, so the eye learns which is which.
+const hue = (text) => [...String(text)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+const avatar = (label, key) =>
+  `<span class="avatar" style="--h:${hue(key)}" aria-hidden="true">${esc((String(label).replace(/^[a-z-]+:/, "")[0] ?? "?").toUpperCase())}</span>`;
+
+// One usage window with its name in front, for cards that show two.
+const windowRow = (usage, name, title) => `<div class="win"><span class="cap">${name}</span>${meter(usage, name, title)}</div>`;
 
 // ---- pool -------------------------------------------------------------------
 
@@ -224,39 +238,71 @@ function addPanel() {
   </div>`;
 }
 
+function statTiles() {
+  const logins = state.accounts.filter((a) => a.provider === "claude" && a.enabled && a.health === "ok");
+  const near = logins.filter((a) => Object.values(a.usage?.windows ?? {}).some((w) => w.used_percent >= 90)).length;
+  const free = state.stats.headroom_5h;
+  const tile = (value, label, level = "") => `<div class="tile ${level}"><strong>${value}</strong><span>${label}</span></div>`;
+  return `<div class="tiles">
+    ${tile(state.accounts.length, state.accounts.length === 1 ? "account" : "accounts")}
+    ${tile(state.sessions.length, state.sessions.length === 1 ? "session" : "sessions")}
+    ${free == null ? tile("–", "5-hour allowance free") : tile(`${Math.round(free)}%`, "5-hour allowance free", free < 15 ? "bad" : free < 35 ? "warn" : "ok")}
+    ${tile(near, "near the limit", near ? "warn" : "")}
+    ${tile(state.stats.switches_24h ?? 0, "switches today")}
+  </div>`;
+}
+
+function accountCard(a) {
+  const claude = a.provider === "claude";
+  const live = a.enabled && a.health === "ok";
+  const used = a.sessions.length ? `in use by ${plural(a.sessions.length, "session")}` : "idle";
+  const kind = claude ? "" : a.kind === "oauth" ? `login of ${esc(agentTitle(a.provider))} · ` : "key · ";
+  const tags = a.shared
+    ? a.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("")
+    : `<input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="add tags" aria-label="Tags for ${esc(a.label)}, comma separated" />`;
+  const usage = claude
+    ? `${windowRow(a.usage, "5h", "5-hour window")}${windowRow(a.usage, "7d", "7-day window")}`
+    : `<span class="muted">usage is not reported to llmpool</span>`;
+  const actions = a.shared
+    ? `<span class="muted">managed by your team</span>`
+    : `${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
+       <button class="quiet" data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
+       <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`;
+  return `<li class="card acct${live ? "" : " off"}">
+      ${avatar(a.label, a.provider)}
+      <div class="who"><div class="name"><strong>${esc(a.label)}</strong> ${accountBadge(a)} ${expiryBadge(a)}</div>
+        <div class="sub">${kind}${used}</div></div>
+      <div class="tagcell">${tags}</div>
+      <div class="usage">${usage}</div>
+      <div class="trend">${claude ? sparkline(a.history, `5-hour usage of ${a.label}`) : ""}</div>
+      <div class="actions">${actions}</div>
+    </li>`;
+}
+
 function renderPool() {
-  const rows = state.accounts
-    .map((a) => {
-      const used = a.sessions.length ? `<div class="muted">in use by ${plural(a.sessions.length, "session")}</div>` : "";
-      return `<tr>
-        <td><strong>${esc(a.label)}</strong> <span class="badge provider">${esc(agentTitle(a.provider))}</span> ${accountBadge(a)} ${expiryBadge(a)}${used}</td>
-        <td>${a.shared ? `<span class="muted">${esc(a.tags.join(", "))}</span>` : `<input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" />`}</td>
-        ${
-          a.provider === "claude"
-            ? `<td>${meter(a.usage, "5h", "5-hour window")}</td>
-        <td>${meter(a.usage, "7d", "7-day window")}</td>
-        <td>${sparkline(a.history, `5-hour usage of ${a.label}`)}</td>`
-            : `<td colspan="3" class="muted">${a.kind === "oauth" ? "a login of " + esc(agentTitle(a.provider)) : "a key"}; its usage is not reported to llmpool</td>`
-        }
-        <td class="actions">${
-          a.shared
-            ? `<span class="muted">managed by your team</span>`
-            : `${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
-          <button data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
-          <button class="quiet danger" data-act="remove" data-id="${esc(a.id)}" aria-label="Remove ${esc(a.label)}">Remove</button>`
-        }</td></tr>`;
-    })
+  if (state.login.state === "waiting") state.adding = false;
+  const groups = new Map();
+  for (const a of state.accounts) groups.set(a.provider, [...(groups.get(a.provider) ?? []), a]);
+  const order = [...groups.keys()].sort((x, y) => (y === "claude") - (x === "claude") || x.localeCompare(y));
+  const lists = order
+    .map((provider) => `<section class="group" aria-label="${esc(agentTitle(provider))} accounts">
+        <h3>${esc(agentTitle(provider))} <span class="count">${groups.get(provider).length}</span></h3>
+        <ul class="cards">${groups.get(provider).map(accountCard).join("")}</ul></section>`)
     .join("");
-  $("pool").innerHTML = `${issuesPanel()}
+  $("pool").innerHTML = `${pageHead("Accounts", "Every login and key in your pool, and how much of each is used.", `<button class="primary" data-act="add-open">Add account</button>`)}
+    ${issuesPanel()}
     ${
-      rows
-        ? `<table><caption class="skip">Accounts in the pool</caption>
-            <thead><tr><th scope="col">Account</th><th scope="col">Tags</th><th scope="col">5-hour window</th><th scope="col">7-day window</th><th scope="col">Trend (5h)</th><th scope="col"><span class="skip">Actions</span></th></tr></thead>
-            <tbody>${rows}</tbody></table>
-           <p class="muted">Tags group accounts for policies, e.g. “use an account tagged work in ~/work”. Each agent only ever runs on accounts of its own provider.</p>`
-        : `<p class="empty">No accounts yet. Add a login your coding agent already has, or a key, to start the pool.</p>`
+      lists
+        ? `${statTiles()}${lists}<p class="muted foot">Tags group accounts for rules, e.g. “use an account tagged work in ~/work”. Each agent only ever runs on accounts of its own provider.</p>`
+        : `<div class="empty"><h3>Your pool is empty</h3><p>Add a login your coding agent already has, or a key for any provider.</p><button class="primary" data-act="add-open">Add account</button></div>`
     }
-    <h2>Add an account</h2>${addPanel()}`;
+    <dialog id="add" aria-labelledby="add-title">
+      <header><h3 id="add-title">Add an account</h3><button class="quiet" data-act="add-close" aria-label="Close">✕</button></header>
+      ${addPanel()}
+    </dialog>`;
+  const dialog = $("add");
+  dialog.addEventListener("close", () => (state.adding = false));
+  if (state.adding && !dialog.open) dialog.showModal();
 }
 
 // ---- sessions ---------------------------------------------------------------
@@ -282,7 +328,6 @@ function renderSessions() {
         : !isClaude
           ? `<strong>${esc(s.account_label ?? "")}</strong> <span class="badge" title="This agent reads its account when it starts. Start it again to run on another one.">set at start</span>`
           : `<span class="muted">your own login, not managed</span>`;
-      const why = s.picked_by ? `<div class="muted">${esc(s.picked_by)}</div>` : "";
       const a = s.advice;
       const verdict = !a
         ? ""
@@ -295,26 +340,31 @@ function renderSessions() {
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
       const agent = isClaude ? "Claude Code" : agentTitle(s.agent);
       const usage = isClaude
-        ? `<td>${meter(s.usage, "5h", "5-hour window")}</td><td>${meter(s.usage, "7d", "7-day window")}</td>`
-        : `<td colspan="2" class="muted">usage is not reported to llmpool</td>`;
-      return `<tr><td>${esc(agent)}</td><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${ask}${why}${verdict}</td>${usage}</tr>`;
+        ? `${windowRow(s.usage, "5h", "5-hour window")}${windowRow(s.usage, "7d", "7-day window")}`
+        : `<span class="muted">usage is not reported to llmpool</span>`;
+      return `<li class="card sess">
+          ${avatar(agent, s.provider)}
+          <div class="who"><div class="name"><strong title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></strong> ${kind}</div>
+            <div class="sub">${esc(agent)}${s.picked_by ? ` · ${esc(s.picked_by)}` : ""}</div>${verdict}</div>
+          <div class="pick">${picker}${ask}</div>
+          <div class="usage">${usage}</div>
+        </li>`;
     })
     .join("");
   const events = state.events
     .filter((e) => e.kind !== "agent")
     .slice(-40)
     .reverse()
-    .map((e) => `<li><time>${new Date(e.at * 1000).toLocaleTimeString()}</time><span aria-hidden="true">${EVENT_ICONS[e.kind] ?? "·"}</span><span>${esc(tidy(e.message))}</span></li>`)
+    .map((e) => `<li><time>${new Date(e.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${e.kind}" aria-hidden="true">${EVENT_ICONS[e.kind] ?? "·"}</span><span>${esc(tidy(e.message))}</span></li>`)
     .join("");
-  $("sessions").innerHTML = `
+  $("sessions").innerHTML = `${pageHead("Sessions", "What is running now, on which account, and why.")}
     ${
       rows
-        ? `<table><caption class="skip">Running sessions</caption>
-            <thead><tr><th scope="col">Agent</th><th scope="col">Directory</th><th scope="col">Account</th><th scope="col">5-hour window</th><th scope="col">7-day window</th></tr></thead><tbody>${rows}</tbody></table>
-           <p class="muted">Choosing another account switches a running Claude Code session within about a minute. Other agents read their account when they start.</p>`
-        : `<p class="empty">No sessions running. Start Claude Code as usual, or any other agent with <code>llmpool exec -- codex</code> (or opencode, gemini, grok, …) to run it on the account your policies pick.</p>`
+        ? `<ul class="cards">${rows}</ul>
+           <p class="muted foot">Choosing another account switches a running Claude Code session within about a minute. Other agents read their account when they start.</p>`
+        : `<div class="empty"><h3>Nothing is running</h3><p>Start Claude Code as usual, or any other agent with <code>llmpool exec -- codex</code> (or opencode, gemini, grok, …). It lands on the account your rules pick.</p></div>`
     }
-    <h2>Recent activity</h2>
+    <h3 class="section">Recent activity</h3>
     ${events ? `<ul class="events">${events}</ul>` : `<p class="muted">Nothing yet.</p>`}`;
 }
 
@@ -444,12 +494,11 @@ function renderRule(rule, i) {
 
 function renderPolicies() {
   const settings = state.policy?.settings ?? {};
-  const toolbar = `<div class="toolbar">
+  const toolbar = `${pageHead("Rules", "When a session starts, fills up or is refused, the first rule that matches decides.")}<div class="toolbar">
       <div role="group" aria-label="View">
         <button data-act="view" data-view="rules" aria-pressed="${state.policyView === "rules"}">Rules</button>
         <button data-act="view" data-view="toml" aria-pressed="${state.policyView === "toml"}">TOML</button>
       </div>
-      <span class="muted">Rules are tried top to bottom; the first that matches wins.</span>
       <span class="spacer"></span>
       ${state.dirty ? `<span class="badge warn">unsaved changes</span><button data-act="revert">Discard</button>` : ""}
       <button class="primary" data-act="save"${state.dirty ? "" : " disabled"}>Save</button>
@@ -734,7 +783,7 @@ function teamPanel() {
     const ago = t.synced_at ? `synced ${Math.max(0, Math.round((Date.now() / 1000 - t.synced_at) / 60))} min ago` : "not synced yet";
     return `<p><span class="ok" aria-hidden="true">✓</span> Connected to <code>${esc(t.url)}</code> as <strong>${esc(t.email)}</strong> · ${plural(t.accounts, "shared account")} · ${ago}</p>
       ${t.message ? `<p class="warnmark" role="alert">⚠ ${esc(t.message)}</p>` : ""}
-      <p class="muted">The team's accounts and rules arrive read-only. Its rules are tried before yours; your own account still comes first if you say so above.</p>
+      <p class="muted">The team's accounts and rules arrive read-only. Its rules are tried before yours; your own account still comes first if Settings says so.</p>
       <div class="copy"><button data-act="team-sync">Sync now</button>
         ${t.message ? `<button class="primary" data-act="team-again">Connect again</button>` : ""}
         <button class="quiet danger" data-act="team-leave">Leave the team's pool</button></div>`;
@@ -756,26 +805,41 @@ function teamPanel() {
     </div>`;
 }
 
+function renderAgents() {
+  const hooked = !state.issues.some((i) => i.kind === "hooks_missing");
+  const claude = !state.issues.some((i) => i.kind === "claude_missing");
+  $("agents").innerHTML = `${pageHead("Agents", "The coding agents llmpool can start, and what each of them runs on.")}
+    <div class="card pad">${agentsPanel(claude, hooked)}</div>`;
+}
+
+function renderTeam() {
+  const fact = (title, text) => `<div><strong>${title}</strong><p class="muted">${text}</p></div>`;
+  $("team").innerHTML = `${pageHead("Team", "Use a pool your team shares, through a server it runs.")}
+    <div class="card pad">${teamPanel()}</div>
+    <div class="facts">
+      ${fact("Lent, not copied", "You receive short-lived access to the team's accounts. What can renew them never leaves the server.")}
+      ${fact("Yours stay yours", "Your own accounts and rules keep working. A login of your own always wins over a lent one.")}
+      ${fact("Aware of each other", "Rules see how many teammates are on each account, so sessions spread out instead of piling up.")}
+    </div>`;
+}
+
 function renderSettings() {
   const c = state.config;
   const hooked = !state.issues.some((i) => i.kind === "hooks_missing");
   const claude = !state.issues.some((i) => i.kind === "claude_missing");
   const check = (ok, yes, no) => `<li>${ok ? `<span class="ok" aria-hidden="true">✓</span> ${yes}` : `<span class="warnmark" aria-hidden="true">⚠</span> ${no}`}</li>`;
-  $("settings").innerHTML = `
-    <h2>Choosing accounts</h2>
-    <div class="callout">
+  $("settings").innerHTML = `${pageHead("Settings", "How accounts are chosen, and how llmpool sits on this Mac.")}
+    <h3 class="section">Choosing accounts</h3>
+    <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="prefer-own"${c.prefer_own ? " checked" : ""} />
-        <span><strong>Prefer my own account</strong><br /><span class="muted">An account tagged <code>own</code> is used whenever it has room; the rest of the pool is for when it does not. The login Claude Code had when you set llmpool up is tagged <code>own</code> for you.</span></span></label>
+        <span><strong>Prefer my own account</strong><br /><span class="muted">An account tagged <code>own</code> is used whenever it has room; the rest of the pool is for when it does not. The login your agent had when you set llmpool up is tagged <code>own</code> for you.</span></span></label>
       <p class="indent"><label>Counts as having room below <input class="num" type="number" min="1" max="100" data-act="own-until" value="${esc(c.own_until ?? 85)}" /> % used</label></p>
     </div>
 
-    <h2>Team pool <span class="badge">optional</span></h2>
-    <div class="callout">${teamPanel()}</div>
-
-    <h2>Advisor <span class="badge">optional</span></h2>
-    <div class="callout">
+    <h3 class="section">Advisor <span class="badge">optional</span></h3>
+    <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="advisor"${c.advisor_enabled ? " checked" : ""} />
-        <span><strong>Let a decision model advise on switching</strong><br /><span class="muted">When an account passes half of a window, llmpool sends Jev a small picture of the pool, with accounts named by letter only, and asks whether to switch and where to. It acts only when the model is sure enough, and never outside your rules' limits (cooldown, usable and free accounts). Off, your rules decide alone.</span></span></label>
+        <span><strong>Let a decision model advise on switching</strong><br /><span class="muted">When an account passes half of a window, llmpool sends Jev a small picture of the pool, with accounts named by letter only, and asks whether to switch and where to. It acts only when the model is sure enough, and never outside your rules' limits. Off, your rules decide alone.</span></span></label>
       <p class="indent"><label>Act when it is at least <input class="num" type="number" min="50" max="100" data-act="switch-above" value="${esc(Math.round((c.switch_above ?? 0.7) * 100))}" /> % sure</label>
         <span class="muted"> · ${esc(c.calls_today ?? 0)} of ${esc(c.max_calls_per_day ?? 200)} questions used today</span></p>
       <p class="indent">${c.has_key ? `<span class="ok">✓</span> A key is stored in your keychain. <button class="quiet danger" data-act="key-clear">Forget it</button>` : `<span class="warnmark">⚠</span> No key yet.`}</p>
@@ -785,11 +849,8 @@ function renderSettings() {
       </div>
     </div>
 
-    <h2>Coding agents</h2>
-    <div class="callout">${agentsPanel(claude, hooked)}</div>
-
-    <h2>This Mac</h2>
-    <div class="callout">
+    <h3 class="section">This Mac</h3>
+    <div class="card pad">
       <ul class="checks">
         ${check(claude, "Claude Code is installed", "Claude Code was not found")}
         ${check(hooked, "Claude Code reports to llmpool (hooks, status line, <code>/llmpool</code>)", "Claude Code is not connected to llmpool yet")}
@@ -800,7 +861,8 @@ function renderSettings() {
       <div class="copy"><button class="${hooked ? "" : "primary"}" data-act="setup">${hooked ? "Run setup again" : "Set up llmpool on this Mac"}</button>
         <span class="muted">Installs the command line tool, connects Claude Code, adds your current login.</span></div>
       ${state.setupLog ? `<pre class="log" role="status">${esc(state.setupLog)}</pre>` : ""}
-    </div>`;
+    </div>
+    <p class="muted foot"><kbd>⌘1</kbd>–<kbd>⌘6</kbd> sections · <kbd>⌘S</kbd> save rules · <kbd>⌘R</kbd> refresh</p>`;
 }
 
 async function settingsAction(el) {
@@ -819,7 +881,8 @@ async function settingsAction(el) {
   if (act === "copy") return copy(el.dataset.text);
   if (act === "goto-add") {
     state.addKind = el.dataset.kind;
-    selectTab(tabs[0]);
+    state.adding = true;
+    go("pool");
     return renderPool();
   }
   if (act === "team-signin" || act === "team-key" || act === "team-again") {
@@ -857,7 +920,11 @@ async function poolAction(el) {
   const account = state.accounts.find((a) => a.id === id);
   const act = el.dataset.act;
   if (act === "copy") return copy(el.dataset.text);
-  if (act === "goto-setup") return selectTab(tabs[3]);
+  if (act === "goto-setup") return go("settings");
+  if (act === "add-open" || act === "add-close") {
+    state.adding = act === "add-open";
+    return renderPool();
+  }
   if (act === "add-kind") {
     state.addKind = el.dataset.kind;
     return renderPool();
@@ -867,7 +934,7 @@ async function poolAction(el) {
     return renderPool();
   }
   if (act === "add-agent") {
-    await attempt(() => api("POST", "/accounts/files", { harness: el.dataset.name }), "Login added to the pool");
+    if (await attempt(() => api("POST", "/accounts/files", { harness: el.dataset.name }), "Login added to the pool")) state.adding = false;
     return refresh(true);
   }
   if (act === "add-key") {
@@ -880,7 +947,9 @@ async function poolAction(el) {
     if (!Object.keys(env).length || (known && Object.keys(env).length < known.env.length)) return toast("Fill in the key first", "error");
     const tags = $("key-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
     const added = await attempt(() => api("POST", "/accounts/key", { provider, label: $("key-label").value.trim() || null, tags, env }), "Key added to the pool");
-    return added === false ? undefined : refresh(true);
+    if (!added) return;
+    state.adding = false;
+    return refresh(true);
   }
   if (["login", "relogin", "fix", "login-cancel", "login-code"].includes(act)) return loginAction(el, account);
   if (act === "remove" && el.dataset.armed !== "yes") {
@@ -898,6 +967,7 @@ async function poolAction(el) {
     },
     { capture: "Login added to the pool", toggle: account?.enabled ? `${account?.label} disabled` : `${account?.label} enabled`, tags: "Tags saved", remove: `${account?.label} removed` }[act],
   );
+  if (act === "capture" && done) state.adding = false;
   await refresh(true);
   return done;
 }
@@ -937,15 +1007,26 @@ async function sessionAction(el) {
 
 const busy = () => {
   const active = document.activeElement;
-  return active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName);
+  return document.querySelector("dialog[open]") || (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName));
 };
 
 function renderSummary() {
-  const managed = state.sessions.length;
-  const free = state.stats.headroom_5h == null ? "" : ` · ${Math.round(state.stats.headroom_5h)}% of the 5-hour allowance free`;
-  const switches = state.stats.switches_24h ? ` · ${plural(state.stats.switches_24h, "switch").replace("switchs", "switches")} today` : "";
-  $("summary").textContent = state.offline ?? `${plural(state.accounts.length, "account")} · ${plural(managed, "session")}${free}${switches}`;
-  $("summary").className = state.offline ? "badge bad" : "muted";
+  const free = state.stats.headroom_5h == null ? "" : `${Math.round(state.stats.headroom_5h)}% of the 5-hour allowance free`;
+  $("summary").textContent = state.offline ?? (free || "llmpool is running");
+  $("summary").className = state.offline ? "offline" : "muted online";
+  const problems = state.issues.length + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
+  const counts = {
+    pool: problems ? "!" : state.accounts.length || "",
+    sessions: state.sessions.length || "",
+    policies: (state.remotePolicy.policy?.rule?.length ?? 0) + (state.remotePolicy.team?.rule?.length ?? 0) || "",
+    agents: state.agents.harnesses.filter((h) => h.installed).length + 1,
+    team: state.team.state === "connected" ? (state.team.message ? "!" : "on") : state.team.state === "waiting" ? "…" : "",
+    settings: "",
+  };
+  for (const [name, value] of Object.entries(counts)) {
+    $(`n-${name}`).textContent = value;
+    $(`n-${name}`).className = `count${value === "!" ? " alert" : ""}`;
+  }
 }
 
 async function refresh(force = false) {
@@ -990,6 +1071,8 @@ async function refresh(force = false) {
   if (force || !busy()) {
     renderPool();
     renderSessions();
+    renderAgents();
+    renderTeam();
     renderSettings();
   }
 }
@@ -1005,10 +1088,11 @@ function selectTab(tab) {
   }
   tab.focus();
 }
-$("tabs").addEventListener("click", (e) => e.target.matches('[role="tab"]') && selectTab(e.target));
+$("tabs").addEventListener("click", (e) => e.target.closest('[role="tab"]') && selectTab(e.target.closest('[role="tab"]')));
+const go = (name) => selectTab($(`tab-${name}`));
 $("tabs").addEventListener("keydown", (e) => {
   const at = tabs.indexOf(document.activeElement);
-  const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  const next = { ArrowDown: at + 1, ArrowUp: at - 1, ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
   if (at < 0 || next === undefined) return;
   e.preventDefault();
   selectTab(tabs[(next + tabs.length) % tabs.length]);
@@ -1032,12 +1116,21 @@ $("sessions").addEventListener("click", async (e) => {
   await refresh(true);
 });
 $("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
-$("settings").addEventListener("click", (e) => {
-  if (!e.target.matches("button[data-act], a[data-act]")) return;
-  e.preventDefault();
-  settingsAction(e.target);
+for (const page of ["settings", "team", "agents"]) {
+  $(page).addEventListener("click", (e) => {
+    if (!e.target.matches("button[data-act], a[data-act]")) return;
+    e.preventDefault();
+    settingsAction(e.target);
+  });
+  $(page).addEventListener("change", (e) => e.target.matches("input[data-act]") && settingsAction(e.target));
+}
+// What is typed for the team's server survives a redraw.
+$("team").addEventListener("input", (e) => e.target.id === "team-url" && (state.teamUrl = e.target.value));
+$("team").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  if (e.target.id === "team-url") document.querySelector('[data-act="team-signin"]')?.click();
+  if (e.target.id === "team-key") document.querySelector('[data-act="team-key"]')?.click();
 });
-$("settings").addEventListener("change", (e) => e.target.matches("input[data-act]") && settingsAction(e.target));
 $("settings").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "advisor-key" && document.querySelector('[data-act="key-save"]')?.click());
 $("policies").addEventListener("click", (e) => e.target.matches("button[data-act]") && policyAction(e.target));
 $("policies").addEventListener("change", (e) => e.target.matches("select[data-act], input[type=checkbox][data-act]") && policyAction(e.target));
@@ -1046,7 +1139,7 @@ $("policies").addEventListener("input", (e) => e.target.matches("textarea[data-a
 // Keys inside the window: ⌘1–3 sections, ⌘S save rules, ⌘R refresh.
 window.addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-  const tab = { 1: tabs[0], 2: tabs[1], 3: tabs[2], 4: tabs[3] }[e.key];
+  const tab = tabs[Number(e.key) - 1];
   if (tab) {
     e.preventDefault();
     selectTab(tab);
@@ -1061,9 +1154,14 @@ window.addEventListener("keydown", (e) => {
 
 // Messages from the tray and the global hotkeys.
 window.__TAURI__.event.listen("llmpool-message", (event) => {
-  selectTab(tabs[1]);
+  go("sessions");
   toast(event.payload, "error");
 });
+
+// A section can be opened by address: `#sessions`, `#team`, ...
+const fromHash = () => $(`tab-${location.hash.slice(1)}`) && go(location.hash.slice(1));
+window.addEventListener("hashchange", fromHash);
+fromHash();
 
 // Leaving with unsaved rules would silently drop them.
 window.addEventListener("beforeunload", (e) => state.dirty && e.preventDefault());
