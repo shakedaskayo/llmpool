@@ -31,7 +31,10 @@ const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
 let isAnnounced = false
 
-const llmpool = ($: EngineInterface, args: string[]) => $.process.run([BIN, ...args], { timeoutMs: 8000 })
+// Every argument is made a string here: the host refuses anything else, and
+// one stray `undefined` would take the whole pane down with it.
+const llmpool = ($: EngineInterface, args: unknown[]) =>
+  $.process.run([BIN, ...args.map(arg => String(arg ?? ''))], { timeoutMs: 8000 })
 
 const refresh = async ($: EngineInterface) => {
   let next: Snapshot
@@ -96,7 +99,9 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'llmpool' }, async ($, e) => {
-    const wanted = e.args.trim()
+    // `/llmpool switch work-2` reads naturally, so the word is allowed;
+    // `/llmpool switch` alone means "let me choose".
+    const wanted = (e.args ?? '').trim().replace(/^switch\b\s*/, '')
     if (wanted !== '') {
       return { text: await switchByCommand($, wanted) }
     }
