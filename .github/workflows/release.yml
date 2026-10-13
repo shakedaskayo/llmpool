@@ -10,6 +10,11 @@ permissions:
   contents: write
   packages: write
 
+# One release at a time, in the order the tags were pushed.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
@@ -96,7 +101,12 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           version="${GITHUB_REF_NAME#v}"
-          for tag in "$version" latest; do
+          # Only the highest version is `latest`: an older tag that finishes
+          # building late must not take the name back.
+          newest=$(git ls-remote --tags --refs origin 'v*' | sed 's|.*refs/tags/||' | sort -V | tail -1)
+          tags="$version"
+          [ "$newest" = "$GITHUB_REF_NAME" ] && tags="$version latest"
+          for tag in $tags; do
             docker buildx imagetools create -t "$IMAGE:$tag" "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
           done
       - name: Helm chart
@@ -111,4 +121,7 @@ jobs:
         run: |
           cd dist
           sha256sum * > checksums.txt
-          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "llmpool ${GITHUB_REF_NAME#v}" --generate-notes
+          newest=$(git ls-remote --tags --refs "https://github.com/$GITHUB_REPOSITORY" 'v*' | sed 's|.*refs/tags/||' | sort -V | tail -1)
+          latest=false
+          [ "$newest" = "$GITHUB_REF_NAME" ] && latest=true
+          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "llmpool ${GITHUB_REF_NAME#v}" --generate-notes --latest="$latest"
