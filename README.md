@@ -50,8 +50,13 @@ and can be switched. Such sessions all run on the login in `~/.claude`, so they
 switch together. A session started with `llmpool run` gets a login of its own,
 which is what lets two accounts work side by side.
 
-Inside Claude Code, `/llmpool` opens a pane with every account's usage and
-reset times; press a number to switch to that account. The status line shows
+Inside Claude Code, `/llmpool` opens a dashboard. The account this session
+runs as is drawn large: a meter for the 5-hour and the 7-day window, a mark
+(`┃`) on each showing where even use would be by now, a forecast ("at this
+pace full in 38m" or "lasts to the reset"), and a trend line of recent
+readings. Below it, every other account is one row with small meters for both
+windows; press its number to switch. A totals line shows how much of the
+pool's combined allowance is free and how often it switched in the last day. The status line shows
 the current account and its usage, once; the hint row under the prompt
 carries the reminder `/llmpool`. A band appears above the prompt only when
 something needs you: the account passes 80% (with a one-press switch to the

@@ -12,9 +12,9 @@
       {
         "label": "main",
         "title": "llmpool",
-        "width": 1000,
-        "height": 700,
-        "minWidth": 760,
+        "width": 1120,
+        "height": 720,
+        "minWidth": 900,
         "minHeight": 480
       }
     ],

@@ -86,7 +86,7 @@ select, input, textarea {
   padding: 3px 7px;
   min-height: 26px;
 }
-input.tags { width: 150px; }
+input.tags { width: 112px; }
 input.wide { width: 220px; }
 input.num { width: 64px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -104,7 +104,7 @@ tr.current td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .toolbar .spacer { flex: 1; }
 code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
-.meter { display: grid; grid-template-columns: 90px 38px auto; align-items: center; column-gap: 8px; min-width: 210px; }
+.meter { display: grid; grid-template-columns: 64px 36px auto; align-items: center; column-gap: 6px; min-width: 0; }
 .meter .track { height: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .meter .fill { height: 100%; background: var(--ok); }
 .meter .value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -158,3 +158,9 @@ kbd { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; lett
 .spark { color: var(--ok); vertical-align: middle; }
 .spark.warn { color: var(--warn); }
 .spark.bad { color: var(--bad); }
+
+/* The table must fit the window: the last column holds the actions. */
+table { table-layout: auto; }
+td, th { padding-left: 6px; padding-right: 6px; }
+td.actions button { padding: 4px 8px; }
+main { overflow-x: auto; }
