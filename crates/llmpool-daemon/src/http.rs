@@ -99,6 +99,11 @@ fn route(
             body["replace"] == true,
         ),
         ("GET", ["issues"]) => d.issues(),
+        ("GET", ["advisor"]) => d.advisor_status(),
+        ("PUT", ["advisor", "key"]) => d.set_advisor_key(Some(text(&body, "key")?)),
+        ("DELETE", ["advisor", "key"]) => d.set_advisor_key(None),
+        ("PUT", ["config"]) => d.configure(&body),
+        ("POST", ["sessions", id, "advise"]) => d.advise_session(id),
         ("GET", ["stats"]) => d.stats(),
         ("GET", ["logins"]) => Ok(d.login_status()),
         ("POST", ["logins"]) => d.start_login(if body.is_null() {
@@ -264,12 +269,19 @@ pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running
     workers.push(std::thread::spawn(move || {
         // Wake often so shutdown is prompt; act once per minute, on the minute.
         let mut last = chrono::Local::now().format("%H:%M").to_string();
+        let mut beats = 0u32;
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(300));
             let minute = chrono::Local::now().format("%H:%M").to_string();
             if minute != last {
                 last = minute;
                 daemon.tick();
+            }
+            // The advisor is asked off the main path, a few times a minute
+            // at most; it does nothing when it is switched off.
+            beats += 1;
+            if beats % 20 == 0 {
+                daemon.advise_due();
             }
         }
     }));

@@ -1799,3 +1799,289 @@ fn pressure_on_a_shared_account_moves_its_sessions_before_the_window_is_spent() 
     }
     assert_eq!(sessions[0]["picked_by"], "rule \"relieve\"");
 }
+
+// ---- the decision layer: own account first, and the advisor ---------------------
+
+type Asked = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+/// A stand-in for the Jev service: answers every run with `answers` and keeps
+/// what it was sent (the Authorization header and the JSON body).
+fn jev(status: u16, answers: Value) -> (String, Asked) {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let asked: Asked = Arc::default();
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut request in server.incoming_requests() {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.to_string())
+                .unwrap_or_default();
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            seen.lock()
+                .unwrap()
+                .push((auth, serde_json::from_str(&body).unwrap_or_default()));
+            let reply = if status == 200 {
+                json!({"code": 0, "message": "ok", "data": {"id": "run-1", "status": "completed", "result": {"model": "typesafe/jev-1.13", "answers": answers}}})
+            } else {
+                json!({"code": -1, "message": "insufficient_tokens"})
+            };
+            let _ = request.respond(
+                tiny_http::Response::from_string(reply.to_string()).with_status_code(status),
+            );
+        }
+    });
+    (url, asked)
+}
+
+fn advisor_policy(url: &str, extra: &str) -> String {
+    format!("[settings]\ncooldown_secs = 0\n\n[advisor]\nenabled = true\nurl = \"{url}\"\nswitch_above = 0.7\n\n{extra}")
+}
+
+#[test]
+fn the_advisor_moves_a_session_only_when_sure_and_never_sees_who_anyone_is() {
+    let (url, asked) = jev(
+        200,
+        json!({"switch": {"type": "noul", "noul": 0.91}, "target": {"type": "choice", "choice": "A"}, "urgency": {"type": "score", "score": 1.6}}),
+    );
+    let w = world();
+    w.daemon.put_policy(&advisor_policy(&url, "")).unwrap();
+    w.daemon.set_advisor_key(Some("sk_test_key")).unwrap();
+    let reply = start(&w, "/x", Some("a@x.io"));
+    let sid = reply["session_id"].as_str().unwrap();
+    w.daemon.statusline(sid, &usage(64.0));
+
+    w.daemon.advise_due();
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions[0]["account_label"], "b@x.io");
+    assert_eq!(sessions[0]["picked_by"], "advisor, 91% sure");
+    assert_eq!(sessions[0]["advice"]["acted"], true);
+    assert_eq!(sessions[0]["advice"]["target"], "b@x.io");
+
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].0, "Bearer sk_test_key");
+    let body = &asked[0].1;
+    assert_eq!(body["model"], "typesafe/jev-1.13");
+    assert_eq!(body["requestId"].as_str().unwrap().len(), 36);
+    assert_eq!(body["questions"]["switch"]["type"], "noul");
+    assert!(body["questions"]["target"]["criteria"]
+        .get("stay")
+        .is_some());
+    assert_eq!(
+        body["state"]["current_account"]["five_hour_window"]["used_percent"],
+        64.0
+    );
+    // Accounts go by letter: no address, no id, no directory leaves the machine.
+    let sent = body.to_string();
+    for private in ["x.io", "claude-", "/x", "sk_test"] {
+        assert!(!sent.contains(private), "{private} was sent to the advisor");
+    }
+    // The key is never part of what llmpool shows either.
+    assert!(!w
+        .daemon
+        .advisor_status()
+        .unwrap()
+        .to_string()
+        .contains("sk_test"));
+}
+
+#[test]
+fn an_unsure_or_stay_answer_changes_nothing_and_is_not_asked_again_at_once() {
+    for answers in [
+        json!({"switch": {"noul": 0.4}, "target": {"choice": "A"}, "urgency": {"score": 0.2}}),
+        json!({"switch": {"noul": 0.95}, "target": {"choice": "stay"}, "urgency": {"score": 0.0}}),
+        json!({"switch": {"noul": 0.95}, "target": {"choice": "Z"}}),
+    ] {
+        let (url, asked) = jev(200, answers);
+        let w = world();
+        w.daemon.put_policy(&advisor_policy(&url, "")).unwrap();
+        w.daemon.set_advisor_key(Some("k")).unwrap();
+        let reply = start(&w, "/x", Some("a@x.io"));
+        let sid = reply["session_id"].as_str().unwrap();
+        w.daemon.statusline(sid, &usage(64.0));
+        w.daemon.advise_due();
+        w.daemon.advise_due();
+        let sessions = w.daemon.list_sessions().unwrap();
+        assert_eq!(sessions[0]["account_label"], "a@x.io");
+        assert_eq!(sessions[0]["advice"]["acted"], false);
+        assert_eq!(asked.lock().unwrap().len(), 1, "one question per interval");
+    }
+}
+
+#[test]
+fn the_advisor_is_silent_when_off_keyless_or_nothing_is_near_a_limit_and_failing_is_harmless() {
+    let (url, asked) = jev(402, json!({}));
+    let w = world();
+    let reply = start(&w, "/x", Some("a@x.io"));
+    let sid = reply["session_id"].as_str().unwrap();
+
+    // Off.
+    w.daemon
+        .put_policy(&format!("[advisor]\nenabled = false\nurl = \"{url}\"\n"))
+        .unwrap();
+    w.daemon.set_advisor_key(Some("k")).unwrap();
+    w.daemon.statusline(sid, &usage(64.0));
+    w.daemon.advise_due();
+    // On, but far from any limit.
+    w.daemon.put_policy(&advisor_policy(&url, "")).unwrap();
+    w.daemon.statusline(sid, &usage(10.0));
+    w.daemon.advise_due();
+    // On, near a limit, but no key.
+    w.daemon.set_advisor_key(None).unwrap();
+    w.daemon.statusline(sid, &usage(64.0));
+    w.daemon.advise_due();
+    assert_eq!(asked.lock().unwrap().len(), 0);
+
+    // With a key the service says the account is out of tokens: noted, nothing moves,
+    // and the ordinary rules still work.
+    w.daemon.set_advisor_key(Some("k")).unwrap();
+    w.daemon.advise_due();
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions[0]["account_label"], "a@x.io");
+    assert_eq!(
+        sessions[0]["advice"]["error"],
+        "the advisor account has no tokens left"
+    );
+    w.daemon
+        .put_policy(&advisor_policy(
+            &url,
+            "[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {} }\n",
+        ))
+        .unwrap();
+    w.daemon.hook(sid, "StopFailure", "rate_limit", &json!({}));
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "b@x.io"
+    );
+}
+
+#[test]
+fn a_new_session_starts_where_the_advisor_says_within_what_the_rule_allows() {
+    let (url, asked) = jev(200, json!({"start_on": {"type": "choice", "choice": "B"}}));
+    let w = world();
+    w.daemon.set_advisor_key(Some("k")).unwrap();
+    w.daemon
+        .put_policy(&advisor_policy(&url, "[[rule]]\nname = 'ask the advisor'\non = 'session_start'\ndo = { assign = { tag = 'work', pick = 'advisor' } }\n"))
+        .unwrap();
+    let reply = start(&w, "/x", None);
+    // Two work accounts, lettered in the order the rule lists them; B is the second.
+    let asked_body = asked.lock().unwrap()[0].1.clone();
+    assert_eq!(
+        asked_body["state"]["accounts"].as_object().unwrap().len(),
+        2
+    );
+    assert_eq!(asked_body["questions"]["start_on"]["type"], "choice");
+    let picked = reply["account"]["email"].as_str().unwrap();
+    assert!(picked == "a@x.io" || picked == "b@x.io");
+    let hello = w.daemon.hook(
+        reply["session_id"].as_str().unwrap(),
+        "SessionStart",
+        "",
+        &json!({"session_id": "agent-1"}),
+    );
+    assert!(hello["systemMessage"]
+        .as_str()
+        .unwrap()
+        .contains("(the advisor chose it, under rule \"ask the advisor\")"));
+
+    // An answer outside what the rule allows is ignored; the rule's own choice stands.
+    let (url, _) = jev(200, json!({"start_on": {"choice": "Q"}}));
+    let w = world();
+    w.daemon.set_advisor_key(Some("k")).unwrap();
+    w.daemon
+        .put_policy(&advisor_policy(&url, "[[rule]]\nname = 'r'\non = 'session_start'\ndo = { assign = { tag = 'work', pick = 'advisor' } }\n"))
+        .unwrap();
+    let reply = start(&w, "/x", None);
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions[0]["picked_by"], "rule \"r\"");
+    assert!(reply["account"]["tags"] == json!(["work"]));
+}
+
+#[test]
+fn the_users_own_account_comes_first_and_a_session_comes_home_when_it_has_room_again() {
+    let w = world();
+    w.daemon
+        .patch_account(
+            "a@x.io",
+            serde_json::from_value(json!({"tags": ["own", "work"]})).unwrap(),
+        )
+        .unwrap();
+    w.daemon
+        .put_policy(
+            "[settings]\ncooldown_secs = 0\n\n[[rule]]\nname = 'any work account'\non = 'session_start'\ndo = { assign = { tag = 'work' } }\n\n\
+             [[rule]]\nname = 'leave when nearly full'\non = { usage_above = { percent = 90 } }\ndo = { swap = {} }\n\n\
+             [[rule]]\nname = 'come home'\non = { own_available = { below = 50 } }\ndo = { swap = { tag = 'own' } }\n",
+        )
+        .unwrap();
+    // Own account first, although the other work account is just as empty.
+    let reply = start(&w, "/x", None);
+    let sid = reply["session_id"].as_str().unwrap();
+    assert_eq!(reply["account"]["email"], "a@x.io");
+
+    // Nearly spent: the session leaves for the pool.
+    let soon = chrono::Utc::now().timestamp() + 1;
+    w.daemon.statusline(
+        sid,
+        &json!({"rate_limits": {"five_hour": {"used_percentage": 95, "resets_at": soon}}}),
+    );
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "b@x.io"
+    );
+
+    // While the own account is still full, a tick changes nothing.
+    w.daemon.tick();
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "b@x.io"
+    );
+
+    // Its window resets; the next tick brings the session home.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    w.daemon.tick();
+    let sessions = w.daemon.list_sessions().unwrap();
+    assert_eq!(sessions[0]["account_label"], "a@x.io");
+    assert_eq!(sessions[0]["picked_by"], "rule \"come home\"");
+}
+
+#[test]
+fn settings_change_from_any_surface_without_touching_the_rest_of_the_file() {
+    let w = world();
+    let text =
+        "# my notes\n[[rule]]\nname = 'rl' # keep me\non = 'rate_limited'\ndo = { swap = {} }\n";
+    w.daemon.put_policy(text).unwrap();
+    let out = w
+        .daemon
+        .configure(&json!({"advisor_enabled": true, "switch_above": 0.8}))
+        .unwrap();
+    assert_eq!(
+        (
+            out["advisor_enabled"].as_bool(),
+            out["switch_above"].as_f64()
+        ),
+        (Some(true), Some(0.8))
+    );
+    w.daemon.configure(&json!({"prefer_own": false})).unwrap();
+    let saved = w.daemon.policy_text()["text"].as_str().unwrap().to_string();
+    assert!(saved.starts_with("# my notes\n"), "{saved}");
+    assert!(saved.contains("name = 'rl' # keep me"), "{saved}");
+    assert!(saved.contains("[advisor]\nenabled = true"), "{saved}");
+    assert!(saved.contains("prefer_own = false"), "{saved}");
+    assert_eq!(w.daemon.advisor_status().unwrap()["enabled"], true);
+    // A value that makes no sense is refused and nothing is written.
+    assert_eq!(
+        w.daemon
+            .configure(&json!({"switch_above": 7}))
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(w.daemon.policy_text()["text"].as_str().unwrap(), saved);
+}

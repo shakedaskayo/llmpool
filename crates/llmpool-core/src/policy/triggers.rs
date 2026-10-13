@@ -52,6 +52,7 @@ pub fn all() -> Vec<Box<dyn Trigger>> {
         Box::new(UsageAbove),
         Box::new(Schedule),
         Box::new(Pressure),
+        Box::new(OwnAvailable),
     ]
 }
 
@@ -218,6 +219,61 @@ impl Trigger for Pressure {
                 kind: FieldKind::Text,
             },
         ]
+    }
+
+    fn check(&self, params: &toml::Table) -> Result<(), String> {
+        Self::parse(params).map(|_| ())
+    }
+}
+
+/// Fires, once a minute, for a session that is on a pool account while one of
+/// the user's own accounts (tagged `own`) is free and has room again:
+/// `{ below = 50 }`. Paired with `swap = { tag = "own" }` it brings a session
+/// home after its own account's window has reset.
+struct OwnAvailable;
+
+impl OwnAvailable {
+    fn parse(params: &toml::Table) -> Result<f64, String> {
+        if let Some(key) = params.keys().find(|k| k.as_str() != "below") {
+            return Err(format!("`own_available` takes no parameter `{key}`"));
+        }
+        let below = match params.get("below") {
+            None => 50.0,
+            Some(toml::Value::Integer(i)) => *i as f64,
+            Some(toml::Value::Float(f)) => *f,
+            Some(_) => return Err("`own_available.below` must be a number".into()),
+        };
+        if !(1.0..=100.0).contains(&below) {
+            return Err(format!(
+                "`own_available.below` must be 1 to 100, got {below}"
+            ));
+        }
+        Ok(below)
+    }
+}
+
+impl Trigger for OwnAvailable {
+    fn kind(&self) -> &'static str {
+        "own_available"
+    }
+
+    fn matches(&self, params: &toml::Table, event: Event, ctx: &Context) -> bool {
+        let (Event::Tick, Ok(below), Some(current)) = (event, Self::parse(params), ctx.current())
+        else {
+            return false;
+        };
+        let own = super::select::OWN;
+        !current.tags.contains(own)
+            && ctx.accounts.iter().any(|a| {
+                a.id != current.id && a.usable() && a.tags.contains(own) && a.peak_used() < below
+            })
+    }
+
+    fn schema(&self) -> ParamSchema {
+        vec![Field {
+            name: "below",
+            kind: FieldKind::Percent,
+        }]
     }
 
     fn check(&self, params: &toml::Table) -> Result<(), String> {
@@ -420,6 +476,30 @@ mod tests {
         ] {
             assert!(t.check(&params(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn own_available_fires_only_for_a_session_away_from_a_roomy_own_account() {
+        let t = find("own_available").unwrap();
+        let accounts = [
+            account("mine", &["own"], Some(20.0)),
+            account("pool", &["work"], Some(40.0)),
+        ];
+        let none = toml::Table::new();
+        let away = session("/w", Some("pool"));
+        assert!(t.matches(&none, Event::Tick, &ctx(&away, &accounts)));
+        assert!(!t.matches(&none, Event::UsageUpdated, &ctx(&away, &accounts)));
+        // Already home.
+        let home = session("/w", Some("mine"));
+        assert!(!t.matches(&none, Event::Tick, &ctx(&home, &accounts)));
+        // Own account still too full.
+        let accounts = [
+            account("mine", &["own"], Some(70.0)),
+            account("pool", &["work"], Some(40.0)),
+        ];
+        assert!(!t.matches(&none, Event::Tick, &ctx(&away, &accounts)));
+        assert!(t.matches(&params("below = 80"), Event::Tick, &ctx(&away, &accounts)));
+        assert!(t.check(&params("below = 0")).is_err());
     }
 
     #[test]

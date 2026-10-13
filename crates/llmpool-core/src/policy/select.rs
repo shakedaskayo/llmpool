@@ -3,6 +3,9 @@ use super::rule::{Pick, Target};
 use crate::model::{Account, AccountId};
 use std::collections::BTreeMap;
 
+/// The tag that marks an account as the user's own.
+pub const OWN: &str = "own";
+
 /// Accounts a rule may move a session to.
 ///
 /// `ceiling` is the (window, percent) of a usage-driven rule: accounts at or
@@ -38,12 +41,25 @@ pub fn pick<'a>(
     mut candidates: Vec<&'a Account>,
     cursor: Option<&str>,
     busy: &BTreeMap<AccountId, usize>,
+    own_room: Option<f64>,
 ) -> Option<&'a Account> {
+    // A person's own account comes first while it has room; the pool is for
+    // when it does not.
+    if let Some(room) = own_room {
+        let own: Vec<&Account> = candidates
+            .iter()
+            .copied()
+            .filter(|a| a.tags.contains(OWN) && a.peak_used() < room)
+            .collect();
+        if !own.is_empty() {
+            candidates = own;
+        }
+    }
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
     let load = |a: &Account| busy.get(&a.id).copied().unwrap_or(0);
     match pick {
         // Equal quota goes to the less crowded account.
-        Pick::MostQuota => candidates.into_iter().min_by(|a, b| {
+        Pick::MostQuota | Pick::Advisor => candidates.into_iter().min_by(|a, b| {
             a.peak_used()
                 .total_cmp(&b.peak_used())
                 .then(load(a).cmp(&load(b)))
@@ -109,7 +125,10 @@ mod tests {
         let s = session("/w", Some("current"));
         let c = candidates(&target(""), &ctx(&s, &accounts), Some(("5h", 90.0)));
         assert_eq!(ids(c.clone()), ["fresh", "used"]);
-        assert_eq!(pick(Pick::MostQuota, c, None, &NOBODY).unwrap().id, "fresh");
+        assert_eq!(
+            pick(Pick::MostQuota, c, None, &NOBODY, None).unwrap().id,
+            "fresh"
+        );
     }
 
     #[test]
@@ -159,9 +178,15 @@ mod tests {
     fn most_quota_breaks_ties_by_id() {
         let accounts = [account("b", &[], Some(10.0)), account("a", &[], Some(10.0))];
         assert_eq!(
-            pick(Pick::MostQuota, accounts.iter().collect(), None, &NOBODY)
-                .unwrap()
-                .id,
+            pick(
+                Pick::MostQuota,
+                accounts.iter().collect(),
+                None,
+                &NOBODY,
+                None
+            )
+            .unwrap()
+            .id,
             "a"
         );
     }
@@ -175,17 +200,19 @@ mod tests {
         ];
         let all = || accounts.iter().collect::<Vec<_>>();
         assert_eq!(
-            pick(Pick::RoundRobin, all(), None, &NOBODY).unwrap().id,
+            pick(Pick::RoundRobin, all(), None, &NOBODY, None)
+                .unwrap()
+                .id,
             "a"
         );
         assert_eq!(
-            pick(Pick::RoundRobin, all(), Some("a"), &NOBODY)
+            pick(Pick::RoundRobin, all(), Some("a"), &NOBODY, None)
                 .unwrap()
                 .id,
             "b"
         );
         assert_eq!(
-            pick(Pick::RoundRobin, all(), Some("c"), &NOBODY)
+            pick(Pick::RoundRobin, all(), Some("c"), &NOBODY, None)
                 .unwrap()
                 .id,
             "a"
@@ -212,9 +239,15 @@ mod tests {
             .insert("7d".into(), weekly(100));
         let accounts = [late, soon, account("unknown", &[], None)];
         assert_eq!(
-            pick(Pick::SoonestReset, accounts.iter().collect(), None, &NOBODY)
-                .unwrap()
-                .id,
+            pick(
+                Pick::SoonestReset,
+                accounts.iter().collect(),
+                None,
+                &NOBODY,
+                None
+            )
+            .unwrap()
+            .id,
             "soon"
         );
     }
@@ -234,15 +267,70 @@ mod tests {
         ]
         .into();
         // The emptiest seat first, even though it has less quota left.
-        assert_eq!(pick(Pick::LeastBusy, all(), None, &busy).unwrap().id, "b");
+        assert_eq!(
+            pick(Pick::LeastBusy, all(), None, &busy, None).unwrap().id,
+            "b"
+        );
         // Same quota on a and c: the one carrying fewer sessions.
-        assert_eq!(pick(Pick::MostQuota, all(), None, &busy).unwrap().id, "c");
+        assert_eq!(
+            pick(Pick::MostQuota, all(), None, &busy, None).unwrap().id,
+            "c"
+        );
         // Nothing known about load: quota decides, then the id.
-        assert_eq!(pick(Pick::LeastBusy, all(), None, &NOBODY).unwrap().id, "a");
+        assert_eq!(
+            pick(Pick::LeastBusy, all(), None, &NOBODY, None)
+                .unwrap()
+                .id,
+            "a"
+        );
+    }
+
+    #[test]
+    fn an_own_account_with_room_comes_before_the_pool() {
+        // The pool account is emptier, but the user's own still has room.
+        let accounts = [
+            account("mine", &["own"], Some(60.0)),
+            account("pool", &["work"], Some(5.0)),
+        ];
+        let all = || accounts.iter().collect::<Vec<_>>();
+        assert_eq!(
+            pick(Pick::MostQuota, all(), None, &NOBODY, Some(85.0))
+                .unwrap()
+                .id,
+            "mine"
+        );
+        // Not once it is nearly spent, and not when the preference is off.
+        let accounts = [
+            account("mine", &["own"], Some(90.0)),
+            account("pool", &["work"], Some(5.0)),
+        ];
+        let all = || accounts.iter().collect::<Vec<_>>();
+        assert_eq!(
+            pick(Pick::MostQuota, all(), None, &NOBODY, Some(85.0))
+                .unwrap()
+                .id,
+            "pool"
+        );
+        let accounts = [
+            account("mine", &["own"], Some(60.0)),
+            account("pool", &["work"], Some(5.0)),
+        ];
+        assert_eq!(
+            pick(
+                Pick::MostQuota,
+                accounts.iter().collect(),
+                None,
+                &NOBODY,
+                None
+            )
+            .unwrap()
+            .id,
+            "pool"
+        );
     }
 
     #[test]
     fn pick_from_nothing_is_none() {
-        assert!(pick(Pick::MostQuota, Vec::new(), None, &NOBODY).is_none());
+        assert!(pick(Pick::MostQuota, Vec::new(), None, &NOBODY, None).is_none());
     }
 }

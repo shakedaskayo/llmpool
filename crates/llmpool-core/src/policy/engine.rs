@@ -75,7 +75,13 @@ fn run(
     if let Some(target) = &action.assign {
         let found = select::candidates(target, ctx, ceiling);
         return chosen(
-            select::pick(target.pick, found, ctx.rr_cursor, ctx.busy),
+            select::pick(
+                target.pick,
+                found,
+                ctx.rr_cursor,
+                ctx.busy,
+                settings.own_room(),
+            ),
             Outcome::Assign,
         );
     }
@@ -105,7 +111,13 @@ fn run(
             found.retain(|a| a.used(window) + settings.margin_points <= current.used(window));
         }
         return chosen(
-            select::pick(target.pick, found, ctx.rr_cursor, ctx.busy),
+            select::pick(
+                target.pick,
+                found,
+                ctx.rr_cursor,
+                ctx.busy,
+                settings.own_room(),
+            ),
             Outcome::Swap,
         );
     }

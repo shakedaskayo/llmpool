@@ -11,6 +11,22 @@ pub fn validate(policy: &PolicyFile) -> Vec<String> {
     if !(0.0..=100.0).contains(&policy.settings.margin_points) {
         errors.push("settings: `margin_points` must be 0 to 100".to_string());
     }
+    if !(1.0..=100.0).contains(&policy.settings.own_until) {
+        errors.push("settings: `own_until` must be 1 to 100".to_string());
+    }
+    let advisor = &policy.advisor;
+    if advisor.provider != "jev" {
+        errors.push(format!(
+            "advisor: unknown provider `{}`; only \"jev\" is available",
+            advisor.provider
+        ));
+    }
+    if !(0.5..=1.0).contains(&advisor.switch_above) {
+        errors.push("advisor: `switch_above` must be 0.5 to 1".to_string());
+    }
+    if advisor.min_interval_secs < 30 {
+        errors.push("advisor: `min_interval_secs` must be at least 30".to_string());
+    }
 
     for (index, rule) in policy.rules.iter().enumerate() {
         let mut fail = |message: String| {

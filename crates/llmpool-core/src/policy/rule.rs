@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 pub struct PolicyFile {
     #[serde(default)]
     pub settings: Settings,
+    /// The optional decision layer. Absent or disabled, rules alone decide.
+    #[serde(default, skip_serializing_if = "AdvisorSettings::is_default")]
+    pub advisor: AdvisorSettings,
     #[serde(default, rename = "rule")]
     pub rules: Vec<Rule>,
 }
@@ -26,6 +29,11 @@ impl PolicyFile {
 pub struct Settings {
     pub cooldown_secs: i64,
     pub margin_points: f64,
+    /// Prefer accounts tagged `own` whenever they have room: a person's own
+    /// subscription comes before the shared pool.
+    pub prefer_own: bool,
+    /// An `own` account counts as having room below this percent used.
+    pub own_until: f64,
 }
 
 impl Default for Settings {
@@ -33,7 +41,56 @@ impl Default for Settings {
         Self {
             cooldown_secs: 300,
             margin_points: 10.0,
+            prefer_own: true,
+            own_until: 85.0,
         }
+    }
+}
+
+impl Settings {
+    /// The fill level below which an own account is preferred; `None` when
+    /// own accounts get no special treatment.
+    pub fn own_room(&self) -> Option<f64> {
+        self.prefer_own.then_some(self.own_until)
+    }
+}
+
+/// A model consulted for a second opinion on switching and assignment. It
+/// only ever advises: cooldowns and the rules about which accounts are
+/// usable and free apply to whatever it says.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AdvisorSettings {
+    pub enabled: bool,
+    /// Which decision service. Only "jev" exists.
+    pub provider: String,
+    /// Act on "switch" only when the advisor's probability is at least this.
+    pub switch_above: f64,
+    /// Ask about one session at most this often.
+    pub min_interval_secs: i64,
+    /// A ceiling on questions per day, so a mistake cannot run up a bill.
+    pub max_calls_per_day: u32,
+    /// The service's address, when it is not the provider's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl Default for AdvisorSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "jev".into(),
+            switch_above: 0.7,
+            min_interval_secs: 120,
+            max_calls_per_day: 200,
+            url: None,
+        }
+    }
+}
+
+impl AdvisorSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -172,6 +229,9 @@ pub enum Pick {
     /// The account carrying the fewest sessions, then the most quota: spreads
     /// work instead of piling it onto one login.
     LeastBusy,
+    /// Whatever the advisor chooses among the candidates; the most quota
+    /// when there is no advisor or it does not answer.
+    Advisor,
 }
 
 #[cfg(test)]
@@ -194,13 +254,12 @@ do = { swap = { tag = "same" }, notify = true }
     #[test]
     fn parses_both_trigger_forms() {
         let p = PolicyFile::parse(SAMPLE).unwrap();
+        assert_eq!(p.settings, Settings::default());
         assert_eq!(
-            p.settings,
-            Settings {
-                cooldown_secs: 300,
-                margin_points: 10.0
-            }
+            (p.settings.cooldown_secs, p.settings.margin_points),
+            (300, 10.0)
         );
+        assert!(!p.advisor.enabled);
         assert_eq!(p.rules[0].on.kind, "session_start");
         assert!(p.rules[0].on.params.is_empty());
         assert!(p.rules[0].enabled);

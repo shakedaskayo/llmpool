@@ -1,6 +1,7 @@
 //! The llmpool daemon: owns the account pool, the vault, the live sessions and
 //! the policy file, and decides which login each session's profile holds.
 
+pub mod advisor;
 pub mod client;
 pub mod http;
 mod onboarding;
@@ -13,7 +14,7 @@ use llmpool_adapter_claude::{lock, short_hash, statusline};
 use llmpool_core::model::{Account, AccountId, Health, Kind, Session};
 use llmpool_core::policy::context::{Context, Event};
 use llmpool_core::policy::engine::{self, Decision, Outcome};
-use llmpool_core::policy::rule::{Pick, PolicyFile, Target};
+use llmpool_core::policy::rule::{Pick, PolicyFile, Settings, Target};
 use llmpool_core::policy::{file, select, triggers};
 use llmpool_core::store::Store;
 use llmpool_core::vault::{FileVault, KeychainVault, Vault};
@@ -88,6 +89,9 @@ pub struct Managed {
     /// which rule chose it, or that they did.
     #[serde(default)]
     pub picked_by: Option<String>,
+    /// What the advisor last said about this session, if it is in use.
+    #[serde(default)]
+    pub advice: Option<advisor::Advice>,
     /// Whether the session has been told which account it got.
     #[serde(default)]
     pub greeted: bool,
@@ -124,6 +128,9 @@ struct Persisted {
     /// Claude Code session ids that have already been told what a
     /// `session_start` rule would have chosen, so it is said once.
     suggested: VecDeque<String>,
+    /// The day the advisor's question count belongs to, and the count.
+    advisor_day: String,
+    advisor_calls: u32,
     /// Usage over time per account, for trend lines: (epoch seconds, percent
     /// of the 5-hour window, percent of the 7-day window).
     history: BTreeMap<AccountId, VecDeque<(i64, f64, f64)>>,
@@ -1080,7 +1087,65 @@ impl Daemon {
     /// Register a session and decide which account it runs as. The reply
     /// carries the environment the launcher must set, or a list to ask the
     /// user to choose from.
+    /// When the rule that would place this new session leaves the choice to
+    /// the advisor, ask it. Done before the session is registered and without
+    /// holding the daemon's lock while the advisor thinks.
+    fn advised_start(&self, req: &StartReq) -> Option<AccountId> {
+        if req.account.is_some() || req.tag.is_some() {
+            return None;
+        }
+        let policy = file::load(&self.policy_path()).ok()?;
+        if !policy.advisor.enabled {
+            return None;
+        }
+        let (candidates, load, history) = {
+            let g = self.lock();
+            let accounts = self.accounts(&g).ok()?;
+            let session = Session {
+                id: "new".into(),
+                agent: "claude-code".into(),
+                provider: "claude".into(),
+                cwd: req.cwd.clone(),
+                git_remote: req.git_remote.clone(),
+                model: None,
+                account_id: None,
+                last_swap_at: None,
+            };
+            let decision = self.decide(&g, &policy, Event::SessionStart, &session, &accounts);
+            let rule = policy
+                .rules
+                .iter()
+                .find(|r| Some(&r.name) == decision.rule.as_ref())?;
+            let target = rule
+                .action
+                .assign
+                .as_ref()
+                .filter(|t| t.pick == Pick::Advisor)?;
+            let local = Local::now();
+            let home = self.home.to_string_lossy();
+            let load = busy(&g);
+            let ctx = Context {
+                session: &session,
+                accounts: &accounts,
+                now: now(),
+                weekday: WEEKDAYS[local.weekday().num_days_from_monday() as usize],
+                hour: local.hour() as u8,
+                minute: local.minute() as u8,
+                home: &home,
+                rr_cursor: None,
+                busy: &load,
+            };
+            let candidates: Vec<Account> = select::candidates(target, &ctx, None)
+                .into_iter()
+                .cloned()
+                .collect();
+            (candidates, load.clone(), g.p.history.clone())
+        };
+        self.advise_start(&candidates, &load, &policy, &history)
+    }
+
     pub fn start_session(&self, req: StartReq) -> Api<Value> {
+        let advised = self.advised_start(&req);
         let mut g = self.lock();
         self.reap(&mut g);
         let accounts = self.accounts(&g)?;
@@ -1098,6 +1163,7 @@ impl Daemon {
         };
 
         let mut rule = None;
+        let mut by_advisor = false;
         let mut ask = Vec::new();
         let chosen: Option<Account> = if let Some(name) = &req.account {
             Some(find(&accounts, name)?.clone())
@@ -1127,6 +1193,7 @@ impl Daemon {
                     select::candidates(&target, &ctx, None),
                     None,
                     &load,
+                    None,
                 )
                 .ok_or_else(|| fail(409, format!("no usable account is tagged `{tag}`")))?
                 .clone(),
@@ -1138,6 +1205,13 @@ impl Daemon {
             rule = decision.rule;
             match decision.outcome {
                 Outcome::Assign(id) => {
+                    // The advisor's choice stands only if it is still an
+                    // account the rule itself would have allowed.
+                    let advised = advised
+                        .as_ref()
+                        .and_then(|a| accounts.iter().find(|x| &x.id == a && x.usable()));
+                    by_advisor = advised.is_some();
+                    let id = advised.map_or(id, |a| a.id.clone());
                     g.p.rr_cursor = Some(id.clone());
                     accounts.iter().find(|a| a.id == id).cloned()
                 }
@@ -1167,10 +1241,14 @@ impl Daemon {
                 picked_by: match (&req.account, &req.tag, &rule) {
                     (Some(_), _, _) => Some("you chose it".into()),
                     (_, Some(tag), _) => Some(format!("most quota among accounts tagged {tag}")),
+                    (_, _, Some(rule)) if by_advisor => {
+                        Some(format!("the advisor chose it, under rule \"{rule}\""))
+                    }
                     (_, _, Some(rule)) => Some(format!("rule \"{rule}\"")),
                     _ => None,
                 },
                 greeted: false,
+                advice: None,
                 last_seen: now(),
             },
         );
@@ -1617,6 +1695,7 @@ impl Daemon {
                 native: true,
                 picked_by: Some("it is the login Claude Code uses".into()),
                 greeted: false,
+                advice: None,
                 last_seen: t,
             },
         );
