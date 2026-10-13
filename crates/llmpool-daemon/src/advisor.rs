@@ -177,14 +177,14 @@ impl Daemon {
             .filter(|key| !key.is_empty())
     }
 
-    fn advisor_settings(&self) -> AdvisorSettings {
+    pub(crate) fn advisor_settings(&self) -> AdvisorSettings {
         file::load(&self.policy_path())
             .map(|p| p.advisor)
             .unwrap_or_default()
     }
 
     /// Count one question against today's ceiling; false when it is reached.
-    fn spend_call(&self, g: &mut Inner, settings: &AdvisorSettings) -> bool {
+    pub(crate) fn spend_call(&self, g: &mut Inner, settings: &AdvisorSettings) -> bool {
         let today = Local::now().format("%Y-%m-%d").to_string();
         if g.p.advisor_day != today {
             g.p.advisor_day = today;

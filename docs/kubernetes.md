@@ -27,7 +27,7 @@ The notes the chart prints say how to import accounts.
 | `apiKeys` | Members who connect with a key: name → key (24+ characters) |
 | `admins` | Who may open the server's web page |
 | `access`, `blocked` | The starting rules for who may use what |
-| `gateway.enabled`, `gateway.upstreams` | Be a [gateway]({{ site.baseurl }}/gateway/); move providers' addresses |
+| `gateway.enabled`, `gateway.upstreams`, `gateway.maxInFlight` | Be a [gateway]({{ site.baseurl }}/gateway/); move providers' addresses; how many requests at once |
 | `shareLogins` | Let several members run on one subscription login |
 | `existingSecret` | A Secret you manage, instead of secrets in values |
 | `vaultKey` | The key stored logins are encrypted with; made at install if empty |

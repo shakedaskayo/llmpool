@@ -26,7 +26,22 @@ const CEILING: f64 = 90.0;
 /// passed over, when the provider does not say.
 const COOL_SECS: i64 = 60;
 const ATTEMPTS: usize = 3;
-const KEPT: usize = 200;
+/// Requests remembered for the server's page; the log file keeps them all.
+const KEPT: usize = 2000;
+/// The decision model is asked about one member and provider no more often
+/// than this, and what it says holds for this long.
+const ADVICE_SECS: i64 = 300;
+/// An account below this much of its windows needs no second opinion.
+const ASK_ABOVE: f64 = 50.0;
+
+/// How many requests may be in flight at once: `LLMPOOL_GATEWAY_MAX`, or 256.
+pub(super) fn max_concurrent() -> usize {
+    std::env::var("LLMPOOL_GATEWAY_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(256)
+}
 
 #[derive(Default)]
 pub(super) struct Gateway {
@@ -35,6 +50,29 @@ pub(super) struct Gateway {
     /// Accounts to pass over, and until when.
     cooling: BTreeMap<AccountId, i64>,
     recent: VecDeque<Value>,
+    /// Where the decision model said a member's requests should go, and until when.
+    preferred: BTreeMap<(String, String), (AccountId, i64)>,
+    /// When it was last asked about each member and provider.
+    asked: BTreeMap<(String, String), i64>,
+    decisions: VecDeque<Value>,
+}
+
+impl Gateway {
+    /// With what the log already holds, so a restart does not empty the page.
+    pub(super) fn restored(data_dir: &std::path::Path) -> Self {
+        let text = std::fs::read_to_string(data_dir.join("gateway-traces.log")).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let recent = lines
+            .iter()
+            .rev()
+            .take(KEPT)
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        Self {
+            recent,
+            ..Self::default()
+        }
+    }
 }
 
 /// One account a request could run on: what to send, and where.
@@ -121,7 +159,7 @@ fn passes(name: &str) -> bool {
     )
 }
 
-fn refuse(request: tiny_http::Request, status: u16, message: &str) {
+pub(super) fn refuse(request: tiny_http::Request, status: u16, message: &str) {
     let _ = request.respond(
         tiny_http::Response::from_string(
             json!({"error": {"type": "llmpool_gateway", "message": message}}).to_string(),
@@ -165,16 +203,7 @@ impl TeamServer {
     /// The accounts of `provider` this member may use right now, the best first.
     fn upstreams(&self, who: &str, provider: &str) -> Api<Vec<Upstream>> {
         let settings = self.settings();
-        // `LLMPOOL_UPSTREAM_<PROVIDER>` moves a provider: a proxy of the
-        // organisation's, a compatible endpoint, a provider llmpool has not
-        // heard of.
-        let moved = std::env::var(format!(
-            "LLMPOOL_UPSTREAM_{}",
-            provider.to_uppercase().replace('-', "_")
-        ))
-        .ok()
-        .map(|url| url.trim_end_matches('/').to_string())
-        .filter(|url| !url.is_empty());
+        let moved = self.config.upstreams.get(provider).cloned();
         let default_base = moved
             .or_else(|| providers::upstream_of(provider).map(str::to_string))
             .ok_or_else(|| {
@@ -188,10 +217,10 @@ impl TeamServer {
         let t = now();
         let mut state = self.gateway_state();
         state.cooling.retain(|_, until| *until > t);
-        let sticky = state
-            .sticky
-            .get(&(who.to_string(), provider.to_string()))
-            .cloned();
+        let pair = (who.to_string(), provider.to_string());
+        let sticky = state.sticky.get(&pair).cloned();
+        state.preferred.retain(|_, (_, until)| *until > t);
+        let preferred = state.preferred.get(&pair).map(|(id, _)| id.clone());
         let mut found = Vec::new();
         for account in d.accounts(&g)? {
             if account.provider != provider
@@ -240,18 +269,16 @@ impl TeamServer {
                 base,
             });
         }
-        // Where the member already is, while it has room; then the emptiest.
-        found.sort_by(|a, b| {
-            let rank = |u: &Upstream| {
-                let full = u.account.peak_used() >= CEILING;
-                (
-                    full,
-                    sticky.as_ref() != Some(&u.account.id),
-                    u.account.peak_used() as u64,
-                    u.account.id.clone(),
-                )
-            };
-            rank(a).cmp(&rank(b))
+        // What the decision model chose, if it has spoken lately; then where
+        // the member already is, while it has room; then the emptiest.
+        found.sort_by_key(|u| {
+            (
+                u.account.peak_used() >= CEILING,
+                preferred.as_ref() != Some(&u.account.id),
+                sticky.as_ref() != Some(&u.account.id),
+                u.account.peak_used() as u64,
+                u.account.id.clone(),
+            )
         });
         Ok(found)
     }
@@ -271,7 +298,187 @@ impl TeamServer {
     }
 
     pub(super) fn gateway_recent(&self) -> Vec<Value> {
-        self.gateway_state().recent.iter().cloned().collect()
+        self.gateway_state()
+            .recent
+            .iter()
+            .take(200)
+            .cloned()
+            .collect()
+    }
+
+    /// Everything the Requests page shows: the requests that match, and what
+    /// they add up to.
+    pub(super) fn gateway_report(&self, filter: &Value) -> Value {
+        let state = self.gateway_state();
+        let wanted = |name: &str, t: &Value| {
+            filter[name]
+                .as_str()
+                .is_none_or(|want| want.is_empty() || t[name].as_str() == Some(want))
+        };
+        let failed = |t: &Value| t["status"].as_u64().unwrap_or(0) >= 400;
+        let matching: Vec<&Value> = state
+            .recent
+            .iter()
+            .filter(|t| wanted("who", t) && wanted("provider", t) && wanted("account", t))
+            .filter(|t| match filter["result"].as_str() {
+                Some("ok") => !failed(t),
+                Some("failed") => failed(t),
+                _ => true,
+            })
+            .collect();
+        let sum =
+            |name: &str, rows: &[&Value]| rows.iter().filter_map(|t| t[name].as_u64()).sum::<u64>();
+        let mut times: Vec<u64> = matching.iter().filter_map(|t| t["ms"].as_u64()).collect();
+        times.sort_unstable();
+        let at = |q: f64| {
+            times
+                .get(((times.len() as f64 - 1.0) * q).round() as usize)
+                .copied()
+        };
+        let group = |name: &str| -> Vec<Value> {
+            let mut by: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+            for t in &matching {
+                by.entry(t[name].as_str().unwrap_or("none").to_string())
+                    .or_default()
+                    .push(t);
+            }
+            let mut rows: Vec<Value> = by
+                .iter()
+                .map(|(key, rows)| {
+                    json!({
+                        "name": key, "provider": rows[0]["provider"], "requests": rows.len(),
+                        "failed": rows.iter().filter(|t| failed(t)).count(),
+                        "input_tokens": sum("input_tokens", rows), "output_tokens": sum("output_tokens", rows),
+                    })
+                })
+                .collect();
+            rows.sort_by_key(|r| std::cmp::Reverse(r["requests"].as_u64()));
+            rows
+        };
+        // The last hour, a minute at a time, oldest first.
+        let now_minute = now() / 60;
+        let mut minutes = vec![0u64; 60];
+        for t in &matching {
+            let ago = now_minute - t["at"].as_i64().unwrap_or(0) / 60;
+            if (0..60).contains(&ago) {
+                minutes[59 - ago as usize] += 1;
+            }
+        }
+        let distinct = |name: &str| -> Vec<&str> {
+            let mut all: Vec<&str> = state
+                .recent
+                .iter()
+                .filter_map(|t| t[name].as_str())
+                .collect();
+            all.sort_unstable();
+            all.dedup();
+            all
+        };
+        json!({
+            "requests": matching.iter().take(200).collect::<Vec<_>>(),
+            "totals": {
+                "requests": matching.len(), "failed": matching.iter().filter(|t| failed(t)).count(),
+                "input_tokens": sum("input_tokens", &matching), "output_tokens": sum("output_tokens", &matching),
+                "p50_ms": at(0.5), "p95_ms": at(0.95),
+                "moved": matching.iter().filter(|t| t["tried"].as_array().is_some_and(|a| !a.is_empty())).count(),
+            },
+            "by_account": group("account"),
+            "by_member": group("who"),
+            "per_minute": minutes,
+            "members": distinct("who"), "providers": distinct("provider"), "accounts": distinct("account"),
+            "decisions": state.decisions.iter().take(50).collect::<Vec<_>>(),
+            "in_flight": self.active.load(std::sync::atomic::Ordering::SeqCst),
+            "limit": max_concurrent(),
+            "kept": state.recent.len(),
+        })
+    }
+
+    /// Ask the decision model where this member's requests to a provider
+    /// should go next, if it is switched on and there is something to decide.
+    /// Never on a request's own time: this runs after the answer has gone out.
+    fn consider(&self, who: &str, provider: &str) {
+        let d = &self.daemon;
+        let policy = d.advisor_settings();
+        if !policy.enabled {
+            return;
+        }
+        let pair = (who.to_string(), provider.to_string());
+        let settings = self.settings();
+        let t = now();
+        let (candidates, load, history, current) = {
+            let mut state = self.gateway_state();
+            if state
+                .asked
+                .get(&pair)
+                .is_some_and(|at| t - at < ADVICE_SECS)
+            {
+                return;
+            }
+            let mut g = d.lock();
+            let Ok(accounts) = d.accounts(&g) else {
+                return;
+            };
+            let candidates: Vec<Account> = accounts
+                .into_iter()
+                .filter(|a| {
+                    a.provider == provider
+                        && a.usable()
+                        && a.peak_used() < 100.0
+                        && !state.cooling.contains_key(&a.id)
+                        && settings.opens(who, &a.tags)
+                })
+                .collect();
+            let current = state.sticky.get(&pair).cloned();
+            let busy = current
+                .as_ref()
+                .and_then(|id| candidates.iter().find(|a| &a.id == id))
+                .is_none_or(|a| a.peak_used() >= ASK_ABOVE);
+            if candidates.len() < 2 || !busy || !d.spend_call(&mut g, &policy) {
+                return;
+            }
+            state.asked.insert(pair.clone(), t);
+            // How many members each account is carrying right now.
+            let mut load = BTreeMap::new();
+            for id in state.sticky.values() {
+                *load.entry(id.clone()).or_insert(0usize) += 1;
+            }
+            (candidates, load, g.p.history.clone(), current)
+        };
+        let whole = llmpool_core::policy::rule::PolicyFile {
+            advisor: policy,
+            ..Default::default()
+        };
+        let chosen = d.advise_start(&candidates, &load, &whole, &history);
+        let label = |id: &AccountId| {
+            candidates
+                .iter()
+                .find(|a| &a.id == id)
+                .map_or_else(|| id.clone(), |a| a.label.clone())
+        };
+        let mut state = self.gateway_state();
+        let record = match &chosen {
+            Some(id) => {
+                state
+                    .preferred
+                    .insert(pair, (id.clone(), t + ADVICE_SECS * 2));
+                json!({"at": t, "who": who, "provider": provider, "chose": label(id),
+                       "was_on": current.as_ref().map(&label), "among": candidates.len(),
+                       "moved": current.as_ref() != Some(id)})
+            }
+            None => json!({"at": t, "who": who, "provider": provider, "chose": null,
+                           "was_on": current.as_ref().map(&label), "among": candidates.len(),
+                           "note": "the model did not answer; the rules decide"}),
+        };
+        state.decisions.push_front(record.clone());
+        state.decisions.truncate(200);
+        drop(state);
+        if let Some(id) = &chosen {
+            self.audit(
+                "gateway_advised",
+                who,
+                &format!("{provider}: the decision model chose {}", label(id)),
+            );
+        }
     }
 
     /// What a subscription account's answer says about how full it is.
@@ -506,13 +713,17 @@ impl TeamServer {
             let _ = out.flush();
         }
         sniff.finish();
+        // The agent has its answer; nothing below is on its time.
+        drop(out);
+        let took = started.elapsed().as_millis() as u64;
         self.trace(json!({
             "at": now(), "who": who, "provider": provider, "account": upstream.account.label,
             "model": model, "method": method, "path": rest.split('?').next(), "status": status,
-            "ms": started.elapsed().as_millis() as u64, "bytes": bytes,
+            "ms": took, "bytes": bytes,
             "input_tokens": sniff.input, "output_tokens": sniff.output,
             "tried": tried, "streamed": events,
         }));
+        self.consider(&who, &provider);
     }
 }
 

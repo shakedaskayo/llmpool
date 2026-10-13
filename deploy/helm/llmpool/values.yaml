@@ -38,6 +38,9 @@ gateway:
   enabled: false
   # Move a provider's address, e.g. to your own proxy: provider -> URL.
   upstreams: {}
+  # How many requests may be in flight at once. Each is a thread while it
+  # runs; raise the memory limit with it.
+  maxInFlight: 256
 
 # Who may run the server from its web page (at publicUrl): addresses that may
 # sign in, or names of API keys. Empty: the page is closed to everyone.

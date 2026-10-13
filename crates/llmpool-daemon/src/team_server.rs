@@ -65,6 +65,10 @@ pub struct Config {
     /// Be a gateway: members' agents send their requests here, and no login
     /// or key leaves the server.
     pub gateway: bool,
+    /// Where the gateway reaches a provider, when not at its usual address:
+    /// a proxy of the organisation's, a compatible endpoint, or a provider
+    /// llmpool has not heard of. Provider name to base address.
+    pub upstreams: BTreeMap<String, String>,
 }
 
 /// What an administrator can change while the server runs. It starts as the
@@ -122,6 +126,14 @@ impl Config {
             blocked: list("LLMPOOL_BLOCKED"),
             admins: list("LLMPOOL_ADMINS"),
             gateway: var("LLMPOOL_GATEWAY").is_some_and(|v| v == "1" || v == "true"),
+            // `LLMPOOL_UPSTREAM_<PROVIDER>=https://...`
+            upstreams: std::env::vars()
+                .filter_map(|(name, url)| {
+                    let provider = name.strip_prefix("LLMPOOL_UPSTREAM_")?;
+                    let url = url.trim().trim_end_matches('/').to_string();
+                    (!url.is_empty()).then(|| (provider.to_lowercase().replace('_', "-"), url))
+                })
+                .collect(),
         };
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
@@ -253,6 +265,8 @@ pub struct TeamServer {
     members_path: PathBuf,
     settings: Mutex<Settings>,
     gateway: Mutex<gateway::Gateway>,
+    /// Gateway requests in flight right now.
+    active: std::sync::atomic::AtomicUsize,
 }
 
 enum Reply {
@@ -364,7 +378,8 @@ impl TeamServer {
             });
         Self {
             settings: Mutex::new(settings),
-            gateway: Mutex::new(gateway::Gateway::default()),
+            gateway: Mutex::new(gateway::Gateway::restored(daemon.data_dir())),
+            active: std::sync::atomic::AtomicUsize::new(0),
             config,
             daemon,
             state: Mutex::new(State {
@@ -828,11 +843,7 @@ impl TeamServer {
             .iter()
             .filter(|p| {
                 llmpool_core::providers::upstream_of(p).is_some()
-                    || std::env::var(format!(
-                        "LLMPOOL_UPSTREAM_{}",
-                        p.to_uppercase().replace('-', "_")
-                    ))
-                    .is_ok()
+                    || self.config.upstreams.contains_key(*p)
             })
             .map(|provider| {
                 json!({
@@ -927,9 +938,25 @@ impl TeamServer {
         }
     }
 
-    fn handle(&self, mut request: tiny_http::Request) {
+    fn handle(self: &Arc<Self>, mut request: tiny_http::Request) {
         if request.url().starts_with("/gateway/") {
-            return self.gateway(request);
+            // A request to a model can run for minutes; each gets a thread of
+            // its own so the few that accept connections are never all busy.
+            let limit = gateway::max_concurrent();
+            if self.active.fetch_add(1, Ordering::SeqCst) >= limit {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                return gateway::refuse(
+                    request,
+                    503,
+                    "this gateway is at its limit of requests in flight; try again",
+                );
+            }
+            let server = self.clone();
+            std::thread::spawn(move || {
+                server.gateway(request);
+                server.active.fetch_sub(1, Ordering::SeqCst);
+            });
+            return;
         }
         let bearer = request
             .headers()

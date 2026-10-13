@@ -14,6 +14,8 @@ const state = {
   stats: {},
   config: {},
   team: { state: "off" },
+  report: null, // the gateway's requests and what they add up to, on a server's page
+  reportFilter: { who: "", provider: "", account: "", result: "" },
   server: {}, // what a team's server says about itself, when this page is its own
   agents: { harnesses: [] },
   providers: [],
@@ -351,7 +353,73 @@ function renderPool() {
 
 const EVENT_ICONS = { swap: "⇄", assign: "▶", adopt: "▶", end: "■", notice: "ℹ", login: "⚠", policy_error: "⚠", agent: "·" };
 
+// A server's Requests page: what went through the gateway, who sent it, on
+// which account, and what the decision model had to say.
+function renderRequests() {
+  const r = state.report;
+  if (!state.server.settings?.gateway) {
+    return ($("sessions").innerHTML = `${pageHead("Requests", "What members' agents send through this server.")}
+      <div class="empty"><h3>The gateway is off</h3><p>Turn it on and members' agents send their requests here, where each is put on an account from the pool and recorded.</p><button class="primary" data-act="goto-server">Open the Server page</button></div>`);
+  }
+  if (!r) return ($("sessions").innerHTML = pageHead("Requests", "Loading…"));
+  const f = state.reportFilter;
+  const n = (x) => Number(x ?? 0).toLocaleString();
+  const t = r.totals;
+  const tile = (value, label, level = "") => `<div class="tile ${level}"><strong>${value}</strong><span>${label}</span></div>`;
+  const peak = Math.max(1, ...r.per_minute);
+  const bars = r.per_minute.map((v, i) => `<rect x="${i * 10 + 1}" y="${44 - Math.round((v / peak) * 40)}" width="8" height="${Math.max(v ? 2 : 0, Math.round((v / peak) * 40))}" rx="1.5"><title>${v} request${v === 1 ? "" : "s"}, ${59 - i} min ago</title></rect>`).join("");
+  const pick = (name, label, values) => `<label class="filter">${label} <select data-act="report-filter" data-name="${name}"><option value="">all</option>${values.map((v) => `<option value="${esc(v)}"${f[name] === v ? " selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
+  const share = (rows, title, isMember) => `<div class="card pad"><h3>${title}</h3>${
+    rows.length
+      ? `<table><thead><tr><th scope="col">${isMember ? "Member" : "Account"}</th><th scope="col">Requests</th><th scope="col">Tokens in</th><th scope="col">Tokens out</th><th scope="col">Failed</th></tr></thead><tbody>${rows
+          .map((x) => `<tr><td>${isMember ? esc(x.name) : `<span class="agentname">${avatar(x.provider, x.provider)}${esc(x.name)}</span>`}</td><td>${n(x.requests)}<span class="sharebar"><i style="width:${Math.round((x.requests / Math.max(1, t.requests)) * 100)}%"></i></span></td><td class="muted">${n(x.input_tokens)}</td><td class="muted">${n(x.output_tokens)}</td><td class="${x.failed ? "warnmark" : "muted"}">${n(x.failed)}</td></tr>`)
+          .join("")}</tbody></table>`
+      : `<span class="muted">Nothing yet.</span>`
+  }</div>`;
+  const rows = r.requests
+    .map((x) => `<tr><td class="muted">${new Date(x.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td><td>${esc(x.who)}</td><td><span class="agentname">${avatar(x.provider, x.provider)}${esc(x.account ?? "none")}</span></td><td class="muted">${esc(x.model ?? "")}</td>
+        <td>${x.status < 400 ? `<span class="ok">${x.status}</span>` : `<span class="warnmark">${x.status}</span>`}${x.tried?.length ? ` <span class="badge" title="${esc(x.tried.join("; "))}">after ${plural(x.tried.length, "other")}</span>` : ""}</td>
+        <td class="muted">${n(x.input_tokens)} / ${n(x.output_tokens)}</td><td class="muted">${n(x.ms)} ms${x.streamed ? " · streamed" : ""}</td></tr>`)
+    .join("");
+  const decisions = r.decisions
+    .map((d) => `<li><time>${new Date(d.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${d.moved ? "swap" : ""}" aria-hidden="true">${d.moved ? "⇄" : "·"}</span><span>${
+      d.chose
+        ? `For <strong>${esc(d.who)}</strong> on ${esc(agentTitle(d.provider))}: ${d.moved ? `move from ${esc(d.was_on ?? "nowhere")} to <strong>${esc(d.chose)}</strong>` : `stay on <strong>${esc(d.chose)}</strong>`} <span class="muted">· chosen among ${d.among}</span>`
+        : `For <strong>${esc(d.who)}</strong>: <span class="muted">${esc(d.note ?? "no answer")}</span>`
+    }</span></li>`)
+    .join("");
+  $("sessions").innerHTML = `${pageHead("Requests", `What members' agents sent through this server. ${n(r.in_flight)} in flight now, of ${n(r.limit)} at once.`, `<button data-act="report-refresh">Refresh</button>`)}
+    <div class="tiles">
+      ${tile(n(t.requests), "requests")}
+      ${tile(n(t.input_tokens), "tokens in")}
+      ${tile(n(t.output_tokens), "tokens out")}
+      ${tile(t.p50_ms == null ? "–" : `${n(t.p50_ms)} ms`, `typical · ${t.p95_ms == null ? "–" : n(t.p95_ms) + " ms"} slowest 5%`)}
+      ${tile(n(t.failed), `failed · ${n(t.moved)} moved to another account`, t.failed ? "warn" : "")}
+    </div>
+    <div class="card pad chart"><h3>Requests a minute, last hour</h3>
+      <svg viewBox="0 0 600 46" preserveAspectRatio="none" role="img" aria-label="Requests per minute over the last hour, ${n(r.per_minute.reduce((a, b) => a + b, 0))} in all, at most ${peak} in a minute">${bars}</svg></div>
+    <div class="steps">${share(r.by_account, "By account", false)}${share(r.by_member, "By member", true)}</div>
+
+    <h3 class="section">Decisions <span class="count">${r.decisions.length}</span></h3>
+    ${decisions ? `<ul class="events">${decisions}</ul>` : `<p class="muted">${state.config.advisor_enabled ? "The decision model has not been asked yet. It is asked when a member's account passes half of a window and there is another to choose." : "The decision model is off, so the fixed rules place every request: stay while there is room, move at 90%, on refusal, or on failure. Turn it on from the Server page."}</p>`}
+
+    <h3 class="section">Requests <span class="count">${n(t.requests)}</span></h3>
+    <div class="toolbar">${pick("who", "Member", r.members)}${pick("provider", "Provider", r.providers)}${pick("account", "Account", r.accounts)}${pick("result", "Result", ["ok", "failed"])}
+      <span class="spacer"></span><span class="muted">${r.requests.length < t.requests ? `newest ${r.requests.length} of ${n(t.requests)}` : ""} · ${n(r.kept)} kept here, all of them in <code>gateway-traces.log</code></span></div>
+    ${rows ? `<div class="card pad"><table class="traces"><caption class="skip">Requests</caption><thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Account</th><th scope="col">Model</th><th scope="col">Result</th><th scope="col">Tokens in / out</th><th scope="col">Time</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty"><h3>No requests match</h3><p>Nothing has come through with these filters.</p></div>`}`;
+}
+
+async function loadReport() {
+  if (!SERVER || !state.server.settings?.gateway) return;
+  try {
+    state.report = await api("POST", "/server/requests", state.reportFilter);
+  } catch (e) {
+    console.warn("requests", e);
+  }
+}
+
 function renderSessions() {
+  if (SERVER) return renderRequests();
   const everyone = state.accounts.filter((a) => a.enabled && a.health === "ok");
   const rows = state.sessions
     .map((s) => {
@@ -874,18 +942,20 @@ function renderServer() {
     <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="srv-gateway"${v.settings.gateway ? " checked" : ""} />
         <span><strong>Send members' requests through this server</strong><br /><span class="muted">On, no login or key leaves the server: members' agents talk to <code>${esc(v.gateway.base)}/&lt;provider&gt;</code> with their own session, and each request runs on an account chosen here. When one fills up or is refused, the next request runs on another, with nothing to restart. Off, accounts are lent to members' machines instead.</span></span></label>
-      ${
-        v.settings.gateway
-          ? v.gateway.recent.length
-            ? `<table class="traces"><caption class="skip">Recent requests</caption><thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Account</th><th scope="col">Model</th><th scope="col">Result</th><th scope="col">Tokens in / out</th><th scope="col">Time</th></tr></thead><tbody>${v.gateway.recent
-                .slice(0, 12)
-                .map((t) => `<tr><td class="muted">${new Date(t.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td><td>${esc(t.who)}</td><td><span class="agentname">${avatar(t.provider, t.provider)}${esc(t.account ?? "none")}</span></td><td class="muted">${esc(t.model ?? "")}</td>
-                  <td>${t.status < 400 ? `<span class="ok">${t.status}</span>` : `<span class="warnmark">${t.status}</span>`}${t.tried?.length ? ` <span class="muted" title="${esc(t.tried.join("; "))}">after ${plural(t.tried.length, "other")}</span>` : ""}</td>
-                  <td class="muted">${t.input_tokens ?? 0} / ${t.output_tokens ?? 0}</td><td class="muted">${t.ms ?? 0} ms</td></tr>`)
-                .join("")}</tbody></table><p class="muted">Every request is one line in <code>gateway-traces.log</code>: who, account, model, tokens, time. Never what was said.</p>`
-            : `<p class="muted">No requests yet. Members get the gateway the next time their llmpool syncs.</p>`
-          : ""
-      }
+      ${v.settings.gateway ? `<div class="copy indent"><button data-act="goto-requests">Open requests</button><span class="muted">${v.gateway.recent.length ? `${v.gateway.recent.length >= 200 ? "200+" : v.gateway.recent.length} recorded` : "none yet; members get the gateway the next time their llmpool syncs"} · every request is one line in <code>gateway-traces.log</code>: who, account, model, tokens, time. Never what was said.</span></div>` : ""}
+    </div>
+
+    <h3 class="section">Decision model <span class="badge">optional</span></h3>
+    <div class="card pad">
+      <label class="switch"><input type="checkbox" data-act="advisor"${state.config.advisor_enabled ? " checked" : ""} />
+        <span><strong>Let a decision model place heavy use</strong><br /><span class="muted">When a member's account passes half of a window and there is another to choose, the server shows the model the whole pool, with how many members are on each account, and asks where that member's requests should go next. Accounts are named by letter; nothing that was said is sent. It is asked after a request has been answered, never on its time, and its choice holds for ten minutes. Off, the fixed rules place every request.</span></span></label>
+      <p class="indent">${state.config.has_key ? `<span class="ok" aria-hidden="true">✓</span> A key is stored on the server. <button class="quiet danger" data-act="key-clear">Forget it</button>` : `<span class="warnmark" aria-hidden="true">⚠</span> No key yet.`}
+        <span class="muted"> · ${esc(state.config.calls_today ?? 0)} of ${esc(state.config.max_calls_per_day ?? 200)} questions used today</span></p>
+      <div class="copy indent">
+        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${state.config.has_key ? "replace the key" : "Jev API key"}" aria-label="Decision model API key" />
+        <button data-act="key-save">Save key</button>
+        <button class="quiet" data-act="goto-requests">See its decisions</button>
+      </div>
     </div>
 
     <h3 class="section">Lending</h3>
@@ -1000,6 +1070,11 @@ async function settingsAction(el) {
     if (act === "team-key" && !key) return toast("Paste the key first", "error");
     state.teamUrl = url;
     await attempt(() => api("POST", "/team", { url, key }), key ? "Connected to the team's pool" : "Finish signing in in your browser");
+  }
+  if (act === "goto-requests" || act === "goto-server") return go(act === "goto-requests" ? "sessions" : "team");
+  if (act === "report-refresh") {
+    await loadReport();
+    return renderRequests();
   }
   if (act === "srv-gateway") await attempt(() => api("PUT", "/server", { gateway: el.checked }), el.checked ? "The server is a gateway; members switch over at their next sync" : "Accounts are lent to members again");
   if (act === "srv-share") await attempt(() => api("PUT", "/server", { share_logins: el.checked }), el.checked ? "Logins are shared between members" : "One member per login at a time");
@@ -1144,7 +1219,7 @@ function renderSummary() {
   const problems = (SERVER ? 0 : state.issues.length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
     pool: problems ? "!" : state.accounts.length || "",
-    sessions: state.sessions.length || "",
+    sessions: SERVER ? (state.report?.in_flight ? state.report.in_flight : "") : state.sessions.length || "",
     policies: (state.remotePolicy.policy?.rule?.length ?? 0) + (state.remotePolicy.team?.rule?.length ?? 0) || "",
     agents: state.agents.harnesses.filter((h) => h.installed).length + 1,
     team: state.team.state === "connected" ? (state.team.message ? "!" : "on") : state.team.state === "waiting" ? "…" : "",
@@ -1177,6 +1252,7 @@ async function refresh(force = false) {
       optional("config", "/config"),
       optional("team", "/team"),
       SERVER ? optional("server", "/server") : null,
+      loadReport(),
       optional("agents", "/harnesses"),
       state.providers.length ? null : optional("providers", "/providers"),
       optional("remotePolicy", "/policies"),
@@ -1248,12 +1324,12 @@ $("pool").addEventListener("keydown", (e) => {
   if (e.target.id === "login-code") document.querySelector('[data-act="login-code"]')?.click();
 });
 $("sessions").addEventListener("click", async (e) => {
-  if (!e.target.matches('button[data-act="advise"]')) return;
+  if (SERVER || !e.target.matches('button[data-act="advise"]')) return;
   e.target.disabled = true;
   await attempt(() => api("POST", `/sessions/${e.target.dataset.id}/advise`), "The advisor answered");
   await refresh(true);
 });
-$("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
+$("sessions").addEventListener("change", (e) => !SERVER && e.target.matches("select[data-act]") && sessionAction(e.target));
 for (const page of ["settings", "team", "agents"]) {
   $(page).addEventListener("click", (e) => {
     if (!e.target.matches("button[data-act], a[data-act]")) return;
@@ -1298,8 +1374,17 @@ window.__TAURI__.event.listen("llmpool-message", (event) => {
 
 // On a server: only what a server has, and a way out.
 if (SERVER) {
-  for (const name of ["sessions", "agents", "settings"]) $(`tab-${name}`).hidden = true;
+  for (const name of ["agents", "settings"]) $(`tab-${name}`).hidden = true;
   $("tab-team").querySelector("span").textContent = "Server";
+  $("tab-sessions").querySelector("span").textContent = "Requests";
+  // The Requests page shares the handlers of the pages beside it.
+  $("sessions").addEventListener("click", (e) => e.target.matches("button[data-act]") && settingsAction(e.target));
+  $("sessions").addEventListener("change", async (e) => {
+    if (!e.target.matches('select[data-act="report-filter"]')) return;
+    state.reportFilter[e.target.dataset.name] = e.target.value;
+    await loadReport();
+    renderRequests();
+  });
   document.querySelector(".keys").innerHTML = `<a href="#" id="sign-out">Sign out</a>`;
   $("sign-out").addEventListener("click", async (e) => {
     e.preventDefault();

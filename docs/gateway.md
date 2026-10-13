@@ -32,9 +32,19 @@ The server keeps a member on the account they were last on while it has room, wh
 
 For Claude subscriptions the server reads how full each account is from the provider's own answers.
 
-## Traces
+### With the decision model
 
-Each request leaves one line in `gateway-traces.log` in the server's data directory, and on standard error:
+Turn the [decision model]({{ '/decisions/' | relative_url }}) on (the server's page, **Server → Decision model**) and the gateway stops waiting for 90%. When a member's account passes half of a window and there is another to choose, the server shows the model the whole pool, with how many members are on each account, and asks where that member's requests should go next. The answer holds for ten minutes and is recorded, so heavy use is spread across accounts before any one of them is close to its limit.
+
+The model is asked after a request has been answered, never on a request's own time, at most once every five minutes per member and provider, and within the daily budget. If it is off, slow or silent, the rules above place every request.
+
+## Requests and traces
+
+The server's page has a **Requests** page: totals, tokens in and out, typical and slowest times, failures, requests a minute over the last hour, who sent what and which accounts carried it, every decision the model made, and the requests themselves, narrowed by member, provider, account or result.
+
+![Requests on the server's page]({{ '/assets/requests.png' | relative_url }})
+
+Each request is also one line in `gateway-traces.log` in the server's data directory, and on standard error for your log collector:
 
 ```json
 {"at": 1791896274, "who": "ann@example.com", "provider": "claude", "account": "team-1@example.com",
@@ -42,7 +52,13 @@ Each request leaves one line in `gateway-traces.log` in the server's data direct
  "input_tokens": 1820, "output_tokens": 412, "streamed": true, "tried": []}
 ```
 
-Who, which account, which model, how long, how many tokens. Never what was said: bodies are passed through and not kept.
+Who, which account, which model, how long, how many tokens. Never what was said: bodies are passed through and not kept. The page keeps the newest 2,000; the file keeps all of them.
+
+## How much it carries
+
+Every request in flight has a thread of its own, so a long streamed answer never holds up another. On a laptop, 200 requests at once ran in about 50 MB of memory. `LLMPOOL_GATEWAY_MAX` (the chart's `gateway.maxInFlight`, 256 by default) caps how many may be in flight; beyond it the gateway answers 503 at once instead of queueing.
+
+The server is one process, because the pool has one writer: it grows by giving it more memory and a higher limit, not by adding replicas.
 
 ## What changes for Claude Code
 

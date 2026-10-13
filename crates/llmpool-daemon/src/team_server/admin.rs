@@ -185,12 +185,15 @@ impl TeamServer {
                     .map(percent_decode)
                     .collect();
                 let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
-                if method != "GET" {
+                if method != "GET" && path != "/server/requests" {
                     self.audit("admin", &who, &format!("{method} {path}"));
                 }
                 let answer = match (method, parts.as_slice()) {
                     ("GET", ["server"]) => self.overview(&who),
                     ("PUT", ["server"]) => self.configure(&body).and_then(|()| self.overview(&who)),
+                    // The filter travels in the body: a member's address in a
+                    // query string would end up in access logs.
+                    ("POST", ["server", "requests"]) => Ok(self.gateway_report(&body)),
                     ("DELETE", ["server", "members", email]) => {
                         let mut state = self.state();
                         state.members.retain(|_, m| m.email != *email);

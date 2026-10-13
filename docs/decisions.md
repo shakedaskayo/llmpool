@@ -57,4 +57,5 @@ The model used today is [Jev](https://jevai.info), a model built for fast struct
 
 ## Where it applies
 
-The model advises each member's llmpool: which account a session starts on, and when a running Claude Code session should move. A server working as a [gateway]({{ '/gateway/' | relative_url }}) chooses per request by fixed rules (stay while there is room, move at 90%, on refusal, or on failure), which need no model and add no delay to a request.
+- **On each member's machine**: which account a session starts on, and when a running Claude Code session should move.
+- **On a team's gateway**: where each member's requests go next, once their account is past half of a window. See [Gateway]({{ '/gateway/' | relative_url }}). Its decisions are listed on the server's Requests page.

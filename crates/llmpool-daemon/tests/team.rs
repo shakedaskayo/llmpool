@@ -722,21 +722,29 @@ fn upstream() -> Upstream {
                         .with_header(header("retry-after", "30")),
                 );
             } else if request.url().contains("stream") {
-                // Two events, a moment apart, each sent the moment it exists.
-                use std::io::Write;
-                let mut out = request.into_writer();
-                let _ = out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
-                let mut event = |text: &str| {
-                    let _ = write!(out, "{:x}\r\n{text}\r\n", text.len());
-                    let _ = out.flush();
-                };
-                event("data: {\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n");
-                std::thread::sleep(Duration::from_millis(600));
-                event("data: {\"usage\":{\"output_tokens\":9}}\n\n");
-                event("");
+                std::thread::spawn(move || {
+                    // Two events, a moment apart, each sent the moment it exists.
+                    use std::io::Write;
+                    let mut out = request.into_writer();
+                    let _ = out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+                    let mut event = |text: &str| {
+                        let _ = write!(out, "{:x}\r\n{text}\r\n", text.len());
+                        let _ = out.flush();
+                    };
+                    event("data: {\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n");
+                    std::thread::sleep(Duration::from_millis(600));
+                    event("data: {\"usage\":{\"output_tokens\":9}}\n\n");
+                    event("");
+                });
             } else {
                 // A subscription login says how full it is with every answer.
-                let used = if auth.contains("a-1") { "0.95" } else { "0.10" };
+                let used = if auth.contains("a-1") {
+                    "0.95"
+                } else if auth.contains("m-1") {
+                    "0.60"
+                } else {
+                    "0.10"
+                };
                 let _ = request.respond(
                     tiny_http::Response::from_string(
                         "{\"ok\":true,\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22}}",
@@ -757,7 +765,6 @@ fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself()
     use llmpool_daemon::KeyReq;
     use std::io::{BufRead, BufReader};
     let provider = upstream();
-    std::env::set_var("LLMPOOL_UPSTREAM_CLAUDE", &provider.url);
     let pool = machine(&[("a@x.io", "a-1"), ("b@x.io", "b-1")]);
     for (label, key) in [("limited", "k-limited"), ("good", "k-good")] {
         pool.daemon
@@ -773,20 +780,13 @@ fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself()
             })
             .unwrap();
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let url = format!("http://127.0.0.1:{port}");
-    let config = Config {
-        public_url: url.clone(),
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
         api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
         gateway: true,
+        upstreams: [("claude".to_string(), provider.url.clone())].into(),
         ..Config::default()
-    };
-    let _serving =
-        team_server::start(pool.daemon.clone(), config, &format!("127.0.0.1:{port}")).unwrap();
+    });
 
     // A member is lent the gateway, not what is behind it.
     let ann = machine(&[]);
@@ -941,7 +941,6 @@ fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself()
     for secret in ["k-good", "a-1", "b-1", KEY, "hush-hush"] {
         assert!(!traces.contains(secret), "{secret} is in the traces");
     }
-    std::env::remove_var("LLMPOOL_UPSTREAM_CLAUDE");
 }
 
 #[test]
@@ -1047,4 +1046,194 @@ fn an_administrator_adds_accounts_to_the_pool_from_their_own_machine() {
             && audit.contains("spare@x.io")
             && !audit.contains("spare-1\"")
     );
+}
+
+/// Serve on a port that is certainly ours: another test may take the one we
+/// were about to use between finding it free and listening on it.
+fn on_a_free_port(pool: &Machine, config: impl Fn(String) -> Config) -> (Serving, String) {
+    for _ in 0..20 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}");
+        if let Ok(serving) = team_server::start(
+            pool.daemon.clone(),
+            config(url.clone()),
+            &format!("127.0.0.1:{port}"),
+        ) {
+            return (serving, url);
+        }
+    }
+    panic!("no free port");
+}
+
+/// A decision model that always sends a member to the account nobody is on.
+fn decision_model() -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for mut request in server.incoming_requests() {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            let asked: Value = serde_json::from_str(&body).unwrap_or_default();
+            let free = asked["state"]["accounts"]
+                .as_object()
+                .and_then(|accounts| accounts.iter().find(|(_, a)| a["sessions_using_it"] == 0))
+                .map(|(letter, _)| letter.clone())
+                .unwrap_or_default();
+            assert!(
+                !body.contains("x.io"),
+                "an address reached the decision model"
+            );
+            let answer = json!({"code": 0, "data": {"status": "completed", "result": {"answers": {"start_on": {"choice": free}}}}});
+            let _ = request.respond(tiny_http::Response::from_string(answer.to_string()));
+        }
+    });
+    url
+}
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn the_gateway_carries_many_requests_at_once_and_follows_the_decision_model() {
+    use llmpool_daemon::KeyReq;
+    let provider = upstream();
+    let pool = machine(&[("m@x.io", "m-1"), ("n@x.io", "n-1")]);
+    pool.daemon
+        .add_key(KeyReq {
+            provider: "openai".into(),
+            label: None,
+            tags: vec![],
+            env: [
+                ("OPENAI_API_KEY".to_string(), "k-good".to_string()),
+                ("OPENAI_BASE_URL".to_string(), provider.url.clone()),
+            ]
+            .into(),
+        })
+        .unwrap();
+    pool.daemon
+        .put_policy(&format!(
+            "[advisor]\nenabled = true\nurl = \"{}\"\n",
+            decision_model()
+        ))
+        .unwrap();
+    FileVault(pool.data.join("vault"))
+        .put("advisor-jev", "model-key")
+        .unwrap();
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        admins: vec!["ci".into()],
+        gateway: true,
+        upstreams: [("claude".to_string(), provider.url.clone())].into(),
+        ..Config::default()
+    });
+    let post = |path: &str| {
+        ureq::post(&format!("{url}/gateway/{path}"))
+            .set("Authorization", &format!("Bearer {KEY}"))
+            .send_json(json!({"model": "m-1", "messages": []}))
+    };
+
+    // Twelve answers that each take a while, all in flight together: done in
+    // about the time of one, not of twelve in a queue of four.
+    let began = std::time::Instant::now();
+    let slow: Vec<_> = (0..12)
+        .map(|_| {
+            let url = url.clone();
+            std::thread::spawn(move || {
+                ureq::post(&format!("{url}/gateway/openai/v1/stream"))
+                    .set("Authorization", &format!("Bearer {KEY}"))
+                    .send_json(json!({"model": "m-1"}))
+                    .unwrap()
+                    .into_string()
+                    .unwrap()
+            })
+        })
+        .collect();
+    for answer in slow {
+        assert!(answer.join().unwrap().contains("output_tokens"));
+    }
+    assert!(
+        began.elapsed() < Duration::from_millis(1500),
+        "took {:?}",
+        began.elapsed()
+    );
+
+    // The member starts on one login, which fills past half. The decision
+    // model is asked, off the request's own time, and sends them to the one
+    // nobody is on; the next request goes there, before any limit was hit.
+    let able = |name: &str, on: bool| {
+        let patch = PatchReq {
+            label: None,
+            tags: None,
+            enabled: Some(on),
+        };
+        pool.daemon.patch_account(name, patch).unwrap();
+    };
+    able("n@x.io", false);
+    post("claude/v1/messages").unwrap();
+    able("n@x.io", true);
+    post("claude/v1/messages").unwrap();
+    assert_eq!(
+        provider.seen.lock().unwrap().last().unwrap()["authorization"],
+        "Bearer m-1"
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    post("claude/v1/messages").unwrap();
+    assert_eq!(
+        provider.seen.lock().unwrap().last().unwrap()["authorization"],
+        "Bearer n-1"
+    );
+    let audit = std::fs::read_to_string(pool.data.join("team-audit.log")).unwrap();
+    assert!(audit.contains("gateway_advised") && audit.contains("the decision model chose n@x.io"));
+
+    // The page's report adds it all up, and narrows to what is asked for.
+    let login = ureq::AgentBuilder::new()
+        .redirects(0)
+        .build()
+        .post(&format!("{url}/admin/login"))
+        .send_form(&[("key", KEY)])
+        .unwrap();
+    let session = login
+        .header("Set-Cookie")
+        .unwrap()
+        .split(['=', ';'])
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let report = |filter: Value| -> Value {
+        ureq::post(&format!("{url}/admin/invoke/api"))
+            .set("Cookie", &format!("llmpool_session={session}"))
+            .set("X-Llmpool", "1")
+            .send_json(json!({"method": "POST", "path": "/server/requests", "body": filter}))
+            .unwrap()
+            .into_json()
+            .unwrap()
+    };
+    let all = report(json!({}));
+    assert_eq!(all["totals"]["requests"], 15);
+    assert_eq!(all["totals"]["failed"], 0);
+    assert_eq!(
+        all["per_minute"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_u64)
+            .sum::<u64>(),
+        15
+    );
+    assert_eq!(all["decisions"][0]["chose"], "n@x.io");
+    assert_eq!(all["decisions"][0]["moved"], true);
+    let claude = report(json!({"provider": "claude"}));
+    assert_eq!(claude["totals"]["requests"], 3);
+    assert_eq!(claude["by_account"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report(json!({"account": "n@x.io"}))["totals"]["requests"],
+        1
+    );
+    assert_eq!(report(json!({"result": "failed"}))["totals"]["requests"], 0);
 }

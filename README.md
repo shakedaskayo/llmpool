@@ -281,7 +281,12 @@ a member's agent holds only the member's own session. The server stays on the
 account a member was last on while it has room, which keeps the provider's
 prompt cache warm, and moves to another when it fills up, is refused, or
 fails. Nothing restarts. Each request leaves one line in `gateway-traces.log`
-(who, account, model, tokens, time; never what was said). Subscription logins
+(who, account, model, tokens, time; never what was said), and the server's
+page has a Requests page that adds them up by member and account. With the
+decision model on, the gateway asks it where a member's requests should go
+once their account is past half of a window, off the request's own time, so
+heavy use is spread before any account is near its limit. Each request in
+flight has a thread of its own (256 at once by default). Subscription logins
 and keys both work this way; through a gateway, Claude Code runs as an API
 client and its claude.ai connectors are off. `LLMPOOL_UPSTREAM_<PROVIDER>`
 moves a provider to your own proxy.
@@ -412,7 +417,8 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 
 Switching accounts under a running agent other than Claude Code, and reading
 usage for anything but Claude subscriptions. Exporting gateway traces to
-OpenTelemetry. Windows is not supported.
+OpenTelemetry, and more than one server process for one pool. Windows is not
+supported.
 
 ## Licence
 
