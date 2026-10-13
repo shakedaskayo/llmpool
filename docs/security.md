@@ -22,6 +22,23 @@ permalink: /security/
 - **Audit.** Sign-ins, refusals, lent accounts, switches and administrators' changes are written to `team-audit.log` and standard error, never with a secret. Gateway traces never hold what was said.
 - **Transport.** The server speaks HTTP; TLS is your ingress's. Clients refuse a server that is not `https` unless it is on their own machine.
 
+- **Guessing is slow.** Tokens are 256 random bits and keys must be 24 characters or more; on top of that, a burst of wrong tokens gets everyone without a right one told to wait.
+- **The page's own protections.** Every page is sent with a content security policy (only the server's own scripts run), no framing, no referrer, and strict transport security when served over `https`.
+
+## Staying up
+
+- **A slow client holds only itself.** Every request is taken off the few threads that accept connections; gateway requests and everything else have separate limits (`LLMPOOL_GATEWAY_MAX`, 256 by default), and beyond a limit the server answers 503 at once rather than queueing.
+- **A provider having a bad moment is not the member's problem.** A request refused for rate, for the account, or by a provider error is tried on the next account, up to three. An account refused for its rate is left alone for as long as the provider says; one the provider no longer accepts is set aside for five minutes and an administrator is told in the audit log.
+- **The decision model cannot slow or stop a request.** It is asked after the answer has gone out; without it the fixed rules decide.
+- **Stopping is gentle.** On SIGTERM the server takes no new requests, lets answers in flight finish for up to 30 seconds, then saves and exits. The chart gives it 45.
+- **Logs cannot fill the volume.** The audit and trace logs start afresh at 32 MB and keep one file before.
+- **State survives a restart.** Accounts, rules, settings and members' sessions are on the volume; the newest requests are read back for the page.
+- **One process.** The pool has one writer, so a restart is a few seconds without the server. Members' agents see failed requests for that moment and carry on.
+
+## Backing it up
+
+The volume and the vault key are the pool. Snapshot the volume with your cloud's tools, and keep a copy of the Secret that holds `LLMPOOL_VAULT_KEY`: one without the other is unreadable. For a copy you can restore anywhere, `llmpool export pool.age` on the server writes every account, encrypted with a passphrase.
+
 ## Limits worth knowing
 
 - A member who is lent an access token can read it: they run the agent that uses it. Only the gateway keeps credentials from members.
