@@ -1470,16 +1470,21 @@ fn the_gateway_hands_out_models_and_nothing_else_and_one_member_cannot_spoil_it(
         answers.iter().filter(|a| **a == 200).count() >= 16,
         "{answers:?}"
     );
-    // And when theirs are done, they are welcome again.
-    assert_eq!(
+    // And when theirs are done, they are welcome again. The server lets go of
+    // a request a moment after its last byte is read here, so it is given one.
+    let again = || {
         send(
             "POST",
             "openai/v1/chat/completions",
             KEY,
-            json!({"model": "m"})
-        ),
-        200
-    );
+            json!({"model": "m"}),
+        )
+    };
+    let began = std::time::Instant::now();
+    while again() != 200 && began.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(again(), 200);
 }
 
 #[test]
