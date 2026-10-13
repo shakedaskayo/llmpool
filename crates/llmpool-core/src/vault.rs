@@ -73,6 +73,38 @@ impl Vault for KeychainVault {
     }
 }
 
+/// Secrets as 0600 files in a directory. For tests and headless machines
+/// without a keychain; selected with `LLMPOOL_FILE_VAULT=1`.
+pub struct FileVault(pub std::path::PathBuf);
+
+impl Vault for FileVault {
+    fn put(&self, id: &str, secret: &str) -> Result<(), VaultError> {
+        use std::io::Write;
+        let io = |e: std::io::Error| VaultError::Backend(e.to_string());
+        std::fs::create_dir_all(&self.0).map_err(io)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(self.0.join(id)).and_then(|mut f| f.write_all(secret.as_bytes())).map_err(io)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<String>, VaultError> {
+        match std::fs::read_to_string(self.0.join(id)) {
+            Ok(secret) => Ok(Some(secret)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(VaultError::Backend(e.to_string())),
+        }
+    }
+
+    fn remove(&self, id: &str) -> Result<(), VaultError> {
+        match std::fs::remove_file(self.0.join(id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(VaultError::Backend(e.to_string())),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +122,12 @@ mod tests {
     #[test]
     fn memory_vault_stores_replaces_and_removes() {
         exercise(&MemoryVault::default(), "a1");
+    }
+
+    #[test]
+    fn file_vault_stores_replaces_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        exercise(&FileVault(dir.path().join("vault")), "a1");
     }
 
     #[test]
