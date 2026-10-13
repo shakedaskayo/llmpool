@@ -10,6 +10,9 @@ const state = {
   events: [],
   issues: [],
   stats: {},
+  config: {},
+  loginItem: null, // true, false, or null while unknown
+  setupLog: "",
   login: { state: "idle" },
   schema: { triggers: [], conditions: [], picks: [], home: "" },
   policy: { settings: {}, rule: [] },
@@ -128,7 +131,7 @@ function issuesPanel() {
     .map((issue, i) => {
       const label = { add_current: "Add this login to the pool", login: issue.email ? `Sign in as ${issue.email}` : "Sign in" }[issue.action];
       const button = label ? `<div class="copy"><button class="primary" data-act="fix" data-i="${i}">${esc(label)}</button></div>` : "";
-      const command = issue.action === "install" ? `<div class="copy"><code>llmpool install claude</code><button class="quiet" data-act="copy" data-text="llmpool install claude">Copy</button></div>` : "";
+      const command = issue.action === "install" ? `<div class="copy"><button class="primary" data-act="goto-setup">Set up llmpool on this Mac</button></div>` : "";
       return `<div class="callout bad" role="alert"><strong>⚠ ${esc(issue.text)}</strong>${button}${command}</div>`;
     })
     .join("");
@@ -206,8 +209,17 @@ function renderSessions() {
             .join("")}</select>`
         : `<span class="muted">your own login, not managed</span>`;
       const why = s.picked_by ? `<div class="muted">${esc(s.picked_by)}</div>` : "";
+      const a = s.advice;
+      const verdict = !a
+        ? ""
+        : a.error
+          ? `<div class="muted">advisor: ${esc(a.error)}</div>`
+          : a.switch == null
+            ? `<div class="muted">advisor: asking…</div>`
+            : `<div class="muted">advisor: ${Math.round(a.switch * 100)}% for switching${a.target ? ` to ${esc(a.target)}` : ""}${a.acted ? " · switched" : ""}</div>`;
+      const ask = state.config.advisor_enabled && state.config.has_key && s.store ? ` <button class="quiet" data-act="advise" data-id="${esc(s.id)}">Ask advisor</button>` : "";
       const kind = s.native ? `<span class="badge" title="Started as plain claude. All such sessions share one login and switch together.">plain claude · shared login</span>` : "";
-      return `<tr><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${why}</td>
+      return `<tr><td class="path" title="${esc(s.cwd)}"><bdi>${esc(short(s.cwd))}</bdi></td><td>${picker} ${kind}${ask}${why}${verdict}</td>
         <td>${meter(s.usage, "5h", "5-hour window")}</td><td>${meter(s.usage, "7d", "7-day window")}</td></tr>`;
     })
     .join("");
@@ -604,6 +616,80 @@ async function loadPolicy() {
   state.results = {};
 }
 
+// ---- settings ---------------------------------------------------------------
+
+function renderSettings() {
+  const c = state.config;
+  const hooked = !state.issues.some((i) => i.kind === "hooks_missing");
+  const claude = !state.issues.some((i) => i.kind === "claude_missing");
+  const check = (ok, yes, no) => `<li>${ok ? `<span class="ok" aria-hidden="true">✓</span> ${yes}` : `<span class="warnmark" aria-hidden="true">⚠</span> ${no}`}</li>`;
+  $("settings").innerHTML = `
+    <h2>Choosing accounts</h2>
+    <div class="callout">
+      <label class="switch"><input type="checkbox" data-act="prefer-own"${c.prefer_own ? " checked" : ""} />
+        <span><strong>Prefer my own account</strong><br /><span class="muted">An account tagged <code>own</code> is used whenever it has room; the rest of the pool is for when it does not. The login Claude Code had when you set llmpool up is tagged <code>own</code> for you.</span></span></label>
+      <p class="indent"><label>Counts as having room below <input class="num" type="number" min="1" max="100" data-act="own-until" value="${esc(c.own_until ?? 85)}" /> % used</label></p>
+    </div>
+
+    <h2>Advisor <span class="badge">optional</span></h2>
+    <div class="callout">
+      <label class="switch"><input type="checkbox" data-act="advisor"${c.advisor_enabled ? " checked" : ""} />
+        <span><strong>Let a decision model advise on switching</strong><br /><span class="muted">When an account passes half of a window, llmpool sends Jev a small picture of the pool, with accounts named by letter only, and asks whether to switch and where to. It acts only when the model is sure enough, and never outside your rules' limits (cooldown, usable and free accounts). Off, your rules decide alone.</span></span></label>
+      <p class="indent"><label>Act when it is at least <input class="num" type="number" min="50" max="100" data-act="switch-above" value="${esc(Math.round((c.switch_above ?? 0.7) * 100))}" /> % sure</label>
+        <span class="muted"> · ${esc(c.calls_today ?? 0)} of ${esc(c.max_calls_per_day ?? 200)} questions used today</span></p>
+      <p class="indent">${c.has_key ? `<span class="ok">✓</span> A key is stored in your keychain. <button class="quiet danger" data-act="key-clear">Forget it</button>` : `<span class="warnmark">⚠</span> No key yet.`}</p>
+      <div class="copy indent">
+        <input class="wide" id="advisor-key" type="password" autocomplete="off" placeholder="${c.has_key ? "replace the key" : "Jev API key"}" aria-label="Advisor API key" />
+        <button data-act="key-save">Save key</button>
+      </div>
+    </div>
+
+    <h2>This Mac</h2>
+    <div class="callout">
+      <ul class="checks">
+        ${check(claude, "Claude Code is installed", "Claude Code was not found")}
+        ${check(hooked, "Claude Code reports to llmpool (hooks, status line, <code>/llmpool</code>)", "Claude Code is not connected to llmpool yet")}
+        ${check(state.accounts.length > 0, `${plural(state.accounts.length, "account")} in the pool`, "No accounts in the pool yet")}
+      </ul>
+      <label class="switch"><input type="checkbox" data-act="login-item"${state.loginItem ? " checked" : ""}${state.loginItem === null ? " disabled" : ""} />
+        <span><strong>Start llmpool when I log in</strong><br /><span class="muted">It sits in the menu bar; closing this window does not quit it.</span></span></label>
+      <div class="copy"><button class="${hooked ? "" : "primary"}" data-act="setup">${hooked ? "Run setup again" : "Set up llmpool on this Mac"}</button>
+        <span class="muted">Installs the command line tool, connects Claude Code, adds your current login.</span></div>
+      ${state.setupLog ? `<pre class="log" role="status">${esc(state.setupLog)}</pre>` : ""}
+    </div>`;
+}
+
+async function settingsAction(el) {
+  const act = el.dataset.act;
+  const put = (change, ok) => attempt(() => api("PUT", "/config", change), ok);
+  if (act === "prefer-own") await put({ prefer_own: el.checked }, el.checked ? "Your own account comes first" : "All accounts are treated alike");
+  if (act === "own-until") await put({ own_until: Number(el.value) }, "Saved");
+  if (act === "advisor") await put({ advisor_enabled: el.checked }, el.checked ? "The advisor is on" : "The advisor is off; your rules decide alone");
+  if (act === "switch-above") await put({ switch_above: Number(el.value) / 100 }, "Saved");
+  if (act === "key-save") {
+    const key = $("advisor-key").value.trim();
+    if (!key) return toast("Paste the key first", "error");
+    await attempt(() => api("PUT", "/advisor/key", { key }), "Key stored in your keychain");
+  }
+  if (act === "key-clear") await attempt(() => api("DELETE", "/advisor/key"), "Key forgotten");
+  if (act === "login-item") {
+    await attempt(() => invoke("login_item", { state: el.checked ? "on" : "off" }), el.checked ? "llmpool starts at login" : "llmpool no longer starts at login");
+    state.loginItem = null;
+  }
+  if (act === "setup") {
+    el.disabled = true;
+    el.textContent = "Setting up…";
+    try {
+      state.setupLog = await invoke("setup");
+      toast("Setup finished");
+    } catch (e) {
+      state.setupLog = String(e);
+      toast("Setup could not finish", "error");
+    }
+  }
+  await refresh(true);
+}
+
 // ---- wiring -----------------------------------------------------------------
 
 async function poolAction(el) {
@@ -611,6 +697,7 @@ async function poolAction(el) {
   const account = state.accounts.find((a) => a.id === id);
   const act = el.dataset.act;
   if (act === "copy") return copy(el.dataset.text);
+  if (act === "goto-setup") return selectTab(tabs[3]);
   if (["login", "relogin", "fix", "login-cancel", "login-code"].includes(act)) return loginAction(el, account);
   if (act === "remove" && el.dataset.armed !== "yes") {
     // Two presses, so a slip does not drop a login.
@@ -688,6 +775,10 @@ async function refresh(force = false) {
       api("GET", "/logins"),
       api("GET", "/stats"),
     ]);
+    state.config = await api("GET", "/config");
+    if (state.loginItem === null) {
+      state.loginItem = await invoke("login_item", { state: "status" }).then((text) => /starts at login/.test(text) && !/does not/.test(text), () => false);
+    }
     // A sign-in that just ended is news, whichever way it went.
     if (before === "waiting" && state.login.state !== "waiting") {
       toast(state.login.message, state.login.state === "done" ? "ok" : "error");
@@ -703,6 +794,7 @@ async function refresh(force = false) {
   if (force || !busy()) {
     renderPool();
     renderSessions();
+    renderSettings();
   }
 }
 
@@ -737,7 +829,16 @@ $("pool").addEventListener("keydown", (e) => {
   if (e.target.id === "login-email") document.querySelector('[data-act="login"]')?.click();
   if (e.target.id === "login-code") document.querySelector('[data-act="login-code"]')?.click();
 });
+$("sessions").addEventListener("click", async (e) => {
+  if (!e.target.matches('button[data-act="advise"]')) return;
+  e.target.disabled = true;
+  await attempt(() => api("POST", `/sessions/${e.target.dataset.id}/advise`), "The advisor answered");
+  await refresh(true);
+});
 $("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
+$("settings").addEventListener("click", (e) => e.target.matches("button[data-act]") && settingsAction(e.target));
+$("settings").addEventListener("change", (e) => e.target.matches("input[data-act]") && settingsAction(e.target));
+$("settings").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "advisor-key" && document.querySelector('[data-act="key-save"]')?.click());
 $("policies").addEventListener("click", (e) => e.target.matches("button[data-act]") && policyAction(e.target));
 $("policies").addEventListener("change", (e) => e.target.matches("select[data-act], input[type=checkbox][data-act]") && policyAction(e.target));
 $("policies").addEventListener("input", (e) => e.target.matches("textarea[data-act], input[data-act]:not([type=checkbox])") && policyAction(e.target));
@@ -745,7 +846,7 @@ $("policies").addEventListener("input", (e) => e.target.matches("textarea[data-a
 // Keys inside the window: ⌘1–3 sections, ⌘S save rules, ⌘R refresh.
 window.addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-  const tab = { 1: tabs[0], 2: tabs[1], 3: tabs[2] }[e.key];
+  const tab = { 1: tabs[0], 2: tabs[1], 3: tabs[2], 4: tabs[3] }[e.key];
   if (tab) {
     e.preventDefault();
     selectTab(tab);

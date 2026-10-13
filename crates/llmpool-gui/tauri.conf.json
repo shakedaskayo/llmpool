@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.llmpool.app",
   "build": {
-    "frontendDist": "./ui"
+    "frontendDist": "./ui",
+    "beforeBuildCommand": "sh ../../scripts/prepare-sidecar.sh"
   },
   "app": {
     "withGlobalTauri": true,
@@ -25,7 +26,8 @@
   "bundle": {
     "active": true,
     "targets": [
-      "app"
+      "app",
+      "dmg"
     ],
     "icon": [
       "icons/32x32.png",
@@ -35,6 +37,12 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "A pool of LLM provider logins for coding agents"
+    "shortDescription": "A pool of LLM provider logins for coding agents",
+    "externalBin": [
+      "binaries/llmpool"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

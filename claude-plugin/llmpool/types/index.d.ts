@@ -56,6 +56,16 @@ export type Snapshot = {
   issues: Issue[]
   login: Login
   stats: Stats
+  config: Config
+  /** What the advisor last said about this session, in one line; '' when nothing. */
+  advice: string
+}
+
+/** The switches that can be thrown from here. */
+export type Config = {
+  preferOwn: boolean
+  advisorOn: boolean
+  advisorHasKey: boolean
 }
 
 declare module 'claude-code' {

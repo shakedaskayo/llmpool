@@ -164,3 +164,12 @@ table { table-layout: auto; }
 td, th { padding-left: 6px; padding-right: 6px; }
 td.actions button { padding: 4px 8px; }
 main { overflow-x: auto; }
+
+label.switch { display: flex; align-items: flex-start; gap: 10px; margin: 4px 0; }
+label.switch input { margin-top: 3px; }
+.indent { margin-left: 26px; }
+.warnmark { color: var(--warn); }
+.ok { color: var(--ok); }
+ul.checks { list-style: none; margin: 0 0 10px; padding: 0; }
+ul.checks li { padding: 2px 0; }
+pre.log { margin: 10px 0 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }

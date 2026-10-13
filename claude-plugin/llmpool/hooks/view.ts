@@ -1,4 +1,4 @@
-import type { Issue, Login, Row, Snapshot, Stats } from '../types'
+import type { Config, Issue, Login, Row, Snapshot, Stats } from '../types'
 
 type Json = Record<string, any>
 
@@ -59,7 +59,13 @@ export const toSnapshot = (status: Json): Snapshot => {
 
   const pickedBy: string | null = status?.session?.picked_by ?? null
 
-  return { session, pickedBy, rows, others, error: null, issues, login, stats }
+  const config: Config = {
+    preferOwn: status?.config?.prefer_own !== false,
+    advisorOn: status?.config?.advisor_enabled === true,
+    advisorHasKey: status?.config?.has_key === true,
+  }
+
+  return { session, pickedBy, rows, others, error: null, issues, login, stats, config, advice: adviceLine(status?.session?.advice) }
 }
 
 /** A ten-cell meter. */
@@ -265,3 +271,19 @@ export const fit = (text: string, width: number): string =>
 /** The accounts worth offering on the quick-switch row: usable, not this
  * one, the emptiest first, at most three so the row stays one line. */
 export const quick = (snap: Snapshot): Row[] => (snap.session === null ? [] : snap.rows.filter(r => !r.isCurrent && isUsable(r)).slice(0, 3))
+
+/** The advisor's last word on this session, as one line. */
+export const adviceLine = (advice: Json | null | undefined): string => {
+  if (!advice) {
+    return ''
+  }
+  if (advice.error) {
+    return `advisor: ${advice.error}`
+  }
+  if (advice.switch === null || advice.switch === undefined) {
+    return 'advisor: asking…'
+  }
+  const sure = `${Math.round(advice.switch * 100)}% for switching`
+
+  return `advisor: ${sure}${advice.target ? ` to ${advice.target}` : ''}${advice.acted ? ' · switched' : ''}`
+}

@@ -453,6 +453,16 @@ impl Daemon {
         }))
     }
 
+    /// The switches every surface shows: own-account preference and advisor.
+    pub fn config(&self) -> Api<Value> {
+        let policy = file::load(&self.policy_path()).unwrap_or_default();
+        let mut view = self.advisor_status()?;
+        view["prefer_own"] = json!(policy.settings.prefer_own);
+        view["own_until"] = json!(policy.settings.own_until);
+        view["advisor_enabled"] = view["enabled"].clone();
+        Ok(view)
+    }
+
     pub fn set_advisor_key(&self, key: Option<&str>) -> Api<Value> {
         match key.map(str::trim).filter(|k| !k.is_empty()) {
             Some(key) => self.vault.put(KEY_ID, key)?,

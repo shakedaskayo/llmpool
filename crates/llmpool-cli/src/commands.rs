@@ -135,6 +135,8 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Uninstall {
             agent: UninstallAgent::Claude,
         } => uninstall_claude(),
+        Command::Setup { undo } => setup(undo),
+        Command::LoginItem { state } => login_item(&state),
         Command::Daemon { stop } => daemon(stop),
         Command::Hook {
             agent,
@@ -745,8 +747,11 @@ fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, Stri
         let stats = client
             .call("GET", "/stats", None)
             .unwrap_or_else(|_| json!({}));
+        let config = client
+            .call("GET", "/config", None)
+            .unwrap_or_else(|_| json!({}));
         return done(
-            json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions, "issues": issues, "login": login, "stats": stats})
+            json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions, "issues": issues, "login": login, "stats": stats, "config": config})
                 .to_string(),
         );
     }
@@ -999,7 +1004,12 @@ fn without_shim(text: &str) -> String {
 }
 
 fn install_claude(shim: bool) -> Result<ExitCode, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    install_claude_as(&std::env::current_exe().map_err(|e| e.to_string())?, shim)
+}
+
+/// Install the hooks, status line and mod so that they call `exe`.
+fn install_claude_as(exe: &Path, shim: bool) -> Result<ExitCode, String> {
+    let exe = exe.to_path_buf();
     let settings = claude_settings();
     std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
     write_mod(&mod_dir(), &exe).map_err(|e| e.to_string())?;
@@ -1064,6 +1074,154 @@ fn uninstall_claude() -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+// ---- one-step setup on a Mac --------------------------------------------------
+
+const LOGIN_LABEL: &str = "dev.llmpool.app";
+
+fn login_plist() -> PathBuf {
+    home()
+        .join("Library/LaunchAgents")
+        .join(format!("{LOGIN_LABEL}.plist"))
+}
+
+/// The app bundle this command belongs to, or an installed one.
+fn app_bundle() -> Option<PathBuf> {
+    let inside = std::env::current_exe().ok().and_then(|exe| {
+        exe.ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+            .map(Path::to_path_buf)
+    });
+    inside.or_else(|| {
+        [
+            PathBuf::from("/Applications/llmpool.app"),
+            home().join("Applications/llmpool.app"),
+        ]
+        .into_iter()
+        .find(|p| p.is_dir())
+    })
+}
+
+fn login_item(state: &str) -> Result<ExitCode, String> {
+    let plist = login_plist();
+    match state {
+        "status" => done(format!(
+            "the llmpool app {} at login",
+            if plist.exists() {
+                "starts"
+            } else {
+                "does not start"
+            }
+        )),
+        "off" => {
+            let _ = std::fs::remove_file(&plist);
+            done("the llmpool app no longer starts at login".into())
+        }
+        _ => {
+            let app = app_bundle().ok_or(
+                "the llmpool app is not installed; put llmpool.app in /Applications first",
+            )?;
+            let app = app
+                .to_string_lossy()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;");
+            // Opened in the background and hidden: it lives in the menu bar.
+            let text = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{LOGIN_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array><string>/usr/bin/open</string><string>-g</string><string>-j</string><string>-a</string><string>{app}</string></array>\n  <key>RunAtLoad</key><true/>\n</dict>\n</plist>\n"
+            );
+            if let Some(dir) = plist.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&plist, text).map_err(|e| format!("{}: {e}", plist.display()))?;
+            done("the llmpool app starts at login".into())
+        }
+    }
+}
+
+/// Everything a new machine needs, in the order a person would do it by hand,
+/// each step saying what it did. Safe to run again.
+fn setup(undo: bool) -> Result<ExitCode, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let link = home().join(".local/bin/llmpool");
+    let in_app = exe
+        .ancestors()
+        .any(|p| p.extension().is_some_and(|e| e == "app"));
+    let ours = |path: &Path| {
+        std::fs::read_link(path)
+            .is_ok_and(|to| to.to_string_lossy().contains(".app/Contents/MacOS"))
+    };
+
+    if undo {
+        uninstall_claude()?;
+        let _ = std::fs::remove_file(login_plist());
+        if ours(&link) {
+            let _ = std::fs::remove_file(&link);
+        }
+        return done("llmpool is no longer set up on this Mac; your accounts are still in the keychain (`llmpool remove` drops them)".into());
+    }
+
+    // 1. The command line tool, when this copy lives inside the app.
+    let mut hook_exe = exe.clone();
+    if in_app {
+        let taken = link.symlink_metadata().is_ok() && !ours(&link);
+        if taken {
+            println!(
+                "✓ command line tool: kept the llmpool already at {}",
+                link.display()
+            );
+        } else {
+            if let Some(dir) = link.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&exe, &link)
+                .map_err(|e| format!("{}: {e}", link.display()))?;
+            println!(
+                "✓ command line tool: {} now points into the app",
+                link.display()
+            );
+        }
+        hook_exe = link.clone();
+    } else {
+        println!("✓ command line tool: {}", exe.display());
+    }
+    let on_path = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|dir| Some(dir.as_path()) == hook_exe.parent())
+    });
+    if !on_path {
+        println!(
+            "  note: {} is not on your PATH; add it to use `llmpool` in a terminal",
+            hook_exe.parent().unwrap_or(Path::new("")).display()
+        );
+    }
+
+    // 2. Claude Code: hooks, status line, the /llmpool mod.
+    install_claude_as(&hook_exe, false)?;
+    println!("✓ Claude Code: hooks, status line and /llmpool are installed");
+
+    // 3. The login Claude Code has now, as your own account.
+    match connect().and_then(|client| client.call("POST", "/accounts/capture", Some(json!({})))) {
+        Ok(account) => println!(
+            "✓ your current login ({}) is in the pool",
+            account["label"].as_str().unwrap_or_default()
+        ),
+        Err(e) => println!("– no current Claude Code login was added: {e}"),
+    }
+
+    // 4. The app in the menu bar from login on.
+    match app_bundle() {
+        Some(_) => {
+            login_item("on")?;
+            println!("✓ the app is in your menu bar and starts at login");
+        }
+        None => println!(
+            "– the menu bar app is not installed; build it and put llmpool.app in /Applications"
+        ),
+    }
+
+    println!();
+    doctor().map(|_| ExitCode::SUCCESS)
 }
 
 // ---- daemon -----------------------------------------------------------------

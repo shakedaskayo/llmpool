@@ -56,6 +56,51 @@ fn api(method: String, path: String, body: Option<Value>) -> Result<Value, Strin
     client()?.call(&method, &path, body)
 }
 
+/// The command line tool that ships beside this app.
+fn cli() -> Result<std::path::PathBuf, String> {
+    let beside = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("llmpool");
+    beside
+        .is_file()
+        .then_some(beside)
+        .ok_or_else(|| "the llmpool command line tool is missing from the app".to_string())
+}
+
+fn run_cli(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new(cli()?)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .trim()
+    .to_string();
+    // `setup` ends with the doctor's verdict, whose exit code says only
+    // whether something is still missing; its text is what the person needs.
+    if out.status.success() || args.first() == Some(&"setup") {
+        Ok(text)
+    } else {
+        Err(text)
+    }
+}
+
+/// Set this Mac up: command line tool, Claude Code hooks and mod, the
+/// current login, the app at login. What it printed is shown to the person.
+#[tauri::command(async)]
+fn setup() -> Result<String, String> {
+    run_cli(&["setup"])
+}
+
+/// "on", "off" or "status" for the app starting at login.
+#[tauri::command(async)]
+fn login_item(state: String) -> Result<String, String> {
+    run_cli(&["login-item", &state])
+}
+
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -272,7 +317,7 @@ fn on_menu(app: &AppHandle, id: &str) {
 
 fn main() {
     let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![api])
+        .invoke_handler(tauri::generate_handler![api, setup, login_item])
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -301,8 +346,9 @@ fn main() {
                 .menu(&tray_menu(&handle, &json!([]), &json!([]))?)
                 .tooltip("llmpool")
                 .on_menu_event(|app, event| on_menu(app, event.id.as_ref()));
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
+            // A template image: macOS tints it to suit a light or dark menu bar.
+            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png")) {
+                tray = tray.icon(icon).icon_as_template(true);
             }
             tray.build(app)?;
             // Another application may already own a chord; llmpool then

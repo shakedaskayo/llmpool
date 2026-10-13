@@ -3,7 +3,8 @@ import { expect, test } from 'claude-code/testing'
 // What `llmpool status --json` answers for a session on work-1 at 91%, with
 // one account to switch to, one disabled and one that needs a login.
 const STATUS = {
-  session: { id: 's1', account_id: 'a', picked_by: 'rule "work repos"' },
+  session: { id: 's1', account_id: 'a', picked_by: 'rule "work repos"', advice: { switch: 0.82, target: 'work-2', acted: false } },
+  config: { prefer_own: true, advisor_enabled: true, has_key: true },
   accounts: [
     { id: 'a', label: 'work-1', tags: ['work'], enabled: true, health: 'ok', sessions: ['s1'],
       // The clock in these tests reads 1_700_000_000: the 5-hour window is half over.
@@ -58,6 +59,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ type: 'Text', text: /▂▅█/ })).toBeDefined()
     // Why this session is on this account.
     expect(await ui.find({ type: 'Text', text: /rule "work repos"/ })).toBeDefined()
+    // What the advisor last said, and the switches that can be thrown from here.
+    expect(await ui.find({ type: 'Text', text: /advisor: 82% for switching to work-2/ })).toBeDefined()
+    expect(await ui.find({ key: 'set-own' })).toBeDefined()
+    await ui.press({ key: 'set-advisor' })
+    expect(calls.some(argv => argv.slice(1).join(' ') === 'advisor off')).toBe(true)
+    await ui.press({ key: 'ask-advisor' })
+    expect(calls.some(argv => argv.slice(1).join(' ') === 'advisor ask --session s1')).toBe(true)
     // The pool as a whole.
     expect(await ui.find({ type: 'Text', text: /70% free/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /3 switches in the last 24h/ })).toBeDefined()

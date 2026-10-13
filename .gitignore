@@ -1,3 +1,4 @@
 target/
 .superpowers/
 crates/llmpool-gui/gen/
+crates/llmpool-gui/binaries/

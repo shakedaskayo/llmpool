@@ -109,6 +109,18 @@ enum Command {
         #[command(subcommand)]
         command: PolicyCommand,
     },
+    /// Set this Mac up in one go: command line tool, Claude Code hooks and
+    /// mod, your current login, and the app starting at login
+    Setup {
+        /// Take everything `setup` did back out
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Whether the llmpool app starts when you log in: on, off or status
+    LoginItem {
+        #[arg(value_parser = ["on", "off", "status"])]
+        state: String,
+    },
     /// Add llmpool's hooks and status line to an agent
     Install {
         #[command(subcommand)]

@@ -45,6 +45,8 @@ const EMPTY: Snapshot = {
   issues: [],
   login: { state: 'idle', message: '', url: null },
   stats: { headroom5: null, headroom7: null, switches24h: 0, lastSwitch: null },
+  config: { preferOwn: true, advisorOn: false, advisorHasKey: false },
+  advice: '',
 }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
@@ -127,6 +129,12 @@ const cancelSignIn = async ($: EngineInterface) => {
 const addCurrent = async ($: EngineInterface) => {
   const ran = await llmpool($, ['add', 'claude', '--from-current'])
   say($, ran, ran.stdout.trim())
+  await refresh($)
+}
+
+/** Throw one of the switches, then show the new state. */
+const set = async ($: EngineInterface, args: string[], ok: string) => {
+  say($, await llmpool($, args), ok)
   await refresh($)
 }
 
@@ -451,6 +459,8 @@ export const register: Register = on => {
               </Text>
               <Text color="success">this session</Text>
               {snap.pickedBy !== null && <Text dimColor>· {snap.pickedBy}</Text>}
+            </Box>
+            <Box>{snap.advice !== '' && <Text dimColor>{snap.advice}</Text>}
               {current.tags.length > 0 && <Text dimColor>{current.tags.map(tag => `#${tag}`).join(' ')}</Text>}
             </Box>
             {big('5h', current.h5, current.reset5)}
@@ -497,6 +507,42 @@ export const register: Register = on => {
             )}
           </Box>
         )}
+
+        <Box flexDirection="column">
+          {heading('SETTINGS')}
+          <Button
+            key="set-own"
+            plain
+            hotkey="o"
+            label={`Prefer my own account: ${snap.config.preferOwn ? 'on' : 'off'}`}
+            onPress={() =>
+              set(
+                $,
+                ['prefer-own', snap.config.preferOwn ? 'off' : 'on'],
+                snap.config.preferOwn ? 'All accounts are treated alike.' : 'Your own account comes first while it has room.',
+              )
+            }
+          />
+          <Button
+            key="set-advisor"
+            plain
+            hotkey="v"
+            label={`Advisor: ${snap.config.advisorOn ? 'on' : 'off'}${snap.config.advisorHasKey ? '' : ' (no key: run `llmpool advisor key`)'}`}
+            onPress={() =>
+              set($, ['advisor', snap.config.advisorOn ? 'off' : 'on'], snap.config.advisorOn ? 'The advisor is off; your rules decide alone.' : 'The advisor is on.')
+            }
+          />
+          {snap.config.advisorOn && snap.config.advisorHasKey && canSwitch && (
+            <Button
+              key="ask-advisor"
+              plain
+              hotkey="q"
+              label="Ask the advisor about this session now"
+              onPress={() => set($, ['advisor', 'ask', '--session', snap.session ?? ''], 'The advisor answered.')}
+            />
+          )}
+          <Text dimColor>/llmpool row on|off · /llmpool pane on|off</Text>
+        </Box>
 
         <Box flexDirection="column">
           {heading('ACTIONS')}

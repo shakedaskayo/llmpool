@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { WINDOW_SECS, bar, best, elapsed, fit, forecast, fullest, level, miniBar, peak, resetsIn, spark, stateMark, toSnapshot, wideBar } from './view'
+import { WINDOW_SECS, adviceLine, bar, best, elapsed, fit, forecast, fullest, level, miniBar, peak, resetsIn, spark, stateMark, toSnapshot, wideBar } from './view'
 
 const STATUS = {
   session: { id: 's1', account_id: 'a' },
@@ -128,4 +128,12 @@ test('pace, forecast and trend', () => {
   expect(miniBar(42)).toBe('▰▰▱▱▱')
   expect(fit('abc', 6)).toBe('abc   ')
   expect(fit('abcdefgh', 6)).toBe('abcde…')
+})
+
+test('the advisor is quoted in one line', () => {
+  expect(adviceLine(null)).toBe('')
+  expect(adviceLine({ switch: null })).toBe('advisor: asking…')
+  expect(adviceLine({ switch: 0.12, target: null, acted: false })).toBe('advisor: 12% for switching')
+  expect(adviceLine({ switch: 0.9, target: 'work-2', acted: true })).toBe('advisor: 90% for switching to work-2 · switched')
+  expect(adviceLine({ error: 'the advisor account has no tokens left' })).toBe('advisor: the advisor account has no tokens left')
 })

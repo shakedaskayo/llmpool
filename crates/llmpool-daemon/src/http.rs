@@ -102,6 +102,7 @@ fn route(
         ("GET", ["advisor"]) => d.advisor_status(),
         ("PUT", ["advisor", "key"]) => d.set_advisor_key(Some(text(&body, "key")?)),
         ("DELETE", ["advisor", "key"]) => d.set_advisor_key(None),
+        ("GET", ["config"]) => d.config(),
         ("PUT", ["config"]) => d.configure(&body),
         ("POST", ["sessions", id, "advise"]) => d.advise_session(id),
         ("GET", ["stats"]) => d.stats(),
