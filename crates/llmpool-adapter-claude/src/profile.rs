@@ -375,9 +375,16 @@ impl Profile {
         }
         if let Some(source) = read_json(&default.global_config) {
             let mut config = object_or_empty(read_json(&self.global_config));
-            for key in ["mcpServers", "theme"] {
+            for key in ["mcpServers", "theme", "hasCompletedOnboarding"] {
                 if let Some(value) = source.get(key) {
                     config[key] = value.clone();
+                }
+            }
+            // Folders the person has already said they trust are not asked
+            // about again because the session runs on another account.
+            for (path, project) in source["projects"].as_object().into_iter().flatten() {
+                if project["hasTrustDialogAccepted"] == true {
+                    config["projects"][path.as_str()]["hasTrustDialogAccepted"] = json!(true);
                 }
             }
             write_private(&self.global_config, &config)?;
@@ -398,6 +405,34 @@ impl Profile {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn a_session_profile_keeps_what_the_person_already_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = Profile::default_in(dir.path());
+        std::fs::create_dir_all(&default.config_dir).unwrap();
+        std::fs::write(
+            &default.global_config,
+            r#"{"theme":"dark","hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"me@x.io"},
+                "projects":{"/work/a":{"hasTrustDialogAccepted":true,"history":["secret prompt"]},"/tmp/b":{"hasTrustDialogAccepted":false}}}"#,
+        )
+        .unwrap();
+        let session = Profile::at(&dir.path().join("st-1"));
+        std::fs::create_dir_all(&session.config_dir).unwrap();
+        session.link_shared(&default).unwrap();
+        let config = read_json(&session.global_config).unwrap();
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(
+            config["projects"]["/work/a"]["hasTrustDialogAccepted"],
+            true
+        );
+        // Only the answer travels: not the folder's history, not folders never
+        // trusted, and never who the default profile is logged in as.
+        assert!(config["projects"]["/work/a"].get("history").is_none());
+        assert!(config["projects"].get("/tmp/b").is_none());
+        assert!(config.get("oauthAccount").is_none());
+    }
+
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
