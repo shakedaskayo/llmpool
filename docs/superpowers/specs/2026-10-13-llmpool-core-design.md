@@ -78,7 +78,8 @@ Provider terms restrict third-party handling of subscription credentials and
 sharing one login between people. This shapes the design:
 
 - llmpool never implements a provider login flow. Accounts are added by running
-  the agent's own login and capturing the result.
+  the agent's own login (`claude auth login` in a scratch profile) and
+  capturing the result.
 - Local mode manages one person's own accounts.
 - The team server spec will default to API keys, cloud credentials and
   one-seat-per-person assignment.
@@ -469,7 +470,7 @@ Where the implementation differs from the design above, and why.
 |---|---|---|
 | Session keeps the user's config dir; only the credential store is separate (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) | Each managed session gets its own `CLAUDE_CONFIG_DIR` with the user's settings, skills, plugins, history and markdown linked in, and user-scope MCP servers copied | Identity lives in the config dir's `.claude.json`; a separate credential store alone would pair one account's token with another's identity |
 | Sessions exist only when started by `llmpool run` | Claude Code started on its own is adopted on its first hook, in the user's own profile; all such sessions share one login and switch together | Lets the status line, the mod and auto-switching work without changing how Claude Code is launched |
-| Daemon refreshes tokens of idle accounts and polls their usage | The daemon makes no provider requests at all | Claude Code refreshes its own token on use; avoiding provider calls keeps llmpool out of the request path. Cost: an idle account shows its last reading until its window resets |
+| Daemon refreshes tokens of idle accounts and polls their usage | It renews logins no running Claude Code holds (within a week of running out, or a day after their short token lapsed), and does not poll usage | Renewal keeps an unused login alive, which was asked for; usage of an idle account stays at its last reading until its window resets |
 | `http` hooks | `command` hooks (`llmpool hook claude <event>`) | The launcher's session id reaches a command through its environment; a command can also fail silently, which a hook must |
 | Unix socket for CLI and GUI, loopback for hooks | Loopback TCP only, one bearer token, file mode 0600 | One transport to secure and test |
 | `schedule` takes a cron expression | `schedule = { at = "HH:MM", days = [...] }` | Covers switching at a time of day without a cron parser; the engine is ticked once a minute |

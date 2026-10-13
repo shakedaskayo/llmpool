@@ -104,7 +104,11 @@ function issuesPanel() {
   if (state.login.state === "waiting") {
     const url = state.login.url ? `<p class="muted">If no page opened: <a href="#" data-act="copy" data-text="${esc(state.login.url)}">copy the sign-in link</a></p>` : "";
     return `<div class="callout" role="status"><strong>◌ Waiting for you to finish signing in in your browser…</strong>${url}
-      <div class="copy"><button data-act="login-cancel">Cancel the sign-in</button></div></div>`;
+      <div class="copy">
+        <input class="wide" id="login-code" placeholder="code, only if the page shows one" aria-label="Sign-in code, only if the page shows one" />
+        <button data-act="login-code">Send code</button>
+        <button class="quiet" data-act="login-cancel">Cancel the sign-in</button>
+      </div></div>`;
   }
   return state.issues
     .map((issue, i) => {
@@ -567,7 +571,7 @@ async function poolAction(el) {
   const account = state.accounts.find((a) => a.id === id);
   const act = el.dataset.act;
   if (act === "copy") return copy(el.dataset.text);
-  if (["login", "relogin", "fix", "login-cancel"].includes(act)) return loginAction(el, account);
+  if (["login", "relogin", "fix", "login-cancel", "login-code"].includes(act)) return loginAction(el, account);
   if (act === "remove" && el.dataset.armed !== "yes") {
     // Two presses, so a slip does not drop a login.
     el.dataset.armed = "yes";
@@ -593,6 +597,12 @@ async function loginAction(el, account) {
   const act = el.dataset.act;
   if (act === "login-cancel") {
     await attempt(() => api("DELETE", "/logins"), "Sign-in cancelled");
+    return refresh(true);
+  }
+  if (act === "login-code") {
+    const code = $("login-code").value.trim();
+    if (!code) return toast("Paste the code from the sign-in page first", "error");
+    await attempt(() => api("POST", "/logins/code", { code }), "Code sent. Finishing the sign-in…");
     return refresh(true);
   }
   const issue = act === "fix" ? state.issues[Number(el.dataset.i)] : null;
@@ -679,7 +689,11 @@ $("pool").addEventListener("click", (e) => {
 });
 $("pool").addEventListener("change", (e) => e.target.matches("input[data-act]") && poolAction(e.target));
 // Enter in the email field starts the sign-in.
-$("pool").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "login-email" && document.querySelector('[data-act="login"]')?.click());
+$("pool").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  if (e.target.id === "login-email") document.querySelector('[data-act="login"]')?.click();
+  if (e.target.id === "login-code") document.querySelector('[data-act="login-code"]')?.click();
+});
 $("sessions").addEventListener("change", (e) => e.target.matches("select[data-act]") && sessionAction(e.target));
 $("policies").addEventListener("click", (e) => e.target.matches("button[data-act]") && policyAction(e.target));
 $("policies").addEventListener("change", (e) => e.target.matches("select[data-act], input[type=checkbox][data-act]") && policyAction(e.target));

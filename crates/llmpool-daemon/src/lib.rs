@@ -87,7 +87,7 @@ pub struct Managed {
     pub native: bool,
     /// When it last sent a signal. Not saved: it changes constantly and only
     /// matters while the daemon runs.
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub last_seen: i64,
 }
 

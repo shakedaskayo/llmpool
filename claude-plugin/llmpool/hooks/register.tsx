@@ -93,6 +93,15 @@ const signIn = async ($: EngineInterface, email: string | null) => {
   await refresh($)
 }
 
+/** Pass on the code the sign-in page shows when it cannot return by itself. */
+const sendCode = async ($: EngineInterface, code: string) => {
+  if (code.trim() === '') {
+    return
+  }
+  say($, await llmpool($, ['add', 'claude', '--detach', '--code', code.trim()]), 'Code sent. Finishing the sign-in…')
+  await refresh($)
+}
+
 const cancelSignIn = async ($: EngineInterface) => {
   say($, await llmpool($, ['add', 'claude', '--cancel']), 'Sign-in cancelled.')
   await refresh($)
@@ -224,7 +233,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Input, Text } = $.ui.resolve(e)
     const snap = await read($, snapshot)
     const now = await $.clock.now()
     const canSwitch = snap.session !== null
@@ -313,6 +322,12 @@ export const register: Register = on => {
               ◌ Waiting for you to finish signing in in your browser
             </Text>
             {snap.login.url !== null && <Text dimColor>If no page opened: {snap.login.url}</Text>}
+            <Input
+              key="login-code"
+              label="Code"
+              placeholder="only if the page shows a code: paste it here, then Enter"
+              onSubmit={value => sendCode($, value)}
+            />
             <Button key="login-cancel" plain hotkey="c" label="Cancel the sign-in" onPress={() => cancelSignIn($)} />
           </Box>
         )}

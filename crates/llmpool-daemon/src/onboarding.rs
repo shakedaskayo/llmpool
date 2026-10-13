@@ -4,7 +4,8 @@
 
 use super::*;
 use llmpool_adapter_claude::oauth;
-use std::process::{Child, Command, Stdio};
+use std::io::Write;
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 /// How long a sign-in may sit in the browser before it is given up on.
 const LOGIN_PATIENCE_SECS: i64 = 600;
@@ -17,6 +18,9 @@ const EXPIRY_WARN_SECS: i64 = 3 * 24 * 3600;
 /// profile, waiting for the person to finish in their browser.
 pub(crate) struct LoginJob {
     child: Option<Child>,
+    /// Claude Code asks for a code here when the browser could not hand the
+    /// sign-in back by itself.
+    input: Option<ChildStdin>,
     scratch: PathBuf,
     log: PathBuf,
     started: i64,
@@ -41,6 +45,7 @@ pub struct LoginReq {
 
 impl LoginJob {
     fn stop(&mut self) {
+        self.input = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -53,7 +58,12 @@ impl LoginJob {
     fn url(&self) -> Option<String> {
         let text = std::fs::read_to_string(&self.log).ok()?;
         let start = text.find("https://")?;
-        Some(text[start..].split_whitespace().next()?.to_string())
+        // The address is printed inside terminal link codes; it ends where
+        // they, or a space, begin.
+        let end = text[start..]
+            .find(|c: char| c.is_whitespace() || c.is_control())
+            .unwrap_or(text.len() - start);
+        Some(text[start..start + end].to_string())
     }
 }
 
@@ -123,15 +133,16 @@ impl Daemon {
         if let Some(email) = req.email.as_deref().filter(|e| !e.is_empty()) {
             command.args(["--email", email]);
         }
-        let child = command
+        let mut child = command
             .env("CLAUDE_CONFIG_DIR", &scratch)
             .env_remove("LLMPOOL_SESSION")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(out.try_clone()?)
             .stderr(out)
             .spawn()
             .map_err(|e| fail(500, format!("could not start Claude Code's sign-in: {e}")))?;
         *slot = Some(LoginJob {
+            input: child.stdin.take(),
             child: Some(child),
             scratch,
             log,
@@ -205,6 +216,29 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// Pass on the code the sign-in page shows when it cannot return to
+    /// Claude Code by itself.
+    pub fn submit_login_code(&self, code: &str) -> Api<Value> {
+        let code = code.trim();
+        if code.is_empty() || code.contains(char::is_whitespace) {
+            return Err(fail(400, "that does not look like a sign-in code"));
+        }
+        {
+            let mut slot = self.login_slot();
+            let job = slot
+                .as_mut()
+                .filter(|job| job.state == "waiting")
+                .ok_or_else(|| fail(409, "no sign-in is waiting for a code"))?;
+            let input = job
+                .input
+                .as_mut()
+                .ok_or_else(|| fail(409, "this sign-in cannot take a code any more"))?;
+            writeln!(input, "{code}").and_then(|()| input.flush())?;
+            job.message = "Code sent. Finishing the sign-in…".into();
+        }
+        Ok(self.login_status())
     }
 
     pub fn cancel_login(&self) -> Value {

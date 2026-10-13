@@ -1202,7 +1202,8 @@ fn quiet_signals_do_not_rewrite_the_state_file_or_repeat_advice() {
     w.daemon.statusline("-", &payload);
     let state = w.data.join("state.json");
     let written = std::fs::metadata(&state).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    // Long enough to cross into another second: time passing is not a change.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     for _ in 0..5 {
         w.daemon.statusline("-", &payload);
     }
@@ -1241,6 +1242,7 @@ email="${4:-new@x.io}"
 echo "Opening https://claude.example/login?state=abc in your browser"
 [ "$email" = "refused@x.io" ] && exit 1
 [ "$email" = "slow@x.io" ] && sleep 30
+if [ "$email" = "code@x.io" ]; then printf 'Paste code here if prompted > '; read code; [ "$code" = "c0de#st4te" ] || exit 1; fi
 printf '{"claudeAiOauth":{"accessToken":"tok-%s","refreshToken":"r"}}' "$email" > "$CLAUDE_CONFIG_DIR/.credentials.json"
 printf '{"oauthAccount":{"emailAddress":"%s","organizationUuid":"org"}}' "$email" > "$CLAUDE_CONFIG_DIR/.claude.json"
 "#,
@@ -1533,4 +1535,29 @@ fn a_login_the_provider_has_ended_is_marked_and_a_shaky_answer_is_not() {
     // And it is not hammered: the next attempt waits.
     daemon.renew_idle();
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_sign_in_that_asks_for_a_code_can_be_given_one() {
+    let w = world();
+    stub_claude(&w);
+    assert_eq!(
+        w.daemon.submit_login_code("x").unwrap_err().status,
+        409,
+        "nothing is waiting yet"
+    );
+    w.daemon.start_login(login("code@x.io", &[])).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(w.daemon.login_status()["state"], "waiting");
+    // The address offered must be clean enough to open.
+    let url = w.daemon.login_status()["url"].as_str().unwrap().to_string();
+    assert_eq!(url, "https://claude.example/login?state=abc");
+    assert_eq!(
+        w.daemon.submit_login_code("two words").unwrap_err().status,
+        400
+    );
+    w.daemon.submit_login_code("  c0de#st4te \n").unwrap();
+    let done = wait_for_login(&w);
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["account"], "code@x.io");
 }

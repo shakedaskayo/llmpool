@@ -82,6 +82,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                     detach,
                     cancel,
                     interactive,
+                    code,
                 },
         } => add_claude(AddOptions {
             from_current,
@@ -91,6 +92,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             detach,
             cancel,
             interactive,
+            code,
         }),
         Command::Login { account } => login_again(&account),
         Command::Doctor => doctor(),
@@ -194,12 +196,33 @@ struct AddOptions {
     detach: bool,
     cancel: bool,
     interactive: bool,
+    code: Option<String>,
 }
 
 /// Wait for the sign-in that is under way, saying where things stand.
 fn follow_login(client: &Client) -> Result<ExitCode, String> {
     let mut shown_url = false;
     eprintln!("Waiting for you to finish signing in in your browser. Ctrl-C stops waiting; the sign-in itself carries on.");
+    if std::io::stdin().is_terminal() {
+        // Some browsers cannot hand the sign-in back by themselves and show a
+        // code instead; it can simply be pasted here.
+        eprintln!("If the page shows a code, paste it here and press Enter.");
+        if let Some(sender) = Client::existing(Duration::from_secs(15)) {
+            std::thread::spawn(move || {
+                for line in std::io::stdin()
+                    .lines()
+                    .map_while(Result::ok)
+                    .filter(|l| !l.trim().is_empty())
+                {
+                    if let Err(e) =
+                        sender.call("POST", "/logins/code", Some(json!({"code": line.trim()})))
+                    {
+                        eprintln!("llmpool: {e}");
+                    }
+                }
+            });
+        }
+    }
     loop {
         let status = client.call("GET", "/logins", None)?;
         match status["state"].as_str() {
@@ -229,6 +252,13 @@ fn follow_login(client: &Client) -> Result<ExitCode, String> {
 
 fn add_claude(options: AddOptions) -> Result<ExitCode, String> {
     let client = connect()?;
+    if let Some(code) = &options.code {
+        client.call("POST", "/logins/code", Some(json!({"code": code})))?;
+        if options.detach {
+            return done("code sent; finishing the sign-in".into());
+        }
+        return follow_login(&client);
+    }
     if options.cancel {
         let status = client.call("DELETE", "/logins", None)?;
         return done(

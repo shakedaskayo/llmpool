@@ -127,6 +127,9 @@ test('what is missing sits at the top with the press that fixes it; signing in s
   await ui.redraw()
   expect(await ui.find({ type: 'Text', text: /Waiting for you to finish signing in/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /https:\/\/example\/login/ })).toBeDefined()
+  // A page that shows a code instead of returning by itself: paste it here.
+  await ui.input({ key: 'login-code', text: ' c0de#st4te ' })
+  expect(calls).toContainEqual(['add', 'claude', '--detach', '--code', 'c0de#st4te'])
   // While one sign-in waits, a second cannot be started; it can be cancelled.
   expect(await ui.find({ key: 'add' })).toBeUndefined()
   await ui.press({ key: 'login-cancel' })

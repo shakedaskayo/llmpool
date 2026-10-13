@@ -106,6 +106,7 @@ fn route(
             parse(body)?
         }),
         ("DELETE", ["logins"]) => Ok(d.cancel_login()),
+        ("POST", ["logins", "code"]) => d.submit_login_code(text(&body, "code")?),
         ("GET", ["sessions"]) => d.list_sessions(),
         ("POST", ["sessions"]) => d.start_session(parse(body)?),
         ("POST", ["sessions", id, "assign"]) => d.assign(id, text(&body, "account")?),

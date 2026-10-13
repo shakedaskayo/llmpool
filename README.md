@@ -7,7 +7,9 @@ the agent.
 
 Works with Claude Code today, on macOS and Linux. The agent keeps its own login path and talks to
 the provider directly: llmpool only decides which login sits in the profile the
-agent reads. It makes no requests to any provider.
+agent reads. The one request it makes to a provider is renewing a login that
+is sitting unused, so it still works when you need it (`LLMPOOL_NO_RENEW=1`
+turns that off).
 
 ## Install
 
@@ -32,7 +34,9 @@ previous status line.
 
 ```bash
 llmpool add claude --from-current --tag personal   # the login Claude Code has now
-llmpool add claude --tag work                      # opens Claude Code in a scratch profile to log in
+llmpool add claude --tag work                      # signs in to another account through your browser
+llmpool login work@example.com                     # sign in again to an account whose login has ended
+llmpool doctor                                     # what is missing, and the command that fixes it
 llmpool list                                       # accounts, tags, 5-hour and 7-day usage
 llmpool run                                        # start Claude Code on the account a policy picks
 llmpool run --account work-1 -- --resume           # or name one; args after -- go to the agent
@@ -48,19 +52,34 @@ which is what lets two accounts work side by side.
 
 Inside Claude Code, `/llmpool` opens a pane with every account's usage and
 reset times; press a number to switch to that account. The status line shows
-the current account and its usage. When the account passes 80% a band appears
-above the prompt with a one-press switch to the account with the most room.
+the current account and its usage, once; the hint row under the prompt
+carries the reminder `/llmpool`. A band appears above the prompt only when
+something needs you: the account passes 80% (with a one-press switch to the
+account with the most room), or its login is missing or has ended.
 
 The app is the same in a window: Pool, Sessions, and a policy editor where
 rules read as sentences and each has a Test button. Its tray menu lists
 running sessions; each opens onto the accounts it can switch to. Closing the
 window leaves it in the tray.
 
+### Signing in
+
+Signing in is Claude Code's own (`claude auth login`), run in a scratch
+profile: your browser opens, and llmpool takes the login into the pool when
+you finish. It never sees a password. The same thing is one press away in
+`/llmpool` (`a`), in the app (**Sign in…**) and in the tray. If the page shows
+a code instead of returning by itself, paste it where you started: the
+terminal, the pane or the app.
+
+Whatever is missing is named with its fix on every surface: a login Claude
+Code uses that is not in the pool yet, an account whose login has ended,
+hooks that are not installed.
+
 ### Switching quickly
 
 | Where | How |
 |---|---|
-| Inside Claude Code | `/llmpool`, then a number key; or `/llmpool next`, or `/llmpool <account>` |
+| Inside Claude Code | `/llmpool`, then a number key (`n` next, `a` add, `r` refresh); or `/llmpool next`, `/llmpool <account>`, `/llmpool add` |
 | Any terminal | `llmpool switch --next`, or `llmpool switch <account>` |
 | Anywhere, with the app running | ⌃⌥⌘N switches to the account with the most quota; ⌃⌥⌘L opens the window |
 | Tray menu | each session opens onto the accounts it can switch to |

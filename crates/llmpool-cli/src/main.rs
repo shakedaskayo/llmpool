@@ -144,6 +144,9 @@ enum AddAgent {
         /// Start the sign-in and return at once, without waiting for it
         #[arg(long)]
         detach: bool,
+        /// Pass on the code the sign-in page shows, for a sign-in already started
+        #[arg(long)]
+        code: Option<String>,
         /// Give up on the sign-in that is waiting in the browser
         #[arg(long)]
         cancel: bool,
