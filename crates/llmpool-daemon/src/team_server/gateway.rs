@@ -493,6 +493,8 @@ impl TeamServer {
         json!({
             "requests": matching.iter().take(200).collect::<Vec<_>>(),
             "totals": {
+                // When the oldest request counted here was made.
+                "since": matching.iter().filter_map(|t| t["at"].as_i64()).min(),
                 "requests": matching.len(), "failed": matching.iter().filter(|t| failed(t)).count(),
                 "input_tokens": sum("input_tokens", &matching), "output_tokens": sum("output_tokens", &matching),
                 "p50_ms": at(0.5), "p95_ms": at(0.95),

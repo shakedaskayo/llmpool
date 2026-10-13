@@ -183,6 +183,8 @@ function issuesPanel() {
       const label = { add_current: "Add this login to the pool", login: issue.email ? `Sign in as ${issue.email}` : "Sign in" }[issue.action];
       const button = label ? `<div class="copy"><button class="primary" data-act="fix" data-i="${i}">${esc(label)}</button></div>` : "";
       const command = issue.action === "install" ? `<div class="copy"><button class="primary" data-act="goto-setup">Open Settings to set it up</button></div>` : "";
+      // Not being set up yet is a step to take, not something gone wrong.
+      if (issue.action === "install") return `<div class="callout" role="status"><strong>${esc(issue.text).replace(/`([^`]+)`/g, "<code>$1</code>")}</strong>${command}</div>`;
       return `<div class="callout bad" role="alert"><strong>⚠ ${esc(issue.text).replace(/`([^`]+)`/g, "<code>$1</code>")}</strong>${button}${command}</div>`;
     })
     .join("");
@@ -407,7 +409,7 @@ function renderRequests() {
         : `For <strong>${esc(d.who)}</strong>: <span class="muted">${esc(d.note ?? "no answer")}</span>`
     }</span></li>`)
     .join("");
-  $("sessions").innerHTML = `${pageHead("Requests", `What members' agents sent through this server. ${n(r.in_flight)} in flight now, of ${n(r.limit)} at once.`, `<button data-act="report-refresh">Refresh</button>`)}
+  $("sessions").innerHTML = `${pageHead("Requests", `What members' agents sent through this server. ${n(r.in_flight)} in flight now, of ${n(r.limit)} at once.${t.since ? ` The numbers below count from ${new Date(t.since * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.` : ""}`, `<button data-act="report-refresh">Refresh</button>`)}
     <div class="tiles">
       ${tile(n(t.requests), "requests")}
       ${tile(n(t.input_tokens), "tokens in")}
