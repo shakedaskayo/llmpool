@@ -2,3 +2,5 @@ target/
 .superpowers/
 crates/llmpool-gui/gen/
 crates/llmpool-gui/binaries/
+.fastembed_cache/
+.DS_Store
