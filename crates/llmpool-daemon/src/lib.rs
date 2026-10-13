@@ -83,7 +83,9 @@ pub struct Managed {
     /// user's own profile and shares its login with every other such session.
     #[serde(default)]
     pub native: bool,
-    #[serde(default)]
+    /// When it last sent a signal. Not saved: it changes constantly and only
+    /// matters while the daemon runs.
+    #[serde(skip_deserializing)]
     pub last_seen: i64,
 }
 
@@ -107,6 +109,9 @@ pub struct LogEvent {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Persisted {
+    /// Claude Code session ids that have already been told what a
+    /// `session_start` rule would have chosen, so it is said once.
+    suggested: VecDeque<String>,
     sessions: BTreeMap<String, Managed>,
     stores: BTreeMap<String, StoreRec>,
     events: VecDeque<LogEvent>,
@@ -163,6 +168,8 @@ pub struct Daemon {
     /// Whether to raise desktop notifications. Off unless asked for, so tests
     /// and headless machines stay quiet.
     notify: bool,
+    /// The state as last written to disk.
+    saved: Mutex<String>,
     inner: Mutex<Inner>,
 }
 
@@ -291,6 +298,7 @@ impl Daemon {
             vault,
             keychain,
             notify: false,
+            saved: Mutex::new(String::new()),
             inner: Mutex::new(Inner {
                 store: Store::open(&data_dir.join("llmpool.db"))?,
                 p,
@@ -299,6 +307,10 @@ impl Daemon {
         };
         {
             let mut g = daemon.lock();
+            let t = now();
+            for m in g.p.sessions.values_mut() {
+                m.last_seen = t;
+            }
             // After a reboot no launched agent is still running, but its
             // process id may have been given to something else.
             let saved = std::fs::metadata(data_dir.join("state.json"))
@@ -381,12 +393,25 @@ impl Daemon {
         Profile::default_in(&self.home)
     }
 
+    /// Write the state to disk, if it differs from what is already there.
+    /// Called after every signal from every session, most of which change
+    /// nothing worth a file write.
     fn save(&self, g: &Inner) {
-        if let Ok(text) = serde_json::to_string_pretty(&g.p) {
-            let tmp = self.data_dir.join("state.json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(tmp, self.data_dir.join("state.json"));
-            }
+        let Ok(text) = serde_json::to_string_pretty(&g.p) else {
+            return;
+        };
+        let mut saved = self
+            .saved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *saved == text {
+            return;
+        }
+        let tmp = self.data_dir.join("state.json.tmp");
+        if std::fs::write(&tmp, &text).is_ok()
+            && std::fs::rename(tmp, self.data_dir.join("state.json")).is_ok()
+        {
+            *saved = text;
         }
     }
 
@@ -534,7 +559,14 @@ impl Daemon {
                 .iter()
                 .filter(|(_, m)| {
                     if m.native {
-                        t - m.last_seen > NATIVE_IDLE_SECS
+                        // One with something still to tell the user is kept
+                        // until it has said it, within reason.
+                        let patience = if m.notices.is_empty() {
+                            NATIVE_IDLE_SECS
+                        } else {
+                            NATIVE_IDLE_SECS * 16
+                        };
+                        t - m.last_seen > patience
                     } else {
                         !pid_alive(m.pid)
                     }
@@ -1446,7 +1478,15 @@ impl Daemon {
                 account.label
             ),
         );
-        self.suggest(g, &id, &accounts, &account);
+        // Said once per Claude Code session, even if it goes quiet for long
+        // enough to be forgotten and met again.
+        if !g.p.suggested.iter().any(|seen| seen == agent_id) {
+            g.p.suggested.push_back(agent_id.to_string());
+            while g.p.suggested.len() > 200 {
+                g.p.suggested.pop_front();
+            }
+            self.suggest(g, &id, &accounts, &account);
+        }
         self.save(g);
         Some(id)
     }
@@ -1634,8 +1674,15 @@ impl Daemon {
         if let Some(mut account) = account_id.and_then(|id| g.store.get(&id).ok().flatten()) {
             if settled {
                 if let Some(usage) = statusline::usage(payload, t) {
+                    // The status line refreshes far more often than usage moves.
+                    let moved = account
+                        .usage
+                        .as_ref()
+                        .is_none_or(|old| old.windows != usage.windows);
                     account.usage = Some(usage);
-                    let _ = g.store.put(&account);
+                    if moved {
+                        let _ = g.store.put(&account);
+                    }
                 }
             }
             line = format!("llmpool: {}", account.label);

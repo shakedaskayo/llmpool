@@ -1192,3 +1192,37 @@ fn repair_rewrites_the_same_login_and_keeps_the_newest_token() {
         "home@x.io"
     );
 }
+
+#[test]
+fn quiet_signals_do_not_rewrite_the_state_file_or_repeat_advice() {
+    let w = world();
+    w.daemon.put_policy(POLICY).unwrap();
+    let payload = json!({"session_id": "agent-1", "cwd": "/work/api", "rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": 4_000_000_000i64}}});
+    w.daemon.hook("-", "SessionStart", "", &payload);
+    w.daemon.statusline("-", &payload);
+    let state = w.data.join("state.json");
+    let written = std::fs::metadata(&state).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    for _ in 0..5 {
+        w.daemon.statusline("-", &payload);
+    }
+    assert_eq!(
+        std::fs::metadata(&state).unwrap().modified().unwrap(),
+        written,
+        "nothing changed, nothing should be written"
+    );
+
+    // The advice about this directory's rule was given; meeting the same
+    // Claude Code session again later does not repeat it.
+    let first = w.daemon.hook("-", "UserPromptSubmit", "", &payload);
+    assert!(first["systemMessage"]
+        .as_str()
+        .unwrap()
+        .contains("would use"));
+    w.daemon.hook("-", "SessionEnd", "", &payload);
+    w.daemon.hook("-", "SessionStart", "", &payload);
+    assert_eq!(
+        w.daemon.hook("-", "UserPromptSubmit", "", &payload),
+        json!({})
+    );
+}
