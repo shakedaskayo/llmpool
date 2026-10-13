@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bar, best, fullest, level, peak, resetsIn, stateMark, toSnapshot } from './view'
+import { WINDOW_SECS, bar, best, elapsed, fit, forecast, fullest, level, miniBar, peak, resetsIn, spark, stateMark, toSnapshot, wideBar } from './view'
 
 const STATUS = {
   session: { id: 's1', account_id: 'a' },
@@ -88,4 +88,44 @@ test('meter and reset text', () => {
   expect(resetsIn(300, 0)).toBe('resets in 5m')
   expect(resetsIn(100, 200000)).toBe('')
   expect(resetsIn(null, 0)).toBe('')
+})
+
+test('a wide meter is smooth and carries the pace mark', () => {
+  const text = (percent: number | null, pace: number | null) => wideBar(percent, 10, pace).map(p => p.text).join('')
+  expect(text(0, null)).toBe('░░░░░░░░░░')
+  expect(text(50, null)).toBe('█████░░░░░')
+  expect(text(55, null)).toBe('█████▌░░░░')
+  expect(text(100, null)).toBe('██████████')
+  expect(text(250, null)).toBe('██████████')
+  // The mark sits where even use would be: behind it is under pace, past it over.
+  expect(text(20, 0.5)).toBe('██░░░┃░░░░')
+  expect(text(80, 0.5)).toBe('█████┃██░░')
+  expect(wideBar(80, 10, 0.5).map(p => p.kind)).toEqual(['used', 'pace', 'used', 'free'])
+  for (const [percent, pace] of [[0, 0], [33, 1], [100, 0.99], [7, 0.07]] as const) {
+    expect([...text(percent, pace)].length).toBe(10)
+  }
+  expect(text(null, 0.5)).toBe('░░░░░░░░░░')
+})
+
+test('pace, forecast and trend', () => {
+  const now = 1_000_000_000
+  const five = WINDOW_SECS['5h']
+  // Half the window gone.
+  const reset = now / 1000 + five / 2
+  expect(elapsed(reset, now, five)).toBe(0.5)
+  expect(elapsed(null, now, five)).toBe(null)
+  expect(forecast(25, reset, now, five)).toBe('at this pace it lasts to the reset')
+  expect(forecast(80, reset, now, five)).toBe('at this pace full in 38m, 1h 53m before it resets')
+  expect(forecast(100, reset, now, five)).toBe('limit reached')
+  // Too early in the window, or nothing used yet, to say anything.
+  expect(forecast(50, now / 1000 + five - 60, now, five)).toBe('')
+  expect(forecast(1, reset, now, five)).toBe('')
+  expect(forecast(null, reset, now, five)).toBe('')
+
+  expect(spark([0, 50, 100])).toBe('▁▅█')
+  expect(spark([42])).toBe('')
+  expect(miniBar(null)).toBe('▱▱▱▱▱')
+  expect(miniBar(42)).toBe('▰▰▱▱▱')
+  expect(fit('abc', 6)).toBe('abc   ')
+  expect(fit('abcdefgh', 6)).toBe('abcde…')
 })

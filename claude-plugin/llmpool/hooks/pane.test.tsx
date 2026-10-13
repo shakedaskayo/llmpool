@@ -6,7 +6,9 @@ const STATUS = {
   session: { id: 's1', account_id: 'a' },
   accounts: [
     { id: 'a', label: 'work-1', tags: ['work'], enabled: true, health: 'ok', sessions: ['s1'],
-      usage: { windows: { '5h': { used_percent: 91, resets_at: 4000000000 }, '7d': { used_percent: 12, resets_at: null } } } },
+      // The clock in these tests reads 1_700_000_000: the 5-hour window is half over.
+      history: [[1, 20, 5], [2, 55, 8], [3, 91, 12]],
+      usage: { windows: { '5h': { used_percent: 91, resets_at: 1_700_009_000 }, '7d': { used_percent: 12, resets_at: null } } } },
     { id: 'b', label: 'work-2', tags: ['work'], enabled: true, health: 'ok', sessions: [], usage: null },
     { id: 'c', label: 'spare', tags: [], enabled: false, health: 'ok', sessions: [], usage: null },
     { id: 'd', label: 'old', tags: [], enabled: true, health: 'relogin_required', sessions: [], usage: null },
@@ -15,6 +17,7 @@ const STATUS = {
   sessions: [{ id: 's1', account_label: 'work-1', cwd: '/w' }],
   issues: [{ kind: 'relogin', text: 'old needs a new sign-in.', action: 'login', email: 'old@x.io' }],
   login: { state: 'idle' },
+  stats: { headroom_5h: 70, headroom_7d: 96, switches_24h: 3, last_switch: { at: 1_700_000_000, text: 'this session moved from work-2 to work-1 (rule "swap")' } },
 }
 
 // The test stands in for the host: these are the calls the mod makes that a
@@ -46,6 +49,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     for (const text of [/work-1/, /this session/, /work-2/, /near limit/, /91%/, /disabled/, /needs a new sign-in/]) {
       expect(await ui.find({ type: 'Text', text })).toBeDefined()
     }
+    // The current account is drawn large: a meter with the pace mark, a
+    // forecast, and its trend. Half the window gone, 91% used: it will not last.
+    expect(await ui.find({ type: 'Text', text: /┃/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /at this pace full in 1[45]m/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▂▅█/ })).toBeDefined()
+    // The pool as a whole.
+    expect(await ui.find({ type: 'Text', text: /70% free/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /3 switches in the last 24h/ })).toBeDefined()
     // Only the usable, other account can be switched to.
     expect(await ui.find({ key: 'use-b' })).toBeDefined()
     expect(await ui.find({ key: 'use-a' })).toBeUndefined()

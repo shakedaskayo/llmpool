@@ -215,7 +215,7 @@ fn usage_over_the_threshold_swaps_the_login_and_tells_the_session() {
 
     // Below the threshold nothing happens.
     let line = w.daemon.statusline(sid, &usage(40.0));
-    assert_eq!(line["line"], format!("llmpool: {first} · 5h 40%"));
+    assert_eq!(line["line"], format!("llmpool ● {first}  5h ▰▰▱▱▱ 40%"));
     assert_eq!(
         w.daemon.hook(sid, "UserPromptSubmit", "", &json!({})),
         json!({})
@@ -465,7 +465,7 @@ fn http_api_requires_the_token_and_serves_json() {
         .unwrap()
         .into_json()
         .unwrap();
-    assert_eq!(line["line"], "llmpool: a@x.io · 5h 12%");
+    assert_eq!(line["line"], "llmpool ● a@x.io  5h ▰▱▱▱▱ 12%");
 
     let missing = ureq::post(&url("/sessions/nope/swap"))
         .set("Authorization", &auth)
@@ -1603,4 +1603,63 @@ fn signing_in_as_the_wrong_account_is_said_plainly() {
         status["message"],
         "Signed in as surprise@x.io, not wanted-too@x.io as asked; surprise@x.io is in the pool."
     );
+}
+
+#[test]
+fn usage_is_remembered_over_time_and_the_pool_is_summed_up() {
+    let w = world();
+    w.daemon.put_policy(POLICY).unwrap();
+    let reply = start(&w, "/work/api", None);
+    let sid = reply["session_id"].as_str().unwrap();
+    let first = reply["account"]["email"].as_str().unwrap();
+    let reading = |p: f64| json!({"rate_limits": {"five_hour": {"used_percentage": p, "resets_at": 4_000_000_000i64}, "seven_day": {"used_percentage": p / 2.0, "resets_at": 4_000_000_000i64}}});
+
+    // Small moves within ten minutes are one point; a jump is another.
+    for p in [10.0, 11.0, 12.0, 40.0, 41.0, 72.0] {
+        w.daemon.statusline(sid, &reading(p));
+    }
+    let accounts = w.daemon.list_accounts().unwrap();
+    let row = accounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["email"] == first)
+        .unwrap();
+    let points: Vec<f64> = row["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p[1].as_f64().unwrap())
+        .collect();
+    assert_eq!(points, vec![10.0, 40.0, 72.0]);
+
+    // The line under the prompt says it three ways: mark, meter, number.
+    let line = w.daemon.statusline(sid, &reading(72.0));
+    assert_eq!(
+        line["line"],
+        format!("llmpool ◆ {first}  5h ▰▰▰▰▱ 72%  7d ▰▰▱▱▱ 36%")
+    );
+    assert!(line["colored"].as_str().unwrap().contains("\u{1b}[33m"));
+
+    let stats = w.daemon.stats().unwrap();
+    assert_eq!(
+        (
+            stats["accounts"].as_u64(),
+            stats["usable"].as_u64(),
+            stats["sessions"].as_u64()
+        ),
+        (Some(3), Some(3), Some(1))
+    );
+    // One account at 72%, two untouched: on average 76% of the 5-hour allowance is left.
+    assert_eq!(stats["headroom_5h"].as_f64().unwrap().round(), 76.0);
+    assert_eq!(stats["switches_24h"], 0);
+    assert_eq!(stats["last_switch"], Value::Null);
+
+    w.daemon.statusline(sid, &reading(95.0));
+    let stats = w.daemon.stats().unwrap();
+    assert_eq!(stats["switches_24h"], 1);
+    assert!(stats["last_switch"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("swap before the limit"));
 }

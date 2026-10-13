@@ -9,6 +9,7 @@ const state = {
   sessions: [],
   events: [],
   issues: [],
+  stats: {},
   login: { state: "idle" },
   schema: { triggers: [], conditions: [], picks: [], home: "" },
   policy: { settings: {}, rule: [] },
@@ -82,6 +83,19 @@ function meter(usage, name, title) {
     <span class="value">${p}%</span><small>${esc(reset || word)}</small></div>`;
 }
 
+// Usage over time as a small line: enough to see a climb or a reset at a glance.
+function sparkline(history, label) {
+  const points = (history ?? []).slice(-24).map((p) => p[1]);
+  if (points.length < 2) return `<span class="muted">collecting…</span>`;
+  const w = 96, h = 22;
+  const step = w / (points.length - 1);
+  const path = points.map((v, i) => `${i ? "L" : "M"}${(i * step).toFixed(1)} ${(h - 1 - (Math.min(100, v) / 100) * (h - 2)).toFixed(1)}`).join(" ");
+  const last = Math.round(points[points.length - 1]);
+  const [level] = levelOf(last);
+  return `<svg class="spark ${level}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}: from ${Math.round(points[0])}% to ${last}% over the last ${points.length} readings">
+    <path d="${path}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+
 // ---- pool -------------------------------------------------------------------
 
 // A login runs out on a known day; say so while there is still time to act.
@@ -152,6 +166,7 @@ function renderPool() {
         <td><input class="tags" data-act="tags" data-id="${esc(a.id)}" value="${esc(a.tags.join(", "))}" placeholder="e.g. work, acme" aria-label="Tags for ${esc(a.label)}, comma separated" /></td>
         <td>${meter(a.usage, "5h", "5-hour window")}</td>
         <td>${meter(a.usage, "7d", "7-day window")}</td>
+        <td>${sparkline(a.history, `5-hour usage of ${a.label}`)}</td>
         <td class="actions">
           ${a.health !== "ok" ? `<button class="primary" data-act="relogin" data-id="${esc(a.id)}" aria-label="Sign in again as ${esc(a.label)}">Sign in again</button>` : ""}
           <button data-act="toggle" data-id="${esc(a.id)}" aria-label="${a.enabled ? "Disable" : "Enable"} ${esc(a.label)}">${a.enabled ? "Disable" : "Enable"}</button>
@@ -163,7 +178,7 @@ function renderPool() {
     ${
       rows
         ? `<table><caption class="skip">Accounts in the pool</caption>
-            <thead><tr><th scope="col">Account</th><th scope="col">Tags</th><th scope="col">5-hour window</th><th scope="col">7-day window</th><th scope="col"><span class="skip">Actions</span></th></tr></thead>
+            <thead><tr><th scope="col">Account</th><th scope="col">Tags</th><th scope="col">5-hour window</th><th scope="col">7-day window</th><th scope="col">Trend (5h)</th><th scope="col"><span class="skip">Actions</span></th></tr></thead>
             <tbody>${rows}</tbody></table>
            <p class="muted">Tags group accounts for policies, e.g. “use an account tagged work in ~/work”.</p>`
         : `<p class="empty">No accounts yet. Add the login Claude Code is using now to start the pool.</p>`
@@ -631,19 +646,22 @@ const busy = () => {
 
 function renderSummary() {
   const managed = state.sessions.length;
-  $("summary").textContent = state.offline ?? `${plural(state.accounts.length, "account")} · ${plural(managed, "session")}`;
+  const free = state.stats.headroom_5h == null ? "" : ` · ${Math.round(state.stats.headroom_5h)}% of the 5-hour allowance free`;
+  const switches = state.stats.switches_24h ? ` · ${plural(state.stats.switches_24h, "switch").replace("switchs", "switches")} today` : "";
+  $("summary").textContent = state.offline ?? `${plural(state.accounts.length, "account")} · ${plural(managed, "session")}${free}${switches}`;
   $("summary").className = state.offline ? "badge bad" : "muted";
 }
 
 async function refresh(force = false) {
   try {
     const before = state.login.state;
-    [state.accounts, state.sessions, state.events, state.issues, state.login] = await Promise.all([
+    [state.accounts, state.sessions, state.events, state.issues, state.login, state.stats] = await Promise.all([
       api("GET", "/accounts"),
       api("GET", "/sessions"),
       api("GET", "/events"),
       api("GET", "/issues"),
       api("GET", "/logins"),
+      api("GET", "/stats"),
     ]);
     // A sign-in that just ended is news, whichever way it went.
     if (before === "waiting" && state.login.state !== "waiting") {

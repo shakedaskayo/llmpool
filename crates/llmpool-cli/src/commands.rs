@@ -157,10 +157,14 @@ fn agent_bin() -> String {
     std::env::var("LLMPOOL_CLAUDE_BIN").unwrap_or_else(|_| "claude".into())
 }
 
+/// A window's usage as a small meter and a number, e.g. `▰▰▱▱▱  42%`.
 fn percent(row: &Value, window: &str) -> String {
     match row["usage"]["windows"][window]["used_percent"].as_f64() {
-        Some(p) => format!("{p:.0}%"),
-        None => "-".into(),
+        Some(p) => {
+            let filled = ((p / 20.0).round() as usize).min(5);
+            format!("{}{} {p:>3.0}%", "▰".repeat(filled), "▱".repeat(5 - filled))
+        }
+        None => "▱▱▱▱▱    -".into(),
     }
 }
 
@@ -653,8 +657,11 @@ fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, Stri
         let login = client
             .call("GET", "/logins", None)
             .unwrap_or_else(|_| json!({"state": "idle"}));
+        let stats = client
+            .call("GET", "/stats", None)
+            .unwrap_or_else(|_| json!({}));
         return done(
-            json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions, "issues": issues, "login": login})
+            json!({"schemaVersion": 1, "session": session, "accounts": accounts, "sessions": sessions, "issues": issues, "login": login, "stats": stats})
                 .to_string(),
         );
     }
@@ -1063,7 +1070,18 @@ fn statusline(agent: &str) -> ExitCode {
             line = client
                 .call("POST", &format!("/statusline/claude/{sid}"), Some(payload))
                 .ok()
-                .and_then(|reply| reply["line"].as_str().map(str::to_string));
+                .and_then(|reply| {
+                    // Colour is extra: the line says the same without it.
+                    let key = if std::env::var_os("NO_COLOR").is_some() {
+                        "line"
+                    } else {
+                        "colored"
+                    };
+                    reply[key]
+                        .as_str()
+                        .or(reply["line"].as_str())
+                        .map(str::to_string)
+                });
         }
     }
     let previous = install::previous_status_command(&previous_status_path()).and_then(|command| {

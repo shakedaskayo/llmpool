@@ -15,6 +15,17 @@ export type Row = {
   isCurrent: boolean
   /** Its login is live where this session cannot share it. */
   isElsewhere: boolean
+  /** Percent of the 5-hour window over time, oldest first, for a trend line. */
+  trend: number[]
+}
+
+/** The pool as a whole. */
+export type Stats = {
+  /** Percent of the combined allowance still unused; null with no usable account. */
+  headroom5: number | null
+  headroom7: number | null
+  switches24h: number
+  lastSwitch: { at: number; text: string } | null
 }
 
 /** Something that stands in the way, and what fixes it. */
@@ -42,6 +53,7 @@ export type Snapshot = {
   error: string | null
   issues: Issue[]
   login: Login
+  stats: Stats
 }
 
 declare module 'claude-code' {

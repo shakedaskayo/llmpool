@@ -99,6 +99,7 @@ fn route(
             body["replace"] == true,
         ),
         ("GET", ["issues"]) => d.issues(),
+        ("GET", ["stats"]) => d.stats(),
         ("GET", ["logins"]) => Ok(d.login_status()),
         ("POST", ["logins"]) => d.start_login(if body.is_null() {
             Default::default()

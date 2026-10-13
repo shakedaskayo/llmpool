@@ -3,18 +3,24 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Issue, Row, Snapshot } from '../types'
 import {
-  bar,
+  WINDOW_SECS,
   best,
+  elapsed,
+  fit,
   fixLabel,
+  forecast,
   fullest,
   isUsable,
   level,
+  miniBar,
   peak,
   percentText,
   resetsIn,
+  spark,
   stateMark,
   toSnapshot,
   urgent,
+  wideBar,
 } from './view'
 
 // `llmpool install claude` replaces this with the installed binary's path.
@@ -36,6 +42,7 @@ const EMPTY: Snapshot = {
   error: null,
   issues: [],
   login: { state: 'idle', message: '', url: null },
+  stats: { headroom5: null, headroom7: null, switches24h: 0, lastSwitch: null },
 }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
@@ -172,7 +179,7 @@ export const register: Register = on => {
     await refresh($)
     await openPane($)
 
-    return { text: 'llmpool: number keys switch · n next · a add an account · r refresh · esc closes' }
+    return { text: 'number keys switch · n next · a add an account · r refresh · esc closes' }
   })
 
   // Usage moves when a turn ends; show it without waiting for the timer.
@@ -237,11 +244,17 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Input, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Button, Text } = elements
+    // Not every surface takes typed text; where it cannot, the field is left out.
+    const Input = (elements as { Input?: (typeof elements)['Button'] }).Input as any
     const snap = await read($, snapshot)
     const now = await $.clock.now()
     const canSwitch = snap.session !== null
     const waiting = snap.login.state === 'waiting'
+    const columns = e.viewport?.columns ?? 64
+    const barWidth = Math.max(12, Math.min(36, columns - 30))
+    const nameWidth = Math.max(10, Math.min(28, columns - 36))
 
     if (snap.error !== null) {
       return (
@@ -256,64 +269,107 @@ export const register: Register = on => {
       )
     }
 
-    const meter = (name: string, percent: number | null, resetAt: number | null) => {
+    const heading = (text: string, note = '') => (
+      <Box gap={1} marginTop={1}>
+        <Text bold color="suggestion">
+          {text}
+        </Text>
+        <Text dimColor>{note}</Text>
+      </Box>
+    )
+
+    // One window of the current account, drawn large: a meter with the pace
+    // mark, the number, the level in a word, and what the pace means.
+    const big = (name: '5h' | '7d', percent: number | null, resetAt: number | null) => {
       const tone = level(percent)
+      const pace = elapsed(resetAt, now, WINDOW_SECS[name])
+      const note = [resetsIn(resetAt, now), forecast(percent, resetAt, now, WINDOW_SECS[name])].filter(Boolean).join(' · ')
 
       return (
-        <Box gap={1}>
-          <Text dimColor>{name}</Text>
-          <Text color={tone.color}>{bar(percent)}</Text>
-          <Text color={tone.color} bold>
-            {percentText(percent)}
-          </Text>
-          <Text color={tone.color}>{tone.word}</Text>
-          <Text dimColor>{resetsIn(resetAt, now)}</Text>
-        </Box>
-      )
-    }
-
-    // Digits switch: the first nine accounts that can be switched to.
-    const hotkeys = new Map<string, string>()
-    for (const row of snap.rows.filter(r => !r.isCurrent && isUsable(r)).slice(0, 9)) {
-      hotkeys.set(row.id, String(hotkeys.size + 1))
-    }
-
-    const card = (row: Row) => {
-      const mark = stateMark(row)
-      const usable = isUsable(row)
-      const needsLogin = row.state !== 'ok' && row.state !== 'disabled'
-
-      return (
-        <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="column">
           <Box gap={1}>
-            <Text color={row.isCurrent ? 'success' : usable || row.isElsewhere ? 'text' : 'warning'} bold={row.isCurrent}>
-              {mark.icon} {row.label}
+            <Text dimColor>{name}</Text>
+            <Box>
+              {wideBar(percent, barWidth, pace).map(piece => (
+                <Text color={piece.kind === 'used' ? tone.color : piece.kind === 'pace' ? 'text' : 'inactive'} bold={piece.kind === 'pace'}>
+                  {piece.text}
+                </Text>
+              ))}
+            </Box>
+            <Text color={tone.color} bold>
+              {percentText(percent)}
             </Text>
-            {mark.text !== '' && (
-              <Text color={row.isCurrent ? 'success' : row.isElsewhere ? 'inactive' : 'warning'}>
-                {needsLogin ? 'needs a new sign-in' : mark.text}
-              </Text>
-            )}
-            {row.tags.length > 0 && <Text dimColor>{row.tags.map(tag => `#${tag}`).join(' ')}</Text>}
+            <Text color={tone.color}>{tone.word}</Text>
           </Box>
-          {(usable || row.isCurrent || row.isElsewhere) && (
-            <Box flexDirection="column" marginLeft={2}>
-              {meter('5h', row.h5, row.reset5)}
-              {meter('7d', row.d7, row.reset7)}
-              {canSwitch && hotkeys.has(row.id) && (
-                <Button
-                  key={`use-${row.id}`}
-                  plain
-                  hotkey={hotkeys.get(row.id)}
-                  label={`Switch this session to ${row.label}`}
-                  onPress={() => use($, snap.session ?? '', row)}
-                />
-              )}
+          {note !== '' && (
+            <Box marginLeft={3}>
+              <Text dimColor>{note}</Text>
             </Box>
           )}
         </Box>
       )
     }
+
+    const current = snap.rows.find(r => r.isCurrent)
+    const others = snap.rows.filter(r => !r.isCurrent)
+
+    // Digits switch: the first nine accounts that can be switched to.
+    const hotkeys = new Map<string, string>()
+    for (const row of others.filter(isUsable).slice(0, 9)) {
+      hotkeys.set(row.id, String(hotkeys.size + 1))
+    }
+
+    // One account, one line: its key or mark, name, both windows as small
+    // meters, and its recent trend.
+    const line = (row: Row) => {
+      const mark = stateMark(row)
+      const key = canSwitch ? hotkeys.get(row.id) : undefined
+      const measured = isUsable(row) || row.isElsewhere
+      const five = level(row.h5)
+      const seven = level(row.d7)
+
+      return (
+        <Box gap={1}>
+          {key !== undefined ? (
+            <Button key={`use-${row.id}`} plain hotkey={key} label={fit(row.label, nameWidth)} onPress={() => use($, snap.session ?? '', row)} />
+          ) : (
+            <Text color={measured ? 'text' : 'warning'}>
+              {mark.icon}  {fit(row.label, nameWidth)}
+            </Text>
+          )}
+          {measured ? (
+            <Box gap={1}>
+              <Text color={five.color}>
+                {miniBar(row.h5)}
+                {percentText(row.h5)}
+              </Text>
+              <Text color={seven.color}>
+                {miniBar(row.d7)}
+                {percentText(row.d7)}
+              </Text>
+              <Text dimColor>{spark(row.trend)}</Text>
+              {row.isElsewhere && <Text dimColor>in use by another session</Text>}
+            </Box>
+          ) : (
+            <Text color={row.state === 'disabled' ? 'inactive' : 'warning'}>
+              {row.state === 'disabled' ? 'disabled' : 'needs a new sign-in'}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const clock = (at: number) => {
+      const d = new Date(at * 1000)
+
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+    const free = (name: string, headroom: number | null) =>
+      headroom === null ? null : (
+        <Text color={level(100 - headroom).color}>
+          {name} {miniBar(100 - headroom)} {Math.round(headroom)}% free
+        </Text>
+      )
 
     // What is missing comes first, each with the press that fixes it.
     const issues = snap.issues.filter(i => fixLabel(i) !== '' || i.action === 'install' || i.action === 'none')
@@ -326,12 +382,14 @@ export const register: Register = on => {
               ◌ Waiting for you to finish signing in in your browser
             </Text>
             {snap.login.url !== null && <Text dimColor>If no page opened: {snap.login.url}</Text>}
-            <Input
-              key="login-code"
-              label="Code"
-              placeholder="only if the page shows a code: paste it here, then Enter"
-              onSubmit={value => sendCode($, value)}
-            />
+            {Input && (
+              <Input
+                key="login-code"
+                label="Code"
+                placeholder="only if the page shows a code: paste it here, then Enter"
+                onSubmit={(value: string) => sendCode($, value)}
+              />
+            )}
             <Button key="login-cancel" plain hotkey="c" label="Cancel the sign-in" onPress={() => cancelSignIn($)} />
           </Box>
         )}
@@ -344,27 +402,64 @@ export const register: Register = on => {
               )}
             </Box>
           ))}
-        {snap.rows.length === 0 && issues.length === 0 && <Text dimColor>No accounts in the pool yet.</Text>}
-        {snap.rows.map(card)}
-        {snap.others.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text dimColor bold>
-              Other sessions ({snap.others.length})
-            </Text>
-            {snap.others.slice(0, 6).map(s => (
-              <Box gap={1} marginLeft={2}>
-                <Text dimColor>{s.label}</Text>
-                <Text dimColor wrap="truncate-start">
-                  {s.cwd}
-                </Text>
+
+        {current !== undefined && (
+          <Box flexDirection="column">
+            {heading('THIS SESSION')}
+            <Box gap={1}>
+              <Text color="success" bold>
+                ● {current.label}
+              </Text>
+              <Text color="success">this session</Text>
+              {current.tags.length > 0 && <Text dimColor>{current.tags.map(tag => `#${tag}`).join(' ')}</Text>}
+            </Box>
+            {big('5h', current.h5, current.reset5)}
+            {big('7d', current.d7, current.reset7)}
+            {spark(current.trend) !== '' && (
+              <Box gap={1}>
+                <Text dimColor>trend</Text>
+                <Text color={level(current.h5).color}>{spark(current.trend)}</Text>
+                <Text dimColor>5-hour window, recent readings</Text>
               </Box>
-            ))}
+            )}
+            {(current.reset5 !== null || current.reset7 !== null) && <Text dimColor>┃ where even use would be by now</Text>}
           </Box>
         )}
-        <Box flexDirection="column" marginTop={1}>
-          <Text dimColor bold>
-            Actions
-          </Text>
+
+        {others.length > 0 && (
+          <Box flexDirection="column">
+            {heading('POOL', `${snap.rows.length} accounts`)}
+            <Text dimColor>
+              {'   '}
+              {fit('', nameWidth)} 5h{'         '}7d
+            </Text>
+            {others.map(line)}
+          </Box>
+        )}
+        {snap.rows.length === 0 && issues.length === 0 && <Text dimColor>No accounts in the pool yet.</Text>}
+
+        {snap.rows.length > 0 && (
+          <Box flexDirection="column">
+            {heading('TOTAL')}
+            <Box gap={2}>
+              {free('5h', snap.stats.headroom5)}
+              {free('7d', snap.stats.headroom7)}
+            </Box>
+            <Text dimColor>
+              {snap.stats.switches24h === 0 ? 'no switches' : `${snap.stats.switches24h} switch${snap.stats.switches24h > 1 ? 'es' : ''}`} in the last 24h
+              {snap.stats.lastSwitch !== null ? ` · last at ${clock(snap.stats.lastSwitch.at)}` : ''}
+              {snap.others.length > 0 ? ` · ${snap.others.length} other session${snap.others.length > 1 ? 's' : ''}` : ''}
+            </Text>
+            {snap.stats.lastSwitch !== null && (
+              <Text dimColor wrap="truncate-end">
+                {snap.stats.lastSwitch.text}
+              </Text>
+            )}
+          </Box>
+        )}
+
+        <Box flexDirection="column">
+          {heading('ACTIONS')}
           {canSwitch && hotkeys.size > 0 && (
             <Button key="next" plain hotkey="n" label="Switch to the account with the most quota" onPress={() => useNext($, snap.session ?? '')} />
           )}

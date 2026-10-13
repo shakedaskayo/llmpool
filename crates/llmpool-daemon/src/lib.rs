@@ -31,6 +31,9 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// right after a swap may still describe the previous account.
 const SETTLE_SECS: i64 = 60;
 const MAX_EVENTS: usize = 200;
+/// Usage samples kept per account, and the least time between two of them.
+const MAX_SAMPLES: usize = 96;
+const SAMPLE_SECS: i64 = 600;
 /// Lock wait for housekeeping that will simply be tried again.
 const BRIEF_LOCK: Duration = Duration::from_millis(250);
 /// How often the login in `~/.claude` is copied to the vault.
@@ -114,6 +117,9 @@ struct Persisted {
     /// Claude Code session ids that have already been told what a
     /// `session_start` rule would have chosen, so it is said once.
     suggested: VecDeque<String>,
+    /// Usage over time per account, for trend lines: (epoch seconds, percent
+    /// of the 5-hour window, percent of the 7-day window).
+    history: BTreeMap<AccountId, VecDeque<(i64, f64, f64)>>,
     /// When each account's renewal was last attempted.
     renew_tried: BTreeMap<AccountId, i64>,
     sessions: BTreeMap<String, Managed>,
@@ -231,6 +237,56 @@ fn login_expiry(secret: &Secret) -> Option<i64> {
     secret.oauth["refreshTokenExpiresAt"]
         .as_i64()
         .map(|ms| ms / 1000)
+}
+
+/// A five-cell meter for one line of text.
+fn mini_bar(percent: f64) -> String {
+    let filled = ((percent / 20.0).round() as usize).min(5);
+    "▰".repeat(filled) + &"▱".repeat(5 - filled)
+}
+
+/// The status line: who this session runs as and how full each window is,
+/// as a mark, a small meter and a number. `colored` adds terminal colours;
+/// the mark and the number say the same without them.
+fn status_line(account: &Account, colored: bool) -> String {
+    let paint = |percent: f64, text: String| {
+        let code = if percent >= 90.0 {
+            "31"
+        } else if percent >= 70.0 {
+            "33"
+        } else {
+            "32"
+        };
+        if colored {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text
+        }
+    };
+    let peak = account.peak_used();
+    let mark = if peak >= 90.0 {
+        "▲"
+    } else if peak >= 70.0 {
+        "◆"
+    } else {
+        "●"
+    };
+    let mut line = format!(
+        "llmpool {} {}",
+        paint(peak, mark.to_string()),
+        account.label
+    );
+    for window in ["5h", "7d"] {
+        if account
+            .usage
+            .as_ref()
+            .is_some_and(|u| u.windows.contains_key(window))
+        {
+            let used = account.used(window);
+            line += &format!("  {window} {} {used:.0}%", paint(used, mini_bar(used)));
+        }
+    }
+    line
 }
 
 /// When this machine started, in epoch seconds.
@@ -644,6 +700,7 @@ impl Daemon {
                         .collect();
                 let mut row = serde_json::to_value(a).unwrap_or_default();
                 row["sessions"] = json!(sessions);
+                row["history"] = json!(g.p.history.get(&a.id));
                 row["is_default"] = json!(self
                     .holders_given(&g, a, &default)
                     .iter()
@@ -1716,6 +1773,7 @@ impl Daemon {
         let account_id = m.session.account_id.clone();
 
         let mut line = "llmpool".to_string();
+        let mut colored = line.clone();
         if let Some(mut account) = account_id.and_then(|id| g.store.get(&id).ok().flatten()) {
             if settled {
                 if let Some(usage) = statusline::usage(payload, t) {
@@ -1727,26 +1785,59 @@ impl Daemon {
                     account.usage = Some(usage);
                     if moved {
                         let _ = g.store.put(&account);
+                        // A point for the trend line, at most one per ten
+                        // minutes unless usage jumped.
+                        let point = (t, account.used("5h"), account.used("7d"));
+                        let samples = g.p.history.entry(account.id.clone()).or_default();
+                        let due = samples.back().is_none_or(|last| {
+                            t - last.0 >= SAMPLE_SECS || (point.1 - last.1).abs() >= 5.0
+                        });
+                        if due {
+                            samples.push_back(point);
+                            while samples.len() > MAX_SAMPLES {
+                                samples.pop_front();
+                            }
+                        }
                     }
                 }
             }
-            line = format!("llmpool: {}", account.label);
-            for window in ["5h", "7d"] {
-                if account
-                    .usage
-                    .as_ref()
-                    .is_some_and(|u| u.windows.contains_key(window))
-                {
-                    line += &format!(" · {window} {:.0}%", account.used(window));
-                }
-            }
+            line = status_line(&account, false);
+            colored = status_line(&account, true);
         }
         if settled {
             self.react(&mut g, sid, Event::UsageUpdated);
         } else {
             self.save(&g);
         }
-        json!({"line": line})
+        json!({"line": line, "colored": colored})
+    }
+
+    /// Numbers about the pool as a whole, for the summary line every surface shows.
+    pub fn stats(&self) -> Api<Value> {
+        let g = self.lock();
+        let accounts = self.accounts(&g)?;
+        let usable: Vec<&Account> = accounts.iter().filter(|a| a.usable()).collect();
+        // How much of the pool's combined allowance is still unused.
+        let headroom = |window: &str| {
+            (!usable.is_empty()).then(|| {
+                usable
+                    .iter()
+                    .map(|a| 100.0 - a.used(window).min(100.0))
+                    .sum::<f64>()
+                    / usable.len() as f64
+            })
+        };
+        let since = now() - 24 * 3600;
+        let swaps: Vec<&LogEvent> = g.p.events.iter().filter(|e| e.kind == "swap").collect();
+        Ok(json!({
+            "accounts": accounts.len(),
+            "usable": usable.len(),
+            "sessions": g.p.sessions.len(),
+            "headroom_5h": headroom("5h"),
+            "headroom_7d": headroom("7d"),
+            "switches_24h": swaps.iter().filter(|e| e.at >= since).count(),
+            "last_switch": swaps.last().map(|e| json!({"at": e.at, "text": e.message.strip_prefix("llmpool: ").unwrap_or(&e.message)})),
+        }))
     }
 
     // ---- policies ---------------------------------------------------------

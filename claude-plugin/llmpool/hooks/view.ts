@@ -1,4 +1,4 @@
-import type { Issue, Login, Row, Snapshot } from '../types'
+import type { Issue, Login, Row, Snapshot, Stats } from '../types'
 
 type Json = Record<string, any>
 
@@ -30,6 +30,7 @@ export const toSnapshot = (status: Json): Snapshot => {
     // profile, or in the user's own while this one has a separate profile.
     isElsewhere:
       a.id !== current && ((a.sessions ?? []).length > 0 || (a.is_default === true && status?.session?.store !== 'default')),
+    trend: (a.history ?? []).map((point: number[]) => Number(point[1] ?? 0)).slice(-24),
   }))
   const rank = (row: Row) => (row.isCurrent ? 0 : isUsable(row) ? 1 : 2)
   rows.sort((a, b) => rank(a) - rank(b) || peak(a) - peak(b) || a.label.localeCompare(b.label))
@@ -49,7 +50,14 @@ export const toSnapshot = (status: Json): Snapshot => {
     url: status?.login?.url ?? null,
   }
 
-  return { session, rows, others, error: null, issues, login }
+  const stats: Stats = {
+    headroom5: status?.stats?.headroom_5h ?? null,
+    headroom7: status?.stats?.headroom_7d ?? null,
+    switches24h: Number(status?.stats?.switches_24h ?? 0),
+    lastSwitch: status?.stats?.last_switch ?? null,
+  }
+
+  return { session, rows, others, error: null, issues, login, stats }
 }
 
 /** A ten-cell meter. */
@@ -152,3 +160,102 @@ export const urgent = (snap: Snapshot): Issue | undefined => {
     i => i.kind === 'login_not_in_pool' || (i.kind === 'relogin' && current !== undefined && i.text.startsWith(current.label)),
   )
 }
+
+// ---- drawing with characters ------------------------------------------------
+
+export const WINDOW_SECS = { '5h': 5 * 3600, '7d': 7 * 24 * 3600 } as const
+
+const PARTS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+
+/** How far through its window an account is, 0 to 1; null when unknown. */
+export const elapsed = (resetAt: number | null, nowMs: number, windowSecs: number): number | null => {
+  if (resetAt === null) {
+    return null
+  }
+  const left = (resetAt * 1000 - nowMs) / 1000
+
+  return Math.max(0, Math.min(1, 1 - left / windowSecs))
+}
+
+export type BarPart = { text: string; kind: 'used' | 'free' | 'pace' }
+
+/** A wide meter, smooth to an eighth of a cell, with a mark where usage would
+ * be if it were spread evenly over the window. Used beyond the mark means the
+ * window is being spent faster than it refills. */
+export const wideBar = (percent: number | null, width: number, pace: number | null): BarPart[] => {
+  const cells = Math.max(0, Math.min(width, ((percent ?? 0) / 100) * width))
+  const whole = Math.floor(cells)
+  const part = PARTS[Math.floor((cells - whole) * 8)] ?? ''
+  const used = '█'.repeat(whole) + part
+  const usedCells = whole + (part === '' ? 0 : 1)
+  const free = '░'.repeat(width - usedCells)
+  const mark = pace === null || percent === null ? -1 : Math.min(width - 1, Math.floor(pace * width))
+  if (mark < 0) {
+    return [
+      { text: used, kind: 'used' },
+      { text: free, kind: 'free' },
+    ]
+  }
+  const all = [...(used + free)]
+  const pieces: BarPart[] =
+    mark < usedCells
+      ? [
+          { text: all.slice(0, mark).join(''), kind: 'used' },
+          { text: '┃', kind: 'pace' },
+          { text: all.slice(mark + 1, usedCells).join(''), kind: 'used' },
+          { text: all.slice(usedCells).join(''), kind: 'free' },
+        ]
+      : [
+          { text: all.slice(0, usedCells).join(''), kind: 'used' },
+          { text: all.slice(usedCells, mark).join(''), kind: 'free' },
+          { text: '┃', kind: 'pace' },
+          { text: all.slice(mark + 1).join(''), kind: 'free' },
+        ]
+
+  return pieces.filter(piece => piece.text !== '')
+}
+
+/** A five-cell meter for a table row. */
+export const miniBar = (percent: number | null): string => {
+  const filled = percent === null ? 0 : Math.max(0, Math.min(5, Math.round(percent / 20)))
+
+  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
+}
+
+const TICKS = '▁▂▃▄▅▆▇█'
+
+/** Values 0 to 100 as a line of bars; empty until there are two points. */
+export const spark = (values: number[]): string =>
+  values.length < 2 ? '' : values.map(v => TICKS[Math.max(0, Math.min(7, Math.floor((v / 100) * 8)))]).join('')
+
+const span = (seconds: number): string => {
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+
+  return days > 0 ? `${days}d ${hours}h` : hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`
+}
+
+/** What happens if usage carries on at the pace seen so far in this window. */
+export const forecast = (percent: number | null, resetAt: number | null, nowMs: number, windowSecs: number): string => {
+  const through = elapsed(resetAt, nowMs, windowSecs)
+  if (percent === null || resetAt === null || through === null) {
+    return ''
+  }
+  if (percent >= 100) {
+    return 'limit reached'
+  }
+  const spent = through * windowSecs
+  // Too little of the window has passed, or too little used, to say anything.
+  if (spent < 600 || percent < 2) {
+    return ''
+  }
+  const left = windowSecs - spent
+  const untilFull = (100 - percent) / (percent / spent)
+
+  return untilFull < left ? `at this pace full in ${span(untilFull)}, ${span(left - untilFull)} before it resets` : 'at this pace it lasts to the reset'
+}
+
+/** A label cut to fit a column, never mid-way without saying so. */
+export const fit = (text: string, width: number): string =>
+  text.length <= width ? text.padEnd(width) : `${text.slice(0, Math.max(1, width - 1))}…`
