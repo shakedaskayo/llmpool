@@ -677,3 +677,269 @@ fn the_servers_own_page_is_for_administrators_and_cannot_be_driven_from_elsewher
         401
     );
 }
+
+// ---- the server as a gateway ---------------------------------------------------
+
+/// A provider that answers by which key it is shown, and remembers what it saw.
+struct Upstream {
+    url: String,
+    seen: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+}
+
+fn upstream() -> Upstream {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for mut request in server.incoming_requests() {
+            let mut headers: BTreeMap<String, String> = request
+                .headers()
+                .iter()
+                .map(|h| {
+                    (
+                        h.field.as_str().as_str().to_lowercase(),
+                        h.value.as_str().to_string(),
+                    )
+                })
+                .collect();
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            headers.insert(":path".into(), request.url().to_string());
+            headers.insert(":body".into(), body);
+            let auth = headers.get("authorization").cloned().unwrap_or_default();
+            log.lock().unwrap().push(headers);
+            let header = |n: &str, v: &str| {
+                tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).unwrap()
+            };
+            if auth.contains("k-limited") {
+                let _ = request.respond(
+                    tiny_http::Response::from_string("{\"error\":\"slow down\"}")
+                        .with_status_code(429)
+                        .with_header(header("retry-after", "30")),
+                );
+            } else if request.url().contains("stream") {
+                // Two events, a moment apart, each sent the moment it exists.
+                use std::io::Write;
+                let mut out = request.into_writer();
+                let _ = out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+                let mut event = |text: &str| {
+                    let _ = write!(out, "{:x}\r\n{text}\r\n", text.len());
+                    let _ = out.flush();
+                };
+                event("data: {\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n");
+                std::thread::sleep(Duration::from_millis(600));
+                event("data: {\"usage\":{\"output_tokens\":9}}\n\n");
+                event("");
+            } else {
+                // A subscription login says how full it is with every answer.
+                let used = if auth.contains("a-1") { "0.95" } else { "0.10" };
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        "{\"ok\":true,\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22}}",
+                    )
+                    .with_header(header("content-type", "application/json"))
+                    .with_header(header("anthropic-ratelimit-unified-5h-utilization", used))
+                    .with_header(header("anthropic-ratelimit-unified-5h-reset", "4000000000")),
+                );
+            }
+        }
+    });
+    Upstream { url, seen }
+}
+
+#[allow(clippy::result_large_err)]
+#[test]
+fn as_a_gateway_the_server_keeps_every_credential_and_switches_accounts_itself() {
+    use llmpool_daemon::KeyReq;
+    use std::io::{BufRead, BufReader};
+    let provider = upstream();
+    std::env::set_var("LLMPOOL_UPSTREAM_CLAUDE", &provider.url);
+    let pool = machine(&[("a@x.io", "a-1"), ("b@x.io", "b-1")]);
+    for (label, key) in [("limited", "k-limited"), ("good", "k-good")] {
+        pool.daemon
+            .add_key(KeyReq {
+                provider: "openai".into(),
+                label: Some(label.into()),
+                tags: vec![],
+                env: [
+                    ("OPENAI_API_KEY".to_string(), key.to_string()),
+                    ("OPENAI_BASE_URL".to_string(), provider.url.clone()),
+                ]
+                .into(),
+            })
+            .unwrap();
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://127.0.0.1:{port}");
+    let config = Config {
+        public_url: url.clone(),
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        gateway: true,
+        ..Config::default()
+    };
+    let _serving =
+        team_server::start(pool.daemon.clone(), config, &format!("127.0.0.1:{port}")).unwrap();
+
+    // A member is lent the gateway, not what is behind it.
+    let ann = machine(&[]);
+    ann.daemon.team_connect(&url, Some(KEY)).unwrap();
+    let lent = accounts(&ann);
+    assert_eq!(
+        lent.keys().collect::<Vec<_>>(),
+        ["team gateway (claude)", "team gateway (openai)"]
+    );
+    let vault = std::fs::read_dir(ann.data.join("vault"))
+        .unwrap()
+        .map(|f| std::fs::read_to_string(f.unwrap().path()).unwrap())
+        .collect::<String>();
+    for secret in ["k-good", "k-limited", "a-1", "b-1"] {
+        assert!(!vault.contains(secret), "{secret} reached the member");
+    }
+    // Any agent started on it is pointed here, with the member's own session.
+    let started = ann
+        .daemon
+        .start_session(StartReq {
+            cwd: "/w".into(),
+            pid: std::process::id(),
+            provider: Some("openai".into()),
+            agent: Some("codex".into()),
+            ..StartReq::default()
+        })
+        .unwrap();
+    assert_eq!(
+        started["env"]["OPENAI_BASE_URL"],
+        format!("{url}/gateway/openai/v1")
+    );
+    assert_eq!(started["env"]["OPENAI_API_KEY"], KEY);
+    let claude = ann.daemon.start_session(StartReq {
+        cwd: "/w".into(),
+        pid: std::process::id(),
+        ..StartReq::default()
+    });
+    // Claude Code needs a rule or a name to pick an account; named, it gets the gateway.
+    drop(claude);
+    let named = ann
+        .daemon
+        .start_session(StartReq {
+            cwd: "/w".into(),
+            pid: std::process::id(),
+            account: Some("team gateway (claude)".into()),
+            ..StartReq::default()
+        })
+        .unwrap();
+    assert_eq!(
+        named["env"]["ANTHROPIC_BASE_URL"],
+        format!("{url}/gateway/claude")
+    );
+    assert_eq!(named["env"]["ANTHROPIC_AUTH_TOKEN"], KEY);
+
+    // A request goes out on a pool key; one account refusing is not the member's problem.
+    let post = |path: &str, token: &str| {
+        ureq::post(&format!("{url}/gateway/{path}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("anthropic-beta", "tools-2099")
+            .set("Cookie", "secret=1")
+            .send_json(json!({"model": "m-1", "messages": [{"content": "hush-hush"}]}))
+    };
+    let able = |name: &str, on: bool| {
+        let patch = PatchReq {
+            label: None,
+            tags: None,
+            enabled: Some(on),
+        };
+        pool.daemon.patch_account(name, patch).unwrap();
+    };
+    // With only an account the provider is refusing, the refusal is passed on as it is.
+    able("good", false);
+    assert!(matches!(
+        post("openai/v1/chat/completions", KEY),
+        Err(ureq::Error::Status(429, _))
+    ));
+    able("good", true);
+    let answer: Value = post("openai/v1/chat/completions", KEY)
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(answer["ok"], true);
+    {
+        let seen = provider.seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!(last["authorization"], "Bearer k-good");
+        assert_eq!(last[":path"], "/v1/chat/completions");
+        assert!(last[":body"].contains("hush-hush"));
+        assert!(!last.contains_key("cookie"));
+        assert!(
+            seen.iter().all(|h| !h.values().any(|v| v.contains(KEY))),
+            "the member's token went upstream"
+        );
+    }
+    // The refused account is left alone for a while: the next request does not try it.
+    let before = provider.seen.lock().unwrap().len();
+    post("openai/v1/chat/completions", KEY).unwrap();
+    assert_eq!(provider.seen.lock().unwrap().len(), before + 1);
+
+    // Strangers and unknown providers get nothing.
+    assert!(matches!(
+        post("openai/v1/chat/completions", "nope"),
+        Err(ureq::Error::Status(401, _))
+    ));
+    assert!(matches!(
+        post("nowhere/v1/x", KEY),
+        Err(ureq::Error::Status(404, _))
+    ));
+
+    // An answer that streams arrives as it is made, not when it is finished.
+    let began = std::time::Instant::now();
+    let stream = post("openai/v1/stream", KEY).unwrap();
+    assert_eq!(stream.content_type(), "text/event-stream");
+    let mut lines = BufReader::new(stream.into_reader()).lines();
+    assert!(lines.next().unwrap().unwrap().contains("input_tokens"));
+    assert!(
+        began.elapsed() < Duration::from_millis(450),
+        "the first event waited for the last"
+    );
+    assert!(lines.any(|l| l.unwrap().contains("output_tokens")));
+
+    // Subscription logins: sent as what they are, and when the one the member
+    // is on fills up, the next request runs on another. Nobody restarts anything.
+    let mut used = Vec::new();
+    able("b@x.io", false);
+    for round in 0..3 {
+        post("claude/v1/messages", KEY).unwrap();
+        able("b@x.io", true);
+        let seen = provider.seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert!(
+            last["anthropic-beta"].contains("oauth-2025-04-20")
+                && last["anthropic-beta"].contains("tools-2099"),
+            "round {round}"
+        );
+        used.push(last["authorization"].clone());
+    }
+    assert_eq!(
+        used,
+        ["Bearer a-1", "Bearer b-1", "Bearer b-1"],
+        "a-1 said it was 95% full"
+    );
+    let audit = std::fs::read_to_string(pool.data.join("team-audit.log")).unwrap();
+    assert!(audit.contains("gateway_switch") && audit.contains("now on b@x.io"));
+
+    // Every request left a line saying who, on what, how much; none of what was said.
+    std::thread::sleep(Duration::from_millis(100));
+    let traces = std::fs::read_to_string(pool.data.join("gateway-traces.log")).unwrap();
+    assert!(traces.contains("\"who\":\"ci\"") && traces.contains("\"account\":\"good\""));
+    assert!(traces.contains("\"input_tokens\":11") && traces.contains("\"output_tokens\":22"));
+    assert!(traces.contains("\"output_tokens\":9") && traces.contains("limited: 429"));
+    for secret in ["k-good", "a-1", "b-1", KEY, "hush-hush"] {
+        assert!(!traces.contains(secret), "{secret} is in the traces");
+    }
+    std::env::remove_var("LLMPOOL_UPSTREAM_CLAUDE");
+}

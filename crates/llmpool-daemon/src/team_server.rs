@@ -9,6 +9,7 @@
 //! TLS. Clients refuse a server that is not `https` unless it is on loopback.
 
 mod admin;
+mod gateway;
 
 use crate::http::percent_decode;
 use crate::{fail, now, Api, ApiError, Daemon};
@@ -61,6 +62,9 @@ pub struct Config {
     /// Members who may run the server from its web page: addresses or key
     /// names. Empty: nobody, and the page says so.
     pub admins: Vec<String>,
+    /// Be a gateway: members' agents send their requests here, and no login
+    /// or key leaves the server.
+    pub gateway: bool,
 }
 
 /// What an administrator can change while the server runs. It starts as the
@@ -70,6 +74,8 @@ struct Settings {
     share_logins: bool,
     access: Vec<(String, Vec<String>)>,
     blocked: Vec<String>,
+    #[serde(default)]
+    gateway: bool,
 }
 
 pub struct Oidc {
@@ -115,6 +121,7 @@ impl Config {
             access: Self::access(&var("LLMPOOL_ACCESS").unwrap_or_default())?,
             blocked: list("LLMPOOL_BLOCKED"),
             admins: list("LLMPOOL_ADMINS"),
+            gateway: var("LLMPOOL_GATEWAY").is_some_and(|v| v == "1" || v == "true"),
         };
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
@@ -245,6 +252,7 @@ pub struct TeamServer {
     provider: Mutex<Option<(String, String, String)>>,
     members_path: PathBuf,
     settings: Mutex<Settings>,
+    gateway: Mutex<gateway::Gateway>,
 }
 
 enum Reply {
@@ -352,9 +360,11 @@ impl TeamServer {
                 share_logins: config.share_logins,
                 access: config.access.clone(),
                 blocked: config.blocked.clone(),
+                gateway: config.gateway,
             });
         Self {
             settings: Mutex::new(settings),
+            gateway: Mutex::new(gateway::Gateway::default()),
             config,
             daemon,
             state: Mutex::new(State {
@@ -798,6 +808,53 @@ impl TeamServer {
         ))
     }
 
+    /// What a member is lent while the server is a gateway: for each
+    /// provider the pool can serve them, one account that is the gateway
+    /// itself. Its key is the member's own session with us; the real logins
+    /// and keys stay here.
+    fn sync_gateway(&self, email: &str, token: &str) -> Api<Reply> {
+        let settings = self.settings();
+        let d = &self.daemon;
+        let g = d.lock();
+        let mut providers = std::collections::BTreeSet::new();
+        for account in d.accounts(&g)? {
+            let lendable = account.kind != Kind::Oauth || account.provider == "claude";
+            if account.usable() && lendable && settings.opens(email, &account.tags) {
+                providers.insert(account.provider);
+            }
+        }
+        let rows: Vec<Value> = providers
+            .iter()
+            .filter(|p| {
+                llmpool_core::providers::upstream_of(p).is_some()
+                    || std::env::var(format!(
+                        "LLMPOOL_UPSTREAM_{}",
+                        p.to_uppercase().replace('-', "_")
+                    ))
+                    .is_ok()
+            })
+            .map(|provider| {
+                json!({
+                    "account": {
+                        "id": format!("gateway-{provider}"),
+                        "provider": provider,
+                        "kind": "api_key",
+                        "label": format!("team gateway ({provider})"),
+                        "email": null, "organization": null,
+                        "tags": ["gateway"],
+                        "enabled": true, "health": "ok", "usage": null, "login_expires_at": null,
+                    },
+                    "secret": {"env": self.gateway_env(provider, token)},
+                    "others": 0, "held": false,
+                })
+            })
+            .collect();
+        let policy = std::fs::read_to_string(d.policy_path()).unwrap_or_default();
+        Ok(Reply::Json(
+            json!({"email": email, "policy": policy, "accounts": rows, "gateway": true}),
+        ))
+    }
+
     fn route(&self, ask: &Ask) -> Api<Reply> {
         let Ask {
             method,
@@ -813,6 +870,7 @@ impl TeamServer {
                 "service": "llmpool",
                 "sign_in": self.config.oidc.as_ref().map(|o| o.issuer.as_str()),
                 "api_keys": !self.config.api_keys.is_empty(),
+                "gateway": self.settings().gateway,
             }))),
             ("GET", "/auth/login") => self.login(query),
             ("GET", "/auth/callback") => self.callback(query),
@@ -831,6 +889,9 @@ impl TeamServer {
             }
             ("POST", "/v1/sync") => {
                 let (_, email) = self.member(bearer)?;
+                if self.settings().gateway {
+                    return self.sync_gateway(&email, bearer.unwrap_or_default());
+                }
                 self.sync(&email, body)
             }
             _ => self.web(ask),
@@ -838,6 +899,9 @@ impl TeamServer {
     }
 
     fn handle(&self, mut request: tiny_http::Request) {
+        if request.url().starts_with("/gateway/") {
+            return self.gateway(request);
+        }
         let bearer = request
             .headers()
             .iter()
@@ -1003,6 +1067,7 @@ mod tests {
             share_logins: false,
             access: vec![],
             blocked: vec![],
+            gateway: false,
         };
         assert!(c.opens("ann@x.io", &tags(&["anything"])));
         c.access = Config::access("*@x.io=work; Ann@x.io = vip ;ci=ci\nboss@x.io=*").unwrap();

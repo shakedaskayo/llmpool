@@ -857,6 +857,24 @@ function renderServer() {
     .map((e) => `<li><time>${new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span class="dot ${e.event.includes("denied") ? "login" : ""}" aria-hidden="true">${e.event.includes("denied") ? "⚠" : "·"}</span><span><strong>${esc(e.event.replaceAll("_", " "))}</strong> ${esc(e.who)}${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</span></li>`)
     .join("");
   $("team").innerHTML = `${pageHead("Server", `Serving this pool at <code>${esc(v.public_url)}</code>. Members connect with <code>llmpool team connect ${esc(v.public_url)}</code>.`)}
+    <h3 class="section">Gateway</h3>
+    <div class="card pad">
+      <label class="switch"><input type="checkbox" data-act="srv-gateway"${v.settings.gateway ? " checked" : ""} />
+        <span><strong>Send members' requests through this server</strong><br /><span class="muted">On, no login or key leaves the server: members' agents talk to <code>${esc(v.gateway.base)}/&lt;provider&gt;</code> with their own session, and each request runs on an account chosen here. When one fills up or is refused, the next request runs on another, with nothing to restart. Off, accounts are lent to members' machines instead.</span></span></label>
+      ${
+        v.settings.gateway
+          ? v.gateway.recent.length
+            ? `<table class="traces"><caption class="skip">Recent requests</caption><thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Account</th><th scope="col">Model</th><th scope="col">Result</th><th scope="col">Tokens in / out</th><th scope="col">Time</th></tr></thead><tbody>${v.gateway.recent
+                .slice(0, 12)
+                .map((t) => `<tr><td class="muted">${new Date(t.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td><td>${esc(t.who)}</td><td><span class="agentname">${avatar(t.provider, t.provider)}${esc(t.account ?? "none")}</span></td><td class="muted">${esc(t.model ?? "")}</td>
+                  <td>${t.status < 400 ? `<span class="ok">${t.status}</span>` : `<span class="warnmark">${t.status}</span>`}${t.tried?.length ? ` <span class="muted" title="${esc(t.tried.join("; "))}">after ${plural(t.tried.length, "other")}</span>` : ""}</td>
+                  <td class="muted">${t.input_tokens ?? 0} / ${t.output_tokens ?? 0}</td><td class="muted">${t.ms ?? 0} ms</td></tr>`)
+                .join("")}</tbody></table><p class="muted">Every request is one line in <code>gateway-traces.log</code>: who, account, model, tokens, time. Never what was said.</p>`
+            : `<p class="muted">No requests yet. Members get the gateway the next time their llmpool syncs.</p>`
+          : ""
+      }
+    </div>
+
     <h3 class="section">Lending</h3>
     <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="srv-share"${v.settings.share_logins ? " checked" : ""} />
@@ -970,6 +988,7 @@ async function settingsAction(el) {
     state.teamUrl = url;
     await attempt(() => api("POST", "/team", { url, key }), key ? "Connected to the team's pool" : "Finish signing in in your browser");
   }
+  if (act === "srv-gateway") await attempt(() => api("PUT", "/server", { gateway: el.checked }), el.checked ? "The server is a gateway; members switch over at their next sync" : "Accounts are lent to members again");
   if (act === "srv-share") await attempt(() => api("PUT", "/server", { share_logins: el.checked }), el.checked ? "Logins are shared between members" : "One member per login at a time");
   if (act === "srv-access") await attempt(() => api("PUT", "/server", { access: $("srv-access").value }), "Access saved");
   if (act === "srv-blocked") await attempt(() => api("PUT", "/server", { blocked: $("srv-blocked").value.split(",") }), "Saved");

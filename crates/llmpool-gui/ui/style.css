@@ -275,3 +275,7 @@ pre.log { margin: 10px 0 0; padding: 10px; background: var(--sunken); border: 1p
 #srv-access { width: 100%; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .card.pad p { margin: 12px 0 6px; }
 .card.pad > :first-child { margin-top: 0; }
+
+table.traces { margin-top: 12px; font-size: 12px; }
+table.traces .avatar { width: 20px; height: 20px; border-radius: 6px; }
+table.traces .avatar svg { width: 11px; height: 11px; }

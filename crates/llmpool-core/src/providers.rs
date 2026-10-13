@@ -34,6 +34,22 @@ pub fn env_of(provider: &str) -> Option<&'static [&'static str]> {
         .map(|(.., env)| *env)
 }
 
+/// Where a provider's API lives, for a gateway that forwards to it. `claude`
+/// is Anthropic's API reached with a subscription login.
+pub fn upstream_of(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "claude" | "anthropic" => "https://api.anthropic.com",
+        "openai" => "https://api.openai.com",
+        "xai" => "https://api.x.ai",
+        "gemini" => "https://generativelanguage.googleapis.com",
+        "openrouter" => "https://openrouter.ai/api",
+        "groq" => "https://api.groq.com/openai",
+        "mistral" => "https://api.mistral.ai",
+        "deepseek" => "https://api.deepseek.com",
+        _ => return None,
+    })
+}
+
 /// The provider an agent talks to, when its command name settles it.
 pub fn of_agent(command: &str) -> Option<&'static str> {
     let name = command.rsplit('/').next().unwrap_or(command);

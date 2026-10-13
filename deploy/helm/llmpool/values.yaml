@@ -30,6 +30,15 @@ apiKeys: {}
 # oidc.clientSecret, apiKeys and vaultKey are ignored.
 existingSecret: ""
 
+# Be a gateway: members' agents send their requests to the server, which
+# forwards each to the provider on an account it picks. No login or key leaves
+# the server, and switching accounts happens here. Off, accounts are lent to
+# members' machines. Administrators can change it on the server's page.
+gateway:
+  enabled: false
+  # Move a provider's address, e.g. to your own proxy: provider -> URL.
+  upstreams: {}
+
 # Who may run the server from its web page (at publicUrl): addresses that may
 # sign in, or names of API keys. Empty: the page is closed to everyone.
 admins: []

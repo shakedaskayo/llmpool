@@ -274,6 +274,11 @@ impl TeamServer {
                 "share_logins": settings.share_logins,
                 "access": settings.access.iter().map(|(who, tags)| format!("{who}={}", tags.join(","))).collect::<Vec<_>>().join("\n"),
                 "blocked": settings.blocked,
+                "gateway": settings.gateway,
+            },
+            "gateway": {
+                "base": format!("{}/gateway", self.config.public_url),
+                "recent": self.gateway_recent(),
             },
             "members": members.iter().map(|(email, (expires, by_key, sessions))| json!({
                 "email": email, "expires_at": expires, "by_key": by_key, "sessions": sessions,
@@ -288,6 +293,9 @@ impl TeamServer {
         let mut settings = self.settings();
         if let Some(on) = body["share_logins"].as_bool() {
             settings.share_logins = on;
+        }
+        if let Some(on) = body["gateway"].as_bool() {
+            settings.gateway = on;
         }
         if let Some(text) = body["access"].as_str() {
             settings.access = Config::access(text)

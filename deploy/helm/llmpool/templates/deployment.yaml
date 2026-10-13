@@ -48,6 +48,12 @@ spec:
             - name: LLMPOOL_ALLOWED_EMAILS
               value: {{ join "," .Values.oidc.allowedEmails | quote }}
             {{- end }}
+            - name: LLMPOOL_GATEWAY
+              value: {{ ternary "1" "0" .Values.gateway.enabled | quote }}
+            {{- range $provider, $url := .Values.gateway.upstreams }}
+            - name: LLMPOOL_UPSTREAM_{{ $provider | upper | replace "-" "_" }}
+              value: {{ $url | quote }}
+            {{- end }}
             {{- if .Values.admins }}
             - name: LLMPOOL_ADMINS
               value: {{ join "," .Values.admins | quote }}
