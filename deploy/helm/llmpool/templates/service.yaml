@@ -8,8 +8,31 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  {{- if gt (int .Values.gateway.replicas) 0 }}
+  # The server and its gateway replicas alike.
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    llmpool/serves: requests
+  {{- else }}
   selector: {{- include "llmpool.labels" . | nindent 4 }}
+  {{- end }}
   ports:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+{{- if gt (int .Values.gateway.replicas) 0 }}
+---
+# Where the replicas find the one server that holds the pool.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llmpool.name" . }}-primary
+  labels: {{- include "llmpool.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "llmpool.labels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+{{- end }}

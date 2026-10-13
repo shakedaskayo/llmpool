@@ -1,0 +1,91 @@
+{{- if gt (int .Values.gateway.replicas) 0 }}
+{{- if not .Values.gateway.enabled }}
+{{- fail "gateway.replicas needs gateway.enabled: replicas carry gateway requests and nothing else" }}
+{{- end }}
+# Processes that carry members' requests and keep nothing. The one server
+# still holds every login; these ask it what a request may run on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llmpool.name" . }}-gateway
+  labels: {{- include "llmpool.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llmpool-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llmpool-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        llmpool/serves: requests
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LLMPOOL_PUBLIC_URL
+              value: {{ .Values.publicUrl | quote }}
+            - name: LLMPOOL_REPLICA_OF
+              value: "http://{{ include "llmpool.name" . }}-primary:8787"
+            # The one secret a replica is given.
+            - name: LLMPOOL_REPLICA_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llmpool.secret" . }}
+                  key: LLMPOOL_REPLICA_KEY
+            - name: LLMPOOL_GATEWAY
+              value: "1"
+            - name: LLMPOOL_GATEWAY_MAX
+              value: {{ .Values.gateway.maxInFlight | quote }}
+          ports:
+            - name: http
+              containerPort: 8787
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources: {{- toYaml .Values.gateway.replicaResources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

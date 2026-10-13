@@ -31,6 +31,7 @@ permalink: /security/
 
 ## Staying up
 
+- **A gateway replica is trusted with little.** It gets access tokens and keys for the requests it carries, never a refresh token, and writes nothing. What it and the server say to each other needs `LLMPOOL_REPLICA_KEY`, answers 404 to anyone without it, and is not passed on by a replica.
 - **A slow client holds only itself.** Every request is taken off the few threads that accept connections; gateway requests and everything else have separate limits (`LLMPOOL_GATEWAY_MAX`, 256 by default), and beyond a limit the server answers 503 at once rather than queueing.
 - **A provider having a bad moment is not the member's problem.** A request refused for rate, for the account, or by a provider error is tried on the next account, up to three. An account refused for its rate is left alone for as long as the provider says; one the provider no longer accepts is set aside for five minutes and an administrator is told in the audit log.
 - **The decision model cannot slow or stop a request.** It is asked after the answer has gone out; without it the fixed rules decide.

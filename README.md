@@ -421,9 +421,10 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 ## Not built yet
 
 Switching accounts under a running agent other than Claude Code, and reading
-usage for anything but Claude subscriptions. More than one server process for
-one pool: a login's refresh token works once, so the pool has one writer by
-design. Windows is not supported.
+usage for anything but Claude subscriptions. More than one process holding the
+pool: a login's refresh token works once, so the pool has one writer by
+design (gateway replicas, which only carry requests, can be many). Windows is
+not supported.
 
 ## Licence
 

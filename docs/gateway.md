@@ -68,7 +68,17 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` (the chart's `gateway.otlp.endpoint`) and ever
 
 Every request in flight has a thread of its own, so a long streamed answer never holds up another. On a laptop, 200 requests at once ran in about 50 MB of memory. `LLMPOOL_GATEWAY_MAX` (the chart's `gateway.maxInFlight`, 256 by default) caps how many may be in flight; beyond it the gateway answers 503 at once instead of queueing.
 
-The server is one process, on purpose. A subscription login has a refresh token that works once: two processes renewing the same login would each invalidate the other's, and the login would be lost. So the pool has one writer, and it grows by memory and a higher limit, not by replicas. What that costs is a restart: the process is back in a few seconds, requests in flight are given 30 seconds to finish first, and an agent retries the one that was refused.
+One server holds the pool, on purpose. A subscription login has a refresh token that works once: two processes renewing the same login would each invalidate the other's, and the login would be lost. So logins, renewal, sign-in and the server's page stay in one process.
+
+### More than one process
+
+What can be many is the part that carries requests. A **gateway replica** is the same program started with `LLMPOOL_REPLICA_OF=<the server's address>` (the chart's `gateway.replicas`). It keeps nothing: no login, no key, no file. For each member it asks the server who the token is and which accounts their request may run on, forwards the request itself, and tells the server how it went, so usage, switching, the decision model and the Requests page work exactly as with one process. Everything that is not a request to a model it passes on to the server.
+
+- **No database, no second load balancer.** Replicas sit behind the same address. Each is a small process (see `gateway.replicaResources`).
+- **Refresh tokens never reach a replica.** It is handed short-lived access tokens and keys, for the request in hand, over a channel closed by `LLMPOOL_REPLICA_KEY` (the chart makes one).
+- **The server can restart under working agents.** A replica uses what the server last told it for fifteen seconds, and for up to five minutes while the server cannot be reached. In that window a member who was just turned away can still get through; sign-in and the server's page wait for the server.
+
+`gateway.replicas: 0`, the default, is one process doing everything. That is enough for most teams: turn replicas on to carry more at once, or so a restart is not felt.
 
 ## Subscriptions first, a key when they are full
 

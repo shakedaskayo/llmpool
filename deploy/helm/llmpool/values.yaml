@@ -41,6 +41,16 @@ gateway:
   # How many requests may be in flight at once. Each is a thread while it
   # runs; raise the memory limit with it.
   maxInFlight: 256
+  # Extra processes that only carry members' requests. They keep nothing: the
+  # one server above still holds every login. Use them to carry more requests
+  # at once, and so members' agents keep working while that server restarts.
+  # 0 is one process doing everything, which is enough for most teams. Each
+  # replica is small (see replicaResources). With existingSecret, add
+  # LLMPOOL_REPLICA_KEY (32+ random characters) to it.
+  replicas: 0
+  replicaResources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 256Mi}
   # Send a span for every request to an OpenTelemetry collector (OTLP over
   # HTTP): who, which account and model, how long, how many tokens. Never
   # what was said. `headers` are what the collector asks for, e.g. a key;

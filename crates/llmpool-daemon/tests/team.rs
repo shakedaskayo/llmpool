@@ -1673,3 +1673,93 @@ fn a_claude_session_overflows_to_an_anthropic_key_and_every_request_is_a_span() 
     assert!(attributes.contains("\"ci\""), "{attributes}");
     assert!(!body.contains("sk-over") && !body.contains("a-1"));
 }
+
+#[test]
+fn a_gateway_replica_carries_requests_keeps_nothing_and_outlives_the_primary() {
+    let provider = upstream();
+    let between = "replica-key-0123456789abcdefgh";
+    let pool = machine(&[("a@x.io", "a-1")]);
+    let (primary, primary_url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        gateway: true,
+        upstreams: [("claude".to_string(), provider.url.clone())].into(),
+        replica_key: Some(between.into()),
+        ..Config::default()
+    });
+    // The replica is a machine with no accounts at all.
+    let empty = machine(&[]);
+    let (_replica, url) = on_a_free_port(&empty, |url| Config {
+        public_url: url,
+        replica_of: Some(primary_url.clone()),
+        replica_key: Some(between.into()),
+        replica_fresh: Some(Duration::from_millis(300)),
+        ..Config::default()
+    });
+    let ask = |token: &str| match ureq::post(&format!("{url}/gateway/claude/v1/messages"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .send_json(json!({"model": "m-7", "messages": []}))
+    {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("{e}"),
+    };
+
+    // A member's request through the replica runs on the primary's login,
+    // and the primary hears how it went: the line for its log, and how full
+    // the account said it is.
+    assert_eq!(ask(KEY), 200);
+    assert_eq!(
+        provider.seen.lock().unwrap()[0]["authorization"],
+        "Bearer a-1"
+    );
+    let log = pool.data.join("gateway-traces.log");
+    let began = std::time::Instant::now();
+    while !std::fs::read_to_string(&log).is_ok_and(|t| t.contains("m-7"))
+        && began.elapsed() < Duration::from_secs(5)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("\"who\":\"ci\""));
+    let learned = accounts(&pool)["a@x.io"]["usage"]["windows"]["5h"]["used_percent"].clone();
+    assert_eq!(learned, 95.0);
+    // Nothing of the pool was written where the replica runs.
+    assert!(!empty.data.join("gateway-traces.log").exists());
+
+    // Who may come in is the primary's call, asked through the replica.
+    assert_eq!(ask("not-a-key-0123456789abcdefgh"), 401);
+    // Everything else is the primary's, passed on: its pages and its API.
+    let me: Value = ureq::get(&format!("{url}/v1/me"))
+        .set("Authorization", &format!("Bearer {KEY}"))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(me["email"], "ci");
+    assert!(ureq::get(&format!("{url}/join"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .contains("invited"));
+
+    // What the two say to each other is closed to everyone else, a member
+    // included, on the primary and through the replica alike.
+    for (at, token) in [(&primary_url, KEY), (&url, between), (&primary_url, "")] {
+        let got = ureq::post(&format!("{at}/replica/pick"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"token": KEY, "provider": "claude"}));
+        assert!(
+            matches!(got, Err(ureq::Error::Status(404, _))),
+            "{at} {token}"
+        );
+    }
+
+    // The primary goes away. Members who were already working keep working.
+    primary.stop();
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(ureq::get(&format!("{primary_url}/health")).call().is_err());
+    assert_eq!(ask(KEY), 200);
+}

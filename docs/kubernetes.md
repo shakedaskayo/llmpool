@@ -54,7 +54,7 @@ Then point your hostname at the load balancer, and keep the secrets in a Secret 
 
 ## What the chart takes care of
 
-- **One writer.** One replica with the `Recreate` strategy: the pool's state and its single-use refresh tokens allow no second copy.
+- **One writer.** The server is one replica with the `Recreate` strategy: the pool's state and its single-use refresh tokens allow no second copy. `gateway.replicas` adds processes that only carry requests and keep nothing; see [the gateway](gateway.md#more-than-one-process).
 - **Least privilege.** Non-root, read-only root filesystem, all capabilities dropped, no service account token.
 - **The pool outlives the release.** The volume and the Secret holding the vault key both survive `helm uninstall`; without the key the volume cannot be read.
 - **Refuses unsafe installs.** No `https`, nobody who may connect, sign-in without an allow list, or a short key: the chart will not render.

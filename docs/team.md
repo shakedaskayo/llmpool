@@ -67,6 +67,7 @@ llmpool serve --listen 127.0.0.1:8787
 | `LLMPOOL_OIDC_CLIENT_ID`, `LLMPOOL_OIDC_CLIENT_SECRET` | Turn sign-in on. Register `{public url}/auth/callback` with the provider |
 | `LLMPOOL_ALLOWED_DOMAINS`, `LLMPOOL_ALLOWED_EMAILS` | Who may sign in. Required with sign-in; checked on every request |
 | `LLMPOOL_API_KEYS` | `name:key` pairs for members without sign-in; keys of 24+ characters |
+| `LLMPOOL_REPLICA_OF`, `LLMPOOL_REPLICA_KEY` | Run as a [gateway replica](gateway.md#more-than-one-process) of the server at that address; the key (24+ characters) is set on both |
 | `LLMPOOL_ADMINS` | Members who may run the server from its web page |
 | `LLMPOOL_ACCESS` | Who may use what, by tag: `*@example.com=work;lead@example.com=*;ci=ci` |
 | `LLMPOOL_BLOCKED` | Members turned away whatever else admits them |

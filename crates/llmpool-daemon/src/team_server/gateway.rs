@@ -138,9 +138,24 @@ impl Gateway {
     }
 }
 
+/// What one request did to the accounts it touched.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct Report {
+    pub who: String,
+    pub provider: String,
+    /// Accounts the provider refused on: id, label, status, seconds to wait.
+    pub refusals: Vec<(AccountId, String, u16, i64)>,
+    /// The account that answered: id, label, whether it answered well, and
+    /// what it said about how full it is.
+    pub answered: Option<(AccountId, String, bool, BTreeMap<String, String>)>,
+    /// The line for the log, once the answer has gone out.
+    pub trace: Option<Value>,
+}
+
 /// One account a request could run on: what to send, and where.
-struct Upstream {
-    account: Account,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct Upstream {
+    pub(super) account: Account,
     credential: String,
     base: String,
 }
@@ -588,13 +603,11 @@ impl TeamServer {
     }
 
     /// What a subscription account's answer says about how full it is.
-    fn learn_usage(&self, account: &Account, response: &ureq::Response) {
-        let mut usage = account.usage.clone().unwrap_or_default();
+    fn learn_usage(&self, account: &AccountId, said: &BTreeMap<String, String>) {
+        let mut usage = Usage::default();
         let mut seen = false;
         for window in ["5h", "7d"] {
-            let read = |what: &str| {
-                response.header(&format!("anthropic-ratelimit-unified-{window}-{what}"))
-            };
+            let read = |what: &str| said.get(&format!("{window}-{what}"));
             let Some(used) = read("utilization").and_then(|v| v.parse::<f64>().ok()) else {
                 continue;
             };
@@ -613,10 +626,87 @@ impl TeamServer {
         }
         usage.fetched_at = now();
         let g = self.daemon.lock();
-        if let Ok(Some(mut current)) = g.store.get(&account.id) {
-            current.usage = Some(usage);
+        if let Ok(Some(mut current)) = g.store.get(account) {
+            // A window the answer did not mention keeps what was known of it.
+            let mut known = current.usage.take().unwrap_or_default();
+            known.windows.extend(usage.windows);
+            known.fetched_at = usage.fetched_at;
+            current.usage = Some(known);
             let _ = g.store.put(&current);
         }
+    }
+
+    /// What a request's outcome changes in the pool: which accounts to pass
+    /// over, how full the one that answered is, where the member now is, and
+    /// the line for the log. The same whether the request ran here or on a
+    /// gateway replica that reports it.
+    pub(super) fn settle(&self, report: Report) {
+        let Report {
+            who,
+            provider,
+            refusals,
+            answered,
+            trace,
+        } = report;
+        for (account, label, status, wait) in refusals {
+            if matches!(status, 401 | 403) {
+                // Set aside for this member only: it may be their request
+                // the provider objects to, not the account.
+                let fresh = self
+                    .gateway_state()
+                    .refused
+                    .insert((who.clone(), account), now() + REFUSED_SECS)
+                    .is_none();
+                if fresh {
+                    self.audit(
+                        "account_refused",
+                        &who,
+                        &format!("{provider}: the provider answered {status} on {label}"),
+                    );
+                }
+            } else if status == 429 {
+                self.gateway_state()
+                    .cooling
+                    .insert(account, now() + wait.clamp(5, 300));
+            }
+        }
+        if let Some((account, label, well, said)) = answered {
+            self.learn_usage(&account, &said);
+            if well {
+                let key = (who.clone(), provider.clone());
+                let previous = self.gateway_state().sticky.insert(key, account.clone());
+                if previous.as_ref().is_some_and(|p| *p != account) {
+                    self.audit(
+                        "gateway_switch",
+                        &who,
+                        &format!("{provider}: now on {label}"),
+                    );
+                }
+            }
+        }
+        if let Some(line) = trace {
+            self.trace(line);
+            self.consider(&who, &provider);
+        }
+    }
+
+    /// Settle an outcome here, or on a replica hand it to the primary.
+    fn report(&self, report: Report) {
+        match &self.primary {
+            Some(primary) => primary.report(report),
+            None => self.settle(report),
+        }
+    }
+
+    /// For a gateway replica: who this token is and what their request to
+    /// `provider` may run on, best first.
+    pub(super) fn pick(&self, token: Option<&str>, provider: &str) -> Api<Value> {
+        if !self.settings().gateway {
+            return Err(fail(404, "this server's gateway is off"));
+        }
+        let (_, who) = self.member(token)?;
+        let upstreams = self.upstreams(&who, provider)?;
+        Ok(json!({"who": who, "upstreams": upstreams}))
     }
 
     /// Forward one request of a member's agent to a provider.
@@ -633,18 +723,28 @@ impl TeamServer {
             .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string))
             .or_else(|| header_of(&request, "x-api-key"))
             .or_else(|| header_of(&request, "x-goog-api-key"));
-        if !self.settings().gateway {
-            return refuse(request, 404, "this server's gateway is off");
-        }
-        let who = match self.member(token.as_deref()) {
-            Ok((_, who)) => who,
-            Err(e) => return refuse(request, e.status, &e.message),
-        };
         let url = request.url().to_string();
         let mut parts = url.trim_start_matches("/gateway/").splitn(2, '/');
         let provider = parts.next().unwrap_or_default().to_string();
         let rest = parts.next().unwrap_or_default().to_string();
         let method = request.method().as_str().to_string();
+        // A replica holds no pool: the primary says who this is and what
+        // their request may run on.
+        let (who, picked) = match &self.primary {
+            Some(primary) => match primary.pick(token.as_deref(), &provider) {
+                Ok((who, upstreams)) => (who, Some(upstreams)),
+                Err(e) => return refuse(request, e.status, &e.message),
+            },
+            None => {
+                if !self.settings().gateway {
+                    return refuse(request, 404, "this server's gateway is off");
+                }
+                match self.member(token.as_deref()) {
+                    Ok((_, who)) => (who, None),
+                    Err(e) => return refuse(request, e.status, &e.message),
+                }
+            }
+        };
         if !llmpool_core::providers::name_ok(&provider) || !allowed(&method, &rest) {
             return refuse(
                 request,
@@ -692,7 +792,7 @@ impl TeamServer {
         let model = serde_json::from_slice::<Value>(&body)
             .ok()
             .and_then(|v| v["model"].as_str().map(short));
-        let upstreams = match self.upstreams(&who, &provider) {
+        let upstreams = match picked.map_or_else(|| self.upstreams(&who, &provider), Ok) {
             Ok(found) if !found.is_empty() => found,
             Ok(_) => {
                 return refuse(
@@ -716,6 +816,7 @@ impl TeamServer {
             .build();
 
         let mut tried = Vec::new();
+        let mut refusals = Vec::new();
         let mut answer = None;
         for upstream in upstreams.into_iter().take(ATTEMPTS) {
             let mut call = agent.request(&method, &format!("{}/{rest}", upstream.base));
@@ -787,37 +888,17 @@ impl TeamServer {
             // only those are worth another account. (A plain 500 may have
             // run; sending it again could run, and bill, it twice.)
             if matches!(status, 401 | 403 | 429 | 502 | 503 | 529) {
-                if matches!(status, 401 | 403) {
-                    // Set aside for this member only: it may be their request
-                    // the provider objects to, not the account.
-                    let fresh = self
-                        .gateway_state()
-                        .refused
-                        .insert(
-                            (who.clone(), upstream.account.id.clone()),
-                            now() + REFUSED_SECS,
-                        )
-                        .is_none();
-                    if fresh {
-                        self.audit(
-                            "account_refused",
-                            &who,
-                            &format!(
-                                "{provider}: the provider answered {status} on {}",
-                                upstream.account.label
-                            ),
-                        );
-                    }
-                }
-                if status == 429 {
+                if matches!(status, 401 | 403 | 429) {
                     let wait = response
                         .header("retry-after")
                         .and_then(|v| v.parse::<i64>().ok())
-                        .unwrap_or(COOL_SECS)
-                        .clamp(5, 300);
-                    self.gateway_state()
-                        .cooling
-                        .insert(upstream.account.id.clone(), now() + wait);
+                        .unwrap_or(COOL_SECS);
+                    refusals.push((
+                        upstream.account.id.clone(),
+                        upstream.account.label.clone(),
+                        status,
+                        wait,
+                    ));
                 }
                 tried.push(format!("{}: {status}", upstream.account.label));
                 answer = Some((upstream, response));
@@ -826,8 +907,18 @@ impl TeamServer {
             answer = Some((upstream, response));
             break;
         }
+        let outcome = |answered, trace| Report {
+            who: who.clone(),
+            provider: provider.clone(),
+            refusals: Vec::new(),
+            answered,
+            trace,
+        };
         let Some((upstream, response)) = answer else {
-            self.trace(json!({"at": now(), "who": who, "provider": provider, "model": model, "status": 502, "tried": tried}));
+            self.report(Report {
+                refusals,
+                ..outcome(None, Some(json!({"at": now(), "who": who, "provider": provider, "model": model, "status": 502, "tried": tried})))
+            });
             return refuse(
                 request,
                 502,
@@ -835,23 +926,30 @@ impl TeamServer {
             );
         };
         let status = response.status();
+        // What a subscription's answer says about how full it is.
+        let mut said = BTreeMap::new();
         if upstream.account.kind == Kind::Oauth {
-            self.learn_usage(&upstream.account, &response);
-        }
-        if status < 400 {
-            let key = (who.clone(), provider.clone());
-            let previous = self
-                .gateway_state()
-                .sticky
-                .insert(key, upstream.account.id.clone());
-            if previous.as_ref().is_some_and(|p| *p != upstream.account.id) {
-                self.audit(
-                    "gateway_switch",
-                    &who,
-                    &format!("{provider}: now on {}", upstream.account.label),
-                );
+            for name in response.headers_names() {
+                if let Some(short) = name.strip_prefix("anthropic-ratelimit-unified-") {
+                    if let Some(value) = response.header(&name) {
+                        said.insert(short.to_string(), value.to_string());
+                    }
+                }
             }
         }
+        // Before the answer streams: the next request should already know.
+        self.report(Report {
+            refusals,
+            ..outcome(
+                Some((
+                    upstream.account.id.clone(),
+                    upstream.account.label.clone(),
+                    status < 400,
+                    said,
+                )),
+                None,
+            )
+        });
 
         // Written by hand, a piece at a time: an answer that streams must
         // reach the agent as it arrives, not when a buffer fills.
@@ -891,14 +989,13 @@ impl TeamServer {
         // The agent has its answer; nothing below is on its time.
         drop(out);
         let took = started.elapsed().as_millis() as u64;
-        self.trace(json!({
+        self.report(outcome(None, Some(json!({
             "at": now(), "who": who, "provider": provider, "account": upstream.account.label,
             "model": model, "method": method, "path": rest.split('?').next().map(short), "status": status,
             "ms": took, "bytes": bytes,
             "input_tokens": sniff.input, "output_tokens": sniff.output,
             "tried": tried, "streamed": events,
-        }));
-        self.consider(&who, &provider);
+        }))));
     }
 }
 

@@ -17,4 +17,33 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ . }}
         {{- end }}
+        {{- if gt (int .Values.gateway.replicas) 0 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: llmpool-gateway
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- end }}
+{{- if gt (int .Values.gateway.replicas) 0 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "llmpool.name" . }}-gateway
+  labels: {{- include "llmpool.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: llmpool-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: http
+      from:
+        {{- range .Values.networkPolicy.ingressNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+{{- end }}
 {{- end }}

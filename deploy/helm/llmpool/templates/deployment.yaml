@@ -12,7 +12,9 @@ spec:
     matchLabels: {{- include "llmpool.labels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "llmpool.labels" . | nindent 8 }}
+      labels:
+        {{- include "llmpool.labels" . | nindent 8 }}
+        llmpool/serves: requests
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}

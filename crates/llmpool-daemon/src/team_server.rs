@@ -11,6 +11,7 @@
 mod admin;
 mod gateway;
 pub mod otlp;
+mod replica;
 
 use crate::http::percent_decode;
 use crate::{fail, now, Api, ApiError, Daemon};
@@ -83,6 +84,14 @@ pub struct Config {
     pub upstreams: BTreeMap<String, String>,
     /// An OpenTelemetry collector that gets a span for every gateway request.
     pub otlp: Option<otlp::Otlp>,
+    /// Be a gateway replica of the server at this address: carry members'
+    /// requests and keep nothing.
+    pub replica_of: Option<String>,
+    /// What a primary and its replicas know each other by.
+    pub replica_key: Option<String>,
+    /// How long a replica uses what the primary last told it before asking
+    /// again; fifteen seconds unless set.
+    pub replica_fresh: Option<Duration>,
 }
 
 /// What an administrator can change while the server runs. It starts as the
@@ -152,7 +161,24 @@ impl Config {
                 })
                 .collect(),
             otlp: otlp::Otlp::from_env(var),
+            replica_of: var("LLMPOOL_REPLICA_OF")
+                .map(|u| u.trim().trim_end_matches('/').to_string()),
+            replica_key: var("LLMPOOL_REPLICA_KEY").map(|k| k.trim().to_string()),
+            replica_fresh: None,
         };
+        if config.replica_key.as_ref().is_some_and(|k| k.len() < 24) {
+            return Err("LLMPOOL_REPLICA_KEY is shorter than 24 characters".into());
+        }
+        if config.replica_of.is_some() {
+            // A replica admits nobody itself: the primary does.
+            return match config.replica_key {
+                Some(_) => Ok(config),
+                None => Err(
+                    "LLMPOOL_REPLICA_OF needs LLMPOOL_REPLICA_KEY, the same as the primary's"
+                        .into(),
+                ),
+            };
+        }
         if config.oidc.is_none() && config.api_keys.is_empty() {
             return Err("set LLMPOOL_OIDC_CLIENT_ID (sign-in) or LLMPOOL_API_KEYS: with neither, nobody can connect".into());
         }
@@ -290,6 +316,8 @@ pub struct TeamServer {
     /// Every other request being answered right now.
     busy: std::sync::atomic::AtomicUsize,
     otlp: Option<std::sync::mpsc::SyncSender<Value>>,
+    /// Set on a gateway replica: the server that holds the pool.
+    primary: Option<replica::Primary>,
 }
 
 enum Reply {
@@ -461,6 +489,12 @@ impl TeamServer {
         });
         Ok(Self {
             otlp: config.otlp.clone().map(otlp::start),
+            primary: match (&config.replica_of, &config.replica_key) {
+                (Some(url), Some(key)) => {
+                    Some(replica::Primary::new(url, key, config.replica_fresh))
+                }
+                _ => None,
+            },
             settings: Mutex::new(settings),
             gateway: Mutex::new(gateway::Gateway::restored(daemon.data_dir())),
             active: std::sync::atomic::AtomicUsize::new(0),
@@ -1004,6 +1038,27 @@ impl TeamServer {
                 "api_keys": !self.config.api_keys.is_empty(),
                 "gateway": self.settings().gateway,
             }))),
+            // Between a primary and its gateway replicas. Not there at all
+            // for anyone who does not hold the key they share.
+            ("POST", "/replica/pick") | ("POST", "/replica/report") => {
+                let ours =
+                    self.config.replica_key.as_deref().is_some_and(|key| {
+                        sha256_hex(key) == sha256_hex(bearer.unwrap_or_default())
+                    });
+                if !ours || self.primary.is_some() {
+                    return Err(fail(404, "not found"));
+                }
+                if path == "/replica/pick" {
+                    return Ok(Reply::Json(self.pick(
+                        body["token"].as_str(),
+                        body["provider"].as_str().unwrap_or_default(),
+                    )?));
+                }
+                let report = serde_json::from_value(body.clone())
+                    .map_err(|_| fail(400, "that report cannot be read"))?;
+                self.settle(report);
+                Ok(Reply::Json(json!({"ok": true})))
+            }
             ("GET", "/auth/login") => self.login(query),
             ("GET", "/auth/callback") => self.callback(query),
             ("POST", "/auth/exchange") => self.exchange(body),
@@ -1125,6 +1180,11 @@ impl TeamServer {
                 server.gateway(request);
             });
             return;
+        }
+        if let Some(primary) = &self.primary {
+            if request.url() != "/health" {
+                return primary.relay(request);
+            }
         }
         let bearer = request
             .headers()
