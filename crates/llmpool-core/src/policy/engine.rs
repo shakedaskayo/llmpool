@@ -48,12 +48,23 @@ pub fn evaluate(policy: &PolicyFile, event: Event, ctx: &Context) -> Decision {
             notify: rule.action.notify,
         };
     }
-    Decision { rule: None, outcome: Outcome::NoMatch, notify: false }
+    Decision {
+        rule: None,
+        outcome: Outcome::NoMatch,
+        notify: false,
+    }
 }
 
-fn run(rule: &Rule, threshold: Option<(String, f64)>, settings: &Settings, ctx: &Context) -> Outcome {
+fn run(
+    rule: &Rule,
+    threshold: Option<(String, f64)>,
+    settings: &Settings,
+    ctx: &Context,
+) -> Outcome {
     let action = &rule.action;
-    let ceiling = threshold.as_ref().map(|(window, percent)| (window.as_str(), *percent));
+    let ceiling = threshold
+        .as_ref()
+        .map(|(window, percent)| (window.as_str(), *percent));
     let chosen = |account: Option<&Account>, wrap: fn(AccountId) -> Outcome| {
         account.map_or(Outcome::Exhausted, |a| wrap(a.id.clone()))
     };
@@ -63,14 +74,28 @@ fn run(rule: &Rule, threshold: Option<(String, f64)>, settings: &Settings, ctx: 
     }
     if let Some(target) = &action.assign {
         let found = select::candidates(target, ctx, ceiling);
-        return chosen(select::pick(target.pick, found, ctx.rr_cursor), Outcome::Assign);
+        return chosen(
+            select::pick(target.pick, found, ctx.rr_cursor),
+            Outcome::Assign,
+        );
     }
     if let Some(target) = &action.ask {
-        let ids: Vec<_> = select::candidates(target, ctx, ceiling).iter().map(|a| a.id.clone()).collect();
-        return if ids.is_empty() { Outcome::Exhausted } else { Outcome::Ask(ids) };
+        let ids: Vec<_> = select::candidates(target, ctx, ceiling)
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        return if ids.is_empty() {
+            Outcome::Exhausted
+        } else {
+            Outcome::Ask(ids)
+        };
     }
     if let Some(target) = &action.swap {
-        if ctx.session.last_swap_at.is_some_and(|at| ctx.now - at < settings.cooldown_secs) {
+        if ctx
+            .session
+            .last_swap_at
+            .is_some_and(|at| ctx.now - at < settings.cooldown_secs)
+        {
             return Outcome::Cooldown;
         }
         let mut found = select::candidates(target, ctx, ceiling);
@@ -79,7 +104,10 @@ fn run(rule: &Rule, threshold: Option<(String, f64)>, settings: &Settings, ctx: 
         if let (Some((window, _)), Some(current)) = (ceiling, ctx.current()) {
             found.retain(|a| a.used(window) + settings.margin_points <= current.used(window));
         }
-        return chosen(select::pick(target.pick, found, ctx.rr_cursor), Outcome::Swap);
+        return chosen(
+            select::pick(target.pick, found, ctx.rr_cursor),
+            Outcome::Swap,
+        );
     }
     Outcome::Notify
 }
@@ -107,6 +135,8 @@ pub struct Scenario {
     #[serde(default = "noon")]
     pub hour: u8,
     #[serde(default)]
+    pub minute: u8,
+    #[serde(default)]
     pub home: String,
 }
 
@@ -121,6 +151,7 @@ impl Scenario {
                 now: self.now,
                 weekday: &self.weekday,
                 hour: self.hour,
+                minute: self.minute,
                 home: &self.home,
                 rr_cursor: None,
             },
@@ -148,7 +179,14 @@ do = { swap = {}, notify = true }
     fn no_rule_is_no_match() {
         let s = session("/w", None);
         let d = evaluate(&PolicyFile::default(), Event::SessionStart, &ctx(&s, &[]));
-        assert_eq!(d, Decision { rule: None, outcome: Outcome::NoMatch, notify: false });
+        assert_eq!(
+            d,
+            Decision {
+                rule: None,
+                outcome: Outcome::NoMatch,
+                notify: false
+            }
+        );
     }
 
     #[test]
@@ -204,7 +242,10 @@ do = { swap = {} }
         );
         let accounts = [account("a", &[], None), account("b", &[], None)];
         let s = session("/pinned/x", Some("a"));
-        assert_eq!(evaluate(&p, Event::RateLimited, &ctx(&s, &accounts)).outcome, Outcome::Hold);
+        assert_eq!(
+            evaluate(&p, Event::RateLimited, &ctx(&s, &accounts)).outcome,
+            Outcome::Hold
+        );
     }
 
     #[test]
@@ -213,7 +254,10 @@ do = { swap = {} }
         let s = session("/w", Some("cur"));
 
         // 85 is under the ceiling but not 10 points better than 91.
-        let accounts = [account("cur", &[], Some(91.0)), account("near", &[], Some(85.0))];
+        let accounts = [
+            account("cur", &[], Some(91.0)),
+            account("near", &[], Some(85.0)),
+        ];
         let d = evaluate(&p, Event::UsageUpdated, &ctx(&s, &accounts));
         assert_eq!(d.outcome, Outcome::Exhausted);
         assert!(d.notify);
@@ -230,7 +274,10 @@ do = { swap = {} }
     #[test]
     fn rate_limited_swap_ignores_the_margin() {
         let p = policy("[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {} }\n");
-        let accounts = [account("cur", &[], Some(91.0)), account("near", &[], Some(85.0))];
+        let accounts = [
+            account("cur", &[], Some(91.0)),
+            account("near", &[], Some(85.0)),
+        ];
         let s = session("/w", Some("cur"));
         let d = evaluate(&p, Event::RateLimited, &ctx(&s, &accounts));
         assert_eq!(d.outcome, Outcome::Swap("near".into()));
@@ -239,11 +286,17 @@ do = { swap = {} }
     #[test]
     fn cooldown_blocks_a_second_swap() {
         let p = policy(SWAP_AT_90);
-        let accounts = [account("cur", &[], Some(95.0)), account("b", &[], Some(10.0))];
+        let accounts = [
+            account("cur", &[], Some(95.0)),
+            account("b", &[], Some(10.0)),
+        ];
         let mut s = session("/w", Some("cur"));
         // The fixture context has now = 1_000_000 and the default cooldown is 300s.
         s.last_swap_at = Some(1_000_000 - 299);
-        assert_eq!(evaluate(&p, Event::UsageUpdated, &ctx(&s, &accounts)).outcome, Outcome::Cooldown);
+        assert_eq!(
+            evaluate(&p, Event::UsageUpdated, &ctx(&s, &accounts)).outcome,
+            Outcome::Cooldown
+        );
         s.last_swap_at = Some(1_000_000 - 300);
         assert_eq!(
             evaluate(&p, Event::UsageUpdated, &ctx(&s, &accounts)).outcome,

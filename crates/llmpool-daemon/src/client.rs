@@ -45,7 +45,10 @@ impl Client {
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
-        let request = self.agent.request(method, &format!("{}{path}", self.base)).set("Authorization", &self.auth);
+        let request = self
+            .agent
+            .request(method, &format!("{}{path}", self.base))
+            .set("Authorization", &self.auth);
         let response = match body {
             Some(body) => request.send_json(body),
             None => request.call(),
@@ -54,7 +57,10 @@ impl Client {
             Ok(response) => response.into_json().map_err(|e| e.to_string()),
             Err(ureq::Error::Status(_, response)) => {
                 let body: Value = response.into_json().unwrap_or_default();
-                Err(body["error"].as_str().unwrap_or("request failed").to_string())
+                Err(body["error"]
+                    .as_str()
+                    .unwrap_or("request failed")
+                    .to_string())
             }
             Err(e) => Err(format!("daemon unreachable: {e}")),
         }

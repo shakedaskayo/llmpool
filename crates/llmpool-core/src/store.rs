@@ -44,7 +44,11 @@ impl Store {
     pub fn get(&self, id: &str) -> Result<Option<Account>, StoreError> {
         let data: Option<String> = self
             .db
-            .query_row("SELECT data FROM accounts WHERE id = ?1", params![id], |row| row.get(0))
+            .query_row(
+                "SELECT data FROM accounts WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
             .optional()?;
         Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
     }
@@ -61,7 +65,10 @@ impl Store {
 
     /// Returns whether an account was removed.
     pub fn remove(&self, id: &str) -> Result<bool, StoreError> {
-        Ok(self.db.execute("DELETE FROM accounts WHERE id = ?1", params![id])? > 0)
+        Ok(self
+            .db
+            .execute("DELETE FROM accounts WHERE id = ?1", params![id])?
+            > 0)
     }
 }
 
@@ -103,7 +110,13 @@ mod tests {
     fn data_survives_reopening_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("llmpool.db");
-        Store::open(&path).unwrap().put(&account("a", &["x"], None)).unwrap();
-        assert_eq!(Store::open(&path).unwrap().get("a").unwrap(), Some(account("a", &["x"], None)));
+        Store::open(&path)
+            .unwrap()
+            .put(&account("a", &["x"], None))
+            .unwrap();
+        assert_eq!(
+            Store::open(&path).unwrap().get("a").unwrap(),
+            Some(account("a", &["x"], None))
+        );
     }
 }

@@ -12,5 +12,9 @@ use sha2::{Digest, Sha256};
 /// First eight hex digits of SHA-256, the form Claude Code uses to derive a
 /// Keychain item name from a config directory.
 pub fn short_hash(text: &str) -> String {
-    Sha256::digest(text.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

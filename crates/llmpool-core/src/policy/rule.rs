@@ -30,7 +30,10 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { cooldown_secs: 300, margin_points: 10.0 }
+        Self {
+            cooldown_secs: 300,
+            margin_points: 10.0,
+        }
     }
 }
 
@@ -71,7 +74,10 @@ impl TryFrom<OnRepr> for TriggerSpec {
 
     fn try_from(repr: OnRepr) -> Result<Self, String> {
         match repr {
-            OnRepr::Name(kind) => Ok(Self { kind, params: toml::Table::new() }),
+            OnRepr::Name(kind) => Ok(Self {
+                kind,
+                params: toml::Table::new(),
+            }),
             OnRepr::Table(mut table) if table.len() == 1 => {
                 let (kind, params) = table.pop_first().expect("length checked");
                 Ok(Self { kind, params })
@@ -185,16 +191,28 @@ do = { swap = { tag = "same" }, notify = true }
     #[test]
     fn parses_both_trigger_forms() {
         let p = PolicyFile::parse(SAMPLE).unwrap();
-        assert_eq!(p.settings, Settings { cooldown_secs: 300, margin_points: 10.0 });
+        assert_eq!(
+            p.settings,
+            Settings {
+                cooldown_secs: 300,
+                margin_points: 10.0
+            }
+        );
         assert_eq!(p.rules[0].on.kind, "session_start");
         assert!(p.rules[0].on.params.is_empty());
         assert!(p.rules[0].enabled);
         assert_eq!(p.rules[0].when.cwd.as_deref(), Some("~/work/acme/**"));
-        assert_eq!(p.rules[0].action.assign.as_ref().unwrap().pick, Pick::MostQuota);
+        assert_eq!(
+            p.rules[0].action.assign.as_ref().unwrap().pick,
+            Pick::MostQuota
+        );
         assert_eq!(p.rules[1].on.kind, "usage_above");
         assert_eq!(p.rules[1].on.params["percent"].as_integer(), Some(90));
         assert!(p.rules[1].action.notify);
-        assert_eq!(p.rules[1].action.swap.as_ref().unwrap().tag.as_deref(), Some("same"));
+        assert_eq!(
+            p.rules[1].action.swap.as_ref().unwrap().tag.as_deref(),
+            Some("same")
+        );
     }
 
     #[test]

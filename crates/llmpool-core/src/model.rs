@@ -64,9 +64,12 @@ impl Account {
 
     /// Highest percent used across all windows.
     pub fn peak_used(&self) -> f64 {
-        self.usage
-            .as_ref()
-            .map_or(0.0, |u| u.windows.values().map(|w| w.used_percent).fold(0.0, f64::max))
+        self.usage.as_ref().map_or(0.0, |u| {
+            u.windows
+                .values()
+                .map(|w| w.used_percent)
+                .fold(0.0, f64::max)
+        })
     }
 
     pub fn usable(&self) -> bool {

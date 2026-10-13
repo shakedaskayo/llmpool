@@ -32,10 +32,17 @@ pub struct InstanceLock(#[allow(dead_code)] std::fs::File);
 pub fn instance_lock(data_dir: &Path) -> std::io::Result<InstanceLock> {
     use std::os::fd::AsRawFd;
     std::fs::create_dir_all(data_dir)?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data_dir.join("daemon.lock"))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join("daemon.lock"))?;
     // Released by the operating system when the process ends, however it ends.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "another llmpool daemon is already running"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another llmpool daemon is already running",
+        ));
     }
     Ok(InstanceLock(file))
 }
@@ -60,12 +67,22 @@ fn parse<T: DeserializeOwned>(body: Value) -> Result<T, ApiError> {
 }
 
 fn text<'a>(body: &'a Value, field: &str) -> Result<&'a str, ApiError> {
-    body[field].as_str().ok_or_else(|| fail(400, format!("bad request: `{field}` is required")))
+    body[field]
+        .as_str()
+        .ok_or_else(|| fail(400, format!("bad request: `{field}` is required")))
 }
 
-fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBool) -> Result<Value, ApiError> {
+fn route(
+    d: &Daemon,
+    method: &str,
+    parts: &[&str],
+    body: Value,
+    stop: &AtomicBool,
+) -> Result<Value, ApiError> {
     match (method, parts) {
-        ("GET", ["health"]) => Ok(json!({"ok": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION")})),
+        ("GET", ["health"]) => {
+            Ok(json!({"ok": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION")}))
+        }
         ("POST", ["shutdown"]) => {
             stop.store(true, Ordering::SeqCst);
             Ok(json!({}))
@@ -74,11 +91,19 @@ fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBoo
         ("POST", ["accounts", "capture"]) => d.capture(parse(body)?),
         ("PATCH", ["accounts", id]) => d.patch_account(id, parse(body)?),
         ("DELETE", ["accounts", id]) => d.remove_account(id),
+        ("POST", ["export"]) => d.export(text(&body, "passphrase")?),
+        ("POST", ["import"]) => d.import(
+            text(&body, "bundle")?,
+            text(&body, "passphrase")?,
+            body["replace"] == true,
+        ),
         ("GET", ["sessions"]) => d.list_sessions(),
         ("POST", ["sessions"]) => d.start_session(parse(body)?),
         ("POST", ["sessions", id, "assign"]) => d.assign(id, text(&body, "account")?),
         ("POST", ["sessions", id, "pid"]) => {
-            let pid = body["pid"].as_u64().ok_or_else(|| fail(400, "bad request: `pid` is required"))?;
+            let pid = body["pid"]
+                .as_u64()
+                .ok_or_else(|| fail(400, "bad request: `pid` is required"))?;
             d.set_pid(id, pid as u32)
         }
         ("POST", ["sessions", id, "swap"]) => d.swap_session(id, text(&body, "account")?),
@@ -90,7 +115,9 @@ fn route(d: &Daemon, method: &str, parts: &[&str], body: Value, stop: &AtomicBoo
         ("POST", ["policies", "dry-run"]) => d.dry_run(parse(body)?),
         ("GET", ["policies", "schema"]) => Ok(d.schema()),
         ("POST", ["hooks", "claude", sid, event]) => Ok(d.hook(sid, event, "", &body)),
-        ("POST", ["hooks", "claude", sid, event, argument]) => Ok(d.hook(sid, event, argument, &body)),
+        ("POST", ["hooks", "claude", sid, event, argument]) => {
+            Ok(d.hook(sid, event, argument, &body))
+        }
         ("POST", ["statusline", "claude", sid]) => Ok(d.statusline(sid, &body)),
         ("GET", ["events"]) => Ok(d.events()),
         _ => Err(fail(404, "no such route")),
@@ -102,7 +129,10 @@ fn percent_decode(segment: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
         match (bytes[i], hex) {
             (b'%', Some(byte)) => {
                 out.push(byte);
@@ -127,9 +157,22 @@ fn handle(d: &Daemon, token: &str, mut request: tiny_http::Request, stop: &Atomi
     } else {
         let mut text = String::new();
         let _ = request.as_reader().read_to_string(&mut text);
-        let body = if text.trim().is_empty() { Ok(Value::Null) } else { serde_json::from_str(&text) };
-        let url = request.url().split('?').next().unwrap_or_default().to_string();
-        let decoded: Vec<String> = url.split('/').filter(|p| !p.is_empty()).map(percent_decode).collect();
+        let body = if text.trim().is_empty() {
+            Ok(Value::Null)
+        } else {
+            serde_json::from_str(&text)
+        };
+        let url = request
+            .url()
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let decoded: Vec<String> = url
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .map(percent_decode)
+            .collect();
         let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         match body {
             Ok(body) => route(d, request.method().as_str(), &parts, body, stop),
@@ -140,18 +183,31 @@ fn handle(d: &Daemon, token: &str, mut request: tiny_http::Request, stop: &Atomi
         Ok(value) => (200, value),
         Err(e) => (e.status, json!({"error": e.message})),
     };
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("static header");
-    let _ = request.respond(tiny_http::Response::from_string(body.to_string()).with_status_code(status).with_header(header));
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+        .expect("static header");
+    let _ = request.respond(
+        tiny_http::Response::from_string(body.to_string())
+            .with_status_code(status)
+            .with_header(header),
+    );
 }
 
 /// Start serving on a free loopback port and record it in `daemon.json`.
 pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running> {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").map_err(std::io::Error::other)?);
-    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or_default();
+    let port = server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .unwrap_or_default();
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let endpoint = Endpoint { port, token: token.clone(), pid: std::process::id() };
+    let endpoint = Endpoint {
+        port,
+        token: token.clone(),
+        pid: std::process::id(),
+    };
 
     let path = daemon.data_dir().join("daemon.json");
     // The token is a secret: the file is never readable by anyone else.
@@ -159,14 +215,24 @@ pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
         file.write_all(serde_json::to_string(&endpoint)?.as_bytes())?;
     }
 
     let stop = Arc::new(AtomicBool::new(false));
     let workers = (0..WORKERS)
         .map(|_| {
-            let (server, daemon, stop, token, path) = (server.clone(), daemon.clone(), stop.clone(), token.clone(), path.clone());
+            let (server, daemon, stop, token, path) = (
+                server.clone(),
+                daemon.clone(),
+                stop.clone(),
+                token.clone(),
+                path.clone(),
+            );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(300)) {
@@ -174,13 +240,31 @@ pub fn start(daemon: Arc<Daemon>, lock: InstanceLock) -> std::io::Result<Running
                     }
                 }
                 // Only our own file: a newer daemon may have written its own.
-                if Endpoint::read(path.parent().unwrap_or(&path)).is_some_and(|e| e.token == token) {
+                if Endpoint::read(path.parent().unwrap_or(&path)).is_some_and(|e| e.token == token)
+                {
                     let _ = std::fs::remove_file(&path);
                 }
             })
         })
         .collect();
-    Ok(Running { endpoint, workers, _lock: lock })
+    let mut workers: Vec<JoinHandle<()>> = workers;
+    workers.push(std::thread::spawn(move || {
+        // Wake often so shutdown is prompt; act once per minute, on the minute.
+        let mut last = chrono::Local::now().format("%H:%M").to_string();
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(300));
+            let minute = chrono::Local::now().format("%H:%M").to_string();
+            if minute != last {
+                last = minute;
+                daemon.tick();
+            }
+        }
+    }));
+    Ok(Running {
+        endpoint,
+        workers,
+        _lock: lock,
+    })
 }
 
 #[cfg(test)]

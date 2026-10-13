@@ -50,7 +50,9 @@ impl Keychain for MacKeychain {
             .args(["find-generic-password", "-s", service, "-w"])
             .output()
             .ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     fn delete(&self, service: &str) {
@@ -108,7 +110,9 @@ fn write_private(path: &Path, value: &Value) -> io::Result<()> {
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(&tmp)?.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
+    options
+        .open(&tmp)?
+        .write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
     std::fs::rename(&tmp, path)
 }
 
@@ -148,7 +152,10 @@ impl Profile {
 
     /// The login currently in this profile, if it is complete.
     pub fn read(&self, keychain: &dyn Keychain) -> Option<Secret> {
-        let oauth = self.raw_credentials(keychain)?.get("claudeAiOauth")?.clone();
+        let oauth = self
+            .raw_credentials(keychain)?
+            .get("claudeAiOauth")?
+            .clone();
         let account = read_json(&self.global_config)?.get("oauthAccount")?.clone();
         Some(Secret { oauth, account }).filter(|s| s.email().is_some())
     }
@@ -157,7 +164,10 @@ impl Profile {
     pub fn identity(&self) -> Option<(String, Option<String>)> {
         let account = read_json(&self.global_config)?.get("oauthAccount")?.clone();
         let email = account.get("emailAddress")?.as_str()?.to_string();
-        let organization = account.get("organizationUuid").and_then(Value::as_str).map(str::to_string);
+        let organization = account
+            .get("organizationUuid")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         Some((email, organization))
     }
 
@@ -191,6 +201,9 @@ impl Profile {
     }
 
     fn write_identity(&self, secret: &Secret) -> io::Result<()> {
+        // Claude Code rewrites this file too; without its lock the two writes
+        // could interleave and drop one side's change.
+        let _lock = crate::lock::config(&self.global_config, std::time::Duration::from_secs(5))?;
         let mut config = object_or_empty(read_json(&self.global_config));
         config["oauthAccount"] = secret.account.clone();
         if !self.is_default {
@@ -288,7 +301,10 @@ pub(crate) mod tests {
         assert_eq!(profile.read(&NoKeychain), None);
         profile.write(&NoKeychain, &secret("a@x.io", "t1")).unwrap();
         assert_eq!(profile.read(&NoKeychain), Some(secret("a@x.io", "t1")));
-        assert_eq!(profile.identity(), Some(("a@x.io".to_string(), Some("org-1".to_string()))));
+        assert_eq!(
+            profile.identity(),
+            Some(("a@x.io".to_string(), Some("org-1".to_string())))
+        );
 
         let config = read_json(&profile.global_config).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
@@ -296,7 +312,10 @@ pub(crate) mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(profile.credentials_path()).unwrap().permissions().mode();
+            let mode = std::fs::metadata(profile.credentials_path())
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }
@@ -306,7 +325,11 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let profile = Profile::default_in(dir.path());
         std::fs::create_dir_all(&profile.config_dir).unwrap();
-        std::fs::write(&profile.global_config, r#"{"projects": {"/w": {}}, "oauthAccount": {"emailAddress": "old@x.io"}}"#).unwrap();
+        std::fs::write(
+            &profile.global_config,
+            r#"{"projects": {"/w": {}}, "oauthAccount": {"emailAddress": "old@x.io"}}"#,
+        )
+        .unwrap();
         let keychain = FakeKeychain::default();
         keychain.0.lock().unwrap().insert(
             profile.service.clone(),
@@ -331,13 +354,17 @@ pub(crate) mod tests {
     fn a_write_that_cannot_finish_leaves_the_old_login_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let profile = Profile::at(&dir.path().join("p"));
-        profile.write(&NoKeychain, &secret("a@x.io", "a-1")).unwrap();
+        profile
+            .write(&NoKeychain, &secret("a@x.io", "a-1"))
+            .unwrap();
         let before = std::fs::read(profile.credentials_path()).unwrap();
         // Make the identity file impossible to replace.
         std::fs::remove_file(&profile.global_config).unwrap();
         std::fs::create_dir(&profile.global_config).unwrap();
 
-        assert!(profile.write(&NoKeychain, &secret("b@x.io", "b-1")).is_err());
+        assert!(profile
+            .write(&NoKeychain, &secret("b@x.io", "b-1"))
+            .is_err());
         assert_eq!(std::fs::read(profile.credentials_path()).unwrap(), before);
     }
 
@@ -345,7 +372,11 @@ pub(crate) mod tests {
     fn half_a_login_is_no_login() {
         let dir = tempfile::tempdir().unwrap();
         let profile = Profile::at(dir.path());
-        std::fs::write(profile.credentials_path(), r#"{"claudeAiOauth": {"accessToken": "t"}}"#).unwrap();
+        std::fs::write(
+            profile.credentials_path(),
+            r#"{"claudeAiOauth": {"accessToken": "t"}}"#,
+        )
+        .unwrap();
         assert_eq!(profile.read(&NoKeychain), None);
         std::fs::write(&profile.global_config, "not json").unwrap();
         assert_eq!(profile.read(&NoKeychain), None);
@@ -360,7 +391,11 @@ pub(crate) mod tests {
         std::fs::write(default.config_dir.join("settings.json"), "{}").unwrap();
         std::fs::write(default.config_dir.join("NOTES.md"), "x").unwrap();
         std::fs::write(default.config_dir.join(".credentials.json"), "{}").unwrap();
-        std::fs::write(&default.global_config, r#"{"mcpServers": {"s": {}}, "oauthAccount": {"emailAddress": "d@x.io"}}"#).unwrap();
+        std::fs::write(
+            &default.global_config,
+            r#"{"mcpServers": {"s": {}}, "oauthAccount": {"emailAddress": "d@x.io"}}"#,
+        )
+        .unwrap();
 
         let profile = Profile::at(&dir.path().join("store"));
         profile.write(&NoKeychain, &secret("a@x.io", "t")).unwrap();
@@ -368,10 +403,24 @@ pub(crate) mod tests {
         profile.link_shared(&default).unwrap();
 
         for shared in ["settings.json", "skills", "NOTES.md"] {
-            assert!(profile.config_dir.join(shared).symlink_metadata().unwrap().file_type().is_symlink(), "{shared}");
+            assert!(
+                profile
+                    .config_dir
+                    .join(shared)
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{shared}"
+            );
         }
         // The session's own login must not be replaced by the default one.
-        assert!(!profile.credentials_path().symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!profile
+            .credentials_path()
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let config = read_json(&profile.global_config).unwrap();
         assert!(config["mcpServers"].get("s").is_some());
         assert_eq!(config["oauthAccount"]["emailAddress"], "a@x.io");

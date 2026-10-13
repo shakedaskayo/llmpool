@@ -13,6 +13,7 @@ llmpool-adapter-claude = { path = "../llmpool-adapter-claude" }
 llmpool-daemon = { path = "../llmpool-daemon" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,6 +10,8 @@ pub enum Event {
     RateLimited,
     AuthFailed,
     CwdChanged,
+    /// Once a minute, for rules that run on a schedule.
+    Tick,
 }
 
 /// Everything a rule may look at. Local time is supplied by the caller so the
@@ -23,6 +25,8 @@ pub struct Context<'a> {
     pub weekday: &'a str,
     /// 0 .. 23, local time.
     pub hour: u8,
+    /// 0 .. 59, local time.
+    pub minute: u8,
     /// Home directory, for `~` in path globs.
     pub home: &'a str,
     /// Id of the account round-robin picked last, if any.

@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "llmpool", version, about = "A pool of LLM provider credentials for coding agents")]
+#[command(
+    name = "llmpool",
+    version,
+    about = "A pool of LLM provider credentials for coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -64,6 +68,15 @@ enum Command {
         /// Claude Code's own session id, for a session `llmpool run` did not start
         #[arg(long)]
         agent_session: Option<String>,
+    },
+    /// Save every account and its login to one passphrase-encrypted file
+    Export { file: PathBuf },
+    /// Add the accounts of an exported file to this machine's pool
+    Import {
+        file: PathBuf,
+        /// Also overwrite accounts that are already here
+        #[arg(long)]
+        replace: bool,
     },
     /// Inspect and test policies
     Policy {

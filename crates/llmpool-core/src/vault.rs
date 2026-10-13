@@ -25,7 +25,10 @@ pub struct MemoryVault(Mutex<HashMap<String, String>>);
 
 impl Vault for MemoryVault {
     fn put(&self, id: &str, secret: &str) -> Result<(), VaultError> {
-        self.0.lock().unwrap().insert(id.to_string(), secret.to_string());
+        self.0
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), secret.to_string());
         Ok(())
     }
 
@@ -86,7 +89,10 @@ impl Vault for FileVault {
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options.open(self.0.join(id)).and_then(|mut f| f.write_all(secret.as_bytes())).map_err(io)
+        options
+            .open(self.0.join(id))
+            .and_then(|mut f| f.write_all(secret.as_bytes()))
+            .map_err(io)
     }
 
     fn get(&self, id: &str) -> Result<Option<String>, VaultError> {
@@ -99,7 +105,9 @@ impl Vault for FileVault {
 
     fn remove(&self, id: &str) -> Result<(), VaultError> {
         match std::fs::remove_file(self.0.join(id)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(VaultError::Backend(e.to_string())),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(VaultError::Backend(e.to_string()))
+            }
             _ => Ok(()),
         }
     }

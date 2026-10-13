@@ -12,7 +12,14 @@ pub fn account(id: &str, tags: &[&str], used_5h: Option<f64>) -> Account {
         enabled: true,
         health: Health::Ok,
         usage: used_5h.map(|p| Usage {
-            windows: [("5h".to_string(), Window { used_percent: p, resets_at: None })].into(),
+            windows: [(
+                "5h".to_string(),
+                Window {
+                    used_percent: p,
+                    resets_at: None,
+                },
+            )]
+            .into(),
             fetched_at: 0,
         }),
         login_expires_at: None,
@@ -41,6 +48,7 @@ pub fn ctx<'a>(session: &'a Session, accounts: &'a [Account]) -> Context<'a> {
         now: 1_000_000,
         weekday: "tue",
         hour: 10,
+        minute: 30,
         home: "/home/u",
         rr_cursor: None,
     }

@@ -82,7 +82,10 @@ mod tests {
             account("good", &[], Some(20.0)),
         ];
         let s = session("/w", Some("current"));
-        assert_eq!(ids(candidates(&target(""), &ctx(&s, &accounts), None)), ["good"]);
+        assert_eq!(
+            ids(candidates(&target(""), &ctx(&s, &accounts), None)),
+            ["good"]
+        );
     }
 
     #[test]
@@ -117,25 +120,48 @@ mod tests {
     fn tag_same_with_untagged_current_allows_any() {
         let accounts = [account("cur", &[], None), account("x", &["work"], None)];
         let s = session("/w", Some("cur"));
-        assert_eq!(ids(candidates(&target("tag = 'same'"), &ctx(&s, &accounts), None)), ["x"]);
+        assert_eq!(
+            ids(candidates(
+                &target("tag = 'same'"),
+                &ctx(&s, &accounts),
+                None
+            )),
+            ["x"]
+        );
     }
 
     #[test]
     fn ceiling_excludes_accounts_at_or_above_it() {
         let accounts = [account("a", &[], Some(90.0)), account("b", &[], Some(89.0))];
         let s = session("/w", None);
-        assert_eq!(ids(candidates(&target(""), &ctx(&s, &accounts), Some(("5h", 90.0)))), ["b"]);
+        assert_eq!(
+            ids(candidates(
+                &target(""),
+                &ctx(&s, &accounts),
+                Some(("5h", 90.0))
+            )),
+            ["b"]
+        );
     }
 
     #[test]
     fn most_quota_breaks_ties_by_id() {
         let accounts = [account("b", &[], Some(10.0)), account("a", &[], Some(10.0))];
-        assert_eq!(pick(Pick::MostQuota, accounts.iter().collect(), None).unwrap().id, "a");
+        assert_eq!(
+            pick(Pick::MostQuota, accounts.iter().collect(), None)
+                .unwrap()
+                .id,
+            "a"
+        );
     }
 
     #[test]
     fn round_robin_walks_ids_and_wraps() {
-        let accounts = [account("c", &[], None), account("a", &[], None), account("b", &[], None)];
+        let accounts = [
+            account("c", &[], None),
+            account("a", &[], None),
+            account("b", &[], None),
+        ];
         let all = || accounts.iter().collect::<Vec<_>>();
         assert_eq!(pick(Pick::RoundRobin, all(), None).unwrap().id, "a");
         assert_eq!(pick(Pick::RoundRobin, all(), Some("a")).unwrap().id, "b");
@@ -146,11 +172,27 @@ mod tests {
     fn soonest_reset_prefers_earliest_weekly_reset() {
         let mut late = account("late", &[], Some(10.0));
         let mut soon = account("soon", &[], Some(50.0));
-        let weekly = |at| Window { used_percent: 5.0, resets_at: Some(at) };
-        late.usage.as_mut().unwrap().windows.insert("7d".into(), weekly(900));
-        soon.usage.as_mut().unwrap().windows.insert("7d".into(), weekly(100));
+        let weekly = |at| Window {
+            used_percent: 5.0,
+            resets_at: Some(at),
+        };
+        late.usage
+            .as_mut()
+            .unwrap()
+            .windows
+            .insert("7d".into(), weekly(900));
+        soon.usage
+            .as_mut()
+            .unwrap()
+            .windows
+            .insert("7d".into(), weekly(100));
         let accounts = [late, soon, account("unknown", &[], None)];
-        assert_eq!(pick(Pick::SoonestReset, accounts.iter().collect(), None).unwrap().id, "soon");
+        assert_eq!(
+            pick(Pick::SoonestReset, accounts.iter().collect(), None)
+                .unwrap()
+                .id,
+            "soon"
+        );
     }
 
     #[test]

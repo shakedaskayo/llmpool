@@ -41,7 +41,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    const GOOD: &str = "# my rules\n[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {} }\n";
+    const GOOD: &str =
+        "# my rules\n[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {} }\n";
 
     #[test]
     fn missing_or_empty_file_is_an_empty_policy() {
@@ -79,7 +80,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policies.toml");
         save(&path, GOOD).unwrap();
-        let err = save(&path, "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n").unwrap_err();
+        let err = save(
+            &path,
+            "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n",
+        )
+        .unwrap_err();
         assert!(matches!(err, PolicyError::Invalid(_)));
         assert_eq!(fs::read_to_string(&path).unwrap(), GOOD);
         assert!(!dir.path().join("policies.toml.tmp").exists());
@@ -89,7 +94,11 @@ mod tests {
     fn load_rejects_an_invalid_file_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policies.toml");
-        fs::write(&path, "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n").unwrap();
+        fs::write(
+            &path,
+            "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n",
+        )
+        .unwrap();
         assert!(matches!(load(&path), Err(PolicyError::Invalid(_))));
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod http;
+mod transfer;
 
 use chrono::{Datelike, Local, Timelike};
 use llmpool_adapter_claude::profile::{Keychain, MacKeychain, NoKeychain, Profile, Secret};
@@ -46,7 +47,10 @@ pub struct ApiError {
 }
 
 fn fail(status: u16, message: impl Into<String>) -> ApiError {
-    ApiError { status, message: message.into() }
+    ApiError {
+        status,
+        message: message.into(),
+    }
 }
 
 impl<E: std::error::Error> From<E> for ApiError {
@@ -156,6 +160,9 @@ pub struct Daemon {
     home: PathBuf,
     vault: Box<dyn Vault>,
     keychain: Box<dyn Keychain>,
+    /// Whether to raise desktop notifications. Off unless asked for, so tests
+    /// and headless machines stay quiet.
+    notify: bool,
     inner: Mutex<Inner>,
 }
 
@@ -168,11 +175,82 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// An account by id, else by label, else by email, in that order, so a label
+/// that happens to equal another account's email cannot hide that account's id.
 fn find<'a>(accounts: &'a [Account], name: &str) -> Api<&'a Account> {
-    accounts
-        .iter()
-        .find(|a| a.id == name || a.label == name || a.email.as_deref() == Some(name))
+    let by = |pick: fn(&Account) -> Option<&str>| accounts.iter().find(|a| pick(a) == Some(name));
+    by(|a| Some(&a.id))
+        .or_else(|| by(|a| Some(&a.label)))
+        .or_else(|| by(|a| a.email.as_deref()))
         .ok_or_else(|| fail(404, format!("no account named `{name}`")))
+}
+
+/// A label must name exactly one account, or commands could act on the wrong one.
+fn label_is_free(accounts: &[Account], id: &str, label: &str) -> Api<()> {
+    let taken = accounts.iter().any(|a| {
+        a.id != id && (a.id == label || a.label == label || a.email.as_deref() == Some(label))
+    });
+    if taken || label.trim().is_empty() {
+        return Err(fail(
+            409,
+            format!("the name `{label}` is empty or already names another account"),
+        ));
+    }
+    Ok(())
+}
+
+/// When this machine started, in epoch seconds.
+fn boot_time() -> Option<i64> {
+    if cfg!(target_os = "macos") {
+        // "{ sec = 1791000000, usec = 0 } ..."
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.split("sec = ")
+            .nth(1)?
+            .split(',')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    } else {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        stat.lines()
+            .find_map(|l| l.strip_prefix("btime "))?
+            .trim()
+            .parse()
+            .ok()
+    }
+}
+
+/// A desktop notification. Never waited for and never an error: it is a
+/// courtesy on top of the message the session itself receives.
+fn os_notify(text: &str) {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("osascript");
+        // The text travels as an argument, never as script source.
+        c.args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 1 of argv) with title \"llmpool\"",
+            "-e",
+            "end run",
+            text,
+        ]);
+        c
+    } else {
+        let mut c = std::process::Command::new("notify-send");
+        c.args(["llmpool", text]);
+        c
+    };
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 fn same_login(account: &Account, email: &str, organization: Option<&str>) -> bool {
@@ -180,7 +258,12 @@ fn same_login(account: &Account, email: &str, organization: Option<&str>) -> boo
 }
 
 impl Daemon {
-    pub fn open(data_dir: &Path, home: &Path, vault: Box<dyn Vault>, keychain: Box<dyn Keychain>) -> Api<Self> {
+    pub fn open(
+        data_dir: &Path,
+        home: &Path,
+        vault: Box<dyn Vault>,
+        keychain: Box<dyn Keychain>,
+    ) -> Api<Self> {
         std::fs::create_dir_all(data_dir)?;
         let p = std::fs::read_to_string(data_dir.join("state.json"))
             .ok()
@@ -191,9 +274,38 @@ impl Daemon {
             home: home.to_path_buf(),
             vault,
             keychain,
-            inner: Mutex::new(Inner { store: Store::open(&data_dir.join("llmpool.db"))?, p, last_sync: 0 }),
+            notify: false,
+            inner: Mutex::new(Inner {
+                store: Store::open(&data_dir.join("llmpool.db"))?,
+                p,
+                last_sync: 0,
+            }),
         };
-        daemon.reap(&mut daemon.lock());
+        {
+            let mut g = daemon.lock();
+            // After a reboot no launched agent is still running, but its
+            // process id may have been given to something else.
+            let saved = std::fs::metadata(data_dir.join("state.json"))
+                .and_then(|m| m.modified())
+                .ok();
+            let saved = saved
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            if let (Some(boot), Some(saved)) = (boot_time(), saved) {
+                if saved < boot {
+                    let stale: Vec<String> =
+                        g.p.sessions
+                            .iter()
+                            .filter(|(_, m)| !m.native)
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                    for id in stale {
+                        daemon.end(&mut g, &id);
+                    }
+                }
+            }
+            daemon.reap(&mut g);
+        }
         Ok(daemon)
     }
 
@@ -206,13 +318,33 @@ impl Daemon {
             Some(_) => Box::new(FileVault(data.join("vault"))),
             None => Box::new(KeychainVault),
         };
-        let keychain: Box<dyn Keychain> =
-            if cfg!(target_os = "macos") && std::env::var_os("LLMPOOL_NO_CLAUDE_KEYCHAIN").is_none() {
-                Box::new(MacKeychain)
-            } else {
-                Box::new(NoKeychain)
-            };
-        Self::open(&data, &client::home(), vault, keychain)
+        let keychain: Box<dyn Keychain> = if cfg!(target_os = "macos")
+            && std::env::var_os("LLMPOOL_NO_CLAUDE_KEYCHAIN").is_none()
+        {
+            Box::new(MacKeychain)
+        } else {
+            Box::new(NoKeychain)
+        };
+        let mut daemon = Self::open(&data, &client::home(), vault, keychain)?;
+        daemon.notify = std::env::var_os("LLMPOOL_NO_NOTIFY").is_none();
+        Ok(daemon)
+    }
+
+    fn tell(&self, text: &str) {
+        if self.notify {
+            os_notify(text.strip_prefix("llmpool: ").unwrap_or(text));
+        }
+    }
+
+    /// Once a minute: scheduled rules, and the housekeeping that otherwise
+    /// only happens when something asks the daemon a question.
+    pub fn tick(&self) {
+        let mut g = self.lock();
+        self.reap(&mut g);
+        let ids: Vec<String> = g.p.sessions.keys().cloned().collect();
+        for id in ids {
+            self.react(&mut g, &id, Event::Tick);
+        }
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -220,7 +352,9 @@ impl Daemon {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn policy_path(&self) -> PathBuf {
@@ -241,7 +375,12 @@ impl Daemon {
     }
 
     fn log(&self, g: &mut Inner, kind: &str, session: Option<&str>, message: String) {
-        g.p.events.push_back(LogEvent { at: now(), kind: kind.into(), session: session.map(Into::into), message });
+        g.p.events.push_back(LogEvent {
+            at: now(),
+            kind: kind.into(),
+            session: session.map(Into::into),
+            message,
+        });
         while g.p.events.len() > MAX_EVENTS {
             g.p.events.pop_front();
         }
@@ -252,7 +391,9 @@ impl Daemon {
         let t = now();
         let mut accounts = g.store.list()?;
         for usage in accounts.iter_mut().filter_map(|a| a.usage.as_mut()) {
-            usage.windows.retain(|_, w| w.resets_at.is_none_or(|at| at > t));
+            usage
+                .windows
+                .retain(|_, w| w.resets_at.is_none_or(|at| at > t));
         }
         Ok(accounts)
     }
@@ -274,12 +415,20 @@ impl Daemon {
                 held.push(DEFAULT_STORE.to_string());
             }
         }
-        held.extend(g.p.stores.iter().filter(|(_, rec)| rec.account_id == account.id).map(|(id, _)| id.clone()));
+        held.extend(
+            g.p.stores
+                .iter()
+                .filter(|(_, rec)| rec.account_id == account.id)
+                .map(|(id, _)| id.clone()),
+        );
         held
     }
 
     fn secret_of(&self, id: &str) -> Api<Secret> {
-        let text = self.vault.get(id)?.ok_or_else(|| fail(409, "this account has no stored login; add it again"))?;
+        let text = self
+            .vault
+            .get(id)?
+            .ok_or_else(|| fail(409, "this account has no stored login; add it again"))?;
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -292,8 +441,12 @@ impl Daemon {
             return Ok(());
         };
         let email = secret.email().unwrap_or_default();
-        if let Some(account) = accounts.iter().find(|a| same_login(a, email, secret.organization())) {
-            self.vault.put(&account.id, &serde_json::to_string(&secret)?)?;
+        if let Some(account) = accounts
+            .iter()
+            .find(|a| same_login(a, email, secret.organization()))
+        {
+            self.vault
+                .put(&account.id, &serde_json::to_string(&secret)?)?;
         }
         Ok(())
     }
@@ -306,13 +459,12 @@ impl Daemon {
         let Ok(accounts) = self.accounts(g) else {
             return;
         };
-        let idle: Vec<String> = g
-            .p
-            .stores
-            .keys()
-            .filter(|id| !g.p.sessions.values().any(|s| s.store.as_ref() == Some(*id)))
-            .cloned()
-            .collect();
+        let idle: Vec<String> =
+            g.p.stores
+                .keys()
+                .filter(|id| !g.p.sessions.values().any(|s| s.store.as_ref() == Some(*id)))
+                .cloned()
+                .collect();
         for id in idle {
             let profile = g.p.stores[&id].profile.clone();
             let Ok(_locks) = lock::credentials(&profile.config_dir, BRIEF_LOCK) else {
@@ -347,7 +499,17 @@ impl Daemon {
     fn reap(&self, g: &mut Inner) {
         let t = now();
         let dead: Vec<String> =
-            g.p.sessions.iter().filter(|(_, m)| if m.native { t - m.last_seen > NATIVE_IDLE_SECS } else { !pid_alive(m.pid) }).map(|(id, _)| id.clone()).collect();
+            g.p.sessions
+                .iter()
+                .filter(|(_, m)| {
+                    if m.native {
+                        t - m.last_seen > NATIVE_IDLE_SECS
+                    } else {
+                        !pid_alive(m.pid)
+                    }
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
         for id in dead {
             self.end(g, &id);
         }
@@ -365,7 +527,12 @@ impl Daemon {
             self.sync_default_locked(g);
         }
         self.sweep(g);
-        self.log(g, "end", Some(sid), format!("session in {} ended", m.session.cwd));
+        self.log(
+            g,
+            "end",
+            Some(sid),
+            format!("session in {} ended", m.session.cwd),
+        );
         self.save(g);
     }
 
@@ -379,7 +546,11 @@ impl Daemon {
             .iter()
             .map(|a| {
                 let sessions: Vec<&String> =
-                    g.p.sessions.iter().filter(|(_, m)| m.session.account_id.as_ref() == Some(&a.id)).map(|(id, _)| id).collect();
+                    g.p.sessions
+                        .iter()
+                        .filter(|(_, m)| m.session.account_id.as_ref() == Some(&a.id))
+                        .map(|(id, _)| id)
+                        .collect();
                 let mut row = serde_json::to_value(a).unwrap_or_default();
                 row["sessions"] = json!(sessions);
                 row["is_default"] = json!(self.holders(&g, a).iter().any(|h| h == DEFAULT_STORE));
@@ -398,23 +569,42 @@ impl Daemon {
             None => self.default_profile(),
         };
         // Resolved, so `..` and links cannot dress one directory up as another.
-        let real = profile
-            .config_dir
-            .canonicalize()
-            .map_err(|_| fail(404, format!("no Claude profile at {}", profile.config_dir.display())))?;
-        if g.p.stores.values().any(|rec| rec.profile.config_dir.canonicalize().ok().as_ref() == Some(&real)) {
+        let real = profile.config_dir.canonicalize().map_err(|_| {
+            fail(
+                404,
+                format!("no Claude profile at {}", profile.config_dir.display()),
+            )
+        })?;
+        if g.p
+            .stores
+            .values()
+            .any(|rec| rec.profile.config_dir.canonicalize().ok().as_ref() == Some(&real))
+        {
             return Err(fail(400, "that directory is a running session's profile"));
         }
         let is_scratch = real.parent().map(Path::to_path_buf) == self.data_dir.canonicalize().ok()
-            && real.file_name().is_some_and(|name| name.to_string_lossy().starts_with("login-"));
+            && real
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("login-"));
         let secret = {
             let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
             profile.read(&*self.keychain)
         }
-        .ok_or_else(|| fail(404, format!("no Claude login found in {}", profile.config_dir.display())))?;
+        .ok_or_else(|| {
+            fail(
+                404,
+                format!("no Claude login found in {}", profile.config_dir.display()),
+            )
+        })?;
         let email = secret.email().unwrap_or_default().to_string();
         let organization = secret.organization().map(str::to_string);
-        let id = format!("claude-{}", short_hash(&format!("{email}|{}", organization.as_deref().unwrap_or(""))));
+        let id = format!(
+            "claude-{}",
+            short_hash(&format!(
+                "{email}|{}",
+                organization.as_deref().unwrap_or("")
+            ))
+        );
 
         let mut account = g.store.get(&id)?.unwrap_or_else(|| Account {
             id: id.clone(),
@@ -431,6 +621,7 @@ impl Daemon {
         });
         account.health = Health::Ok;
         if let Some(label) = req.label {
+            label_is_free(&g.store.list()?, &id, &label)?;
             account.label = label;
         }
         account.tags.extend(req.tags);
@@ -450,6 +641,7 @@ impl Daemon {
         let accounts = g.store.list()?;
         let mut account = find(&accounts, name)?.clone();
         if let Some(label) = req.label {
+            label_is_free(&accounts, &account.id, &label)?;
             account.label = label;
         }
         if let Some(tags) = req.tags {
@@ -466,12 +658,66 @@ impl Daemon {
         let g = self.lock();
         let accounts = g.store.list()?;
         let account = find(&accounts, name)?;
-        if g.p.sessions.values().any(|m| m.session.account_id.as_ref() == Some(&account.id)) {
-            return Err(fail(409, "a running session uses this account; end it or switch it first"));
+        if g.p
+            .sessions
+            .values()
+            .any(|m| m.session.account_id.as_ref() == Some(&account.id))
+        {
+            return Err(fail(
+                409,
+                "a running session uses this account; end it or switch it first",
+            ));
         }
         self.vault.remove(&account.id)?;
         g.store.remove(&account.id)?;
         Ok(json!({"removed": account.id}))
+    }
+
+    // ---- moving the pool between machines ---------------------------------
+
+    /// Every account with its login, encrypted with a passphrase. The result
+    /// is text, safe to store in a file; without the passphrase it is opaque.
+    pub fn export(&self, passphrase: &str) -> Api<Value> {
+        let g = self.lock();
+        let mut entries = Vec::new();
+        for mut account in g.store.list()? {
+            // Usage and health describe this machine's view, not the account.
+            account.usage = None;
+            let secret = self
+                .vault
+                .get(&account.id)?
+                .ok_or_else(|| fail(409, format!("{} has no stored login", account.label)))?;
+            entries.push(transfer::Entry { account, secret });
+        }
+        let bundle = transfer::seal(&entries, passphrase).map_err(|e| fail(400, e))?;
+        Ok(json!({"bundle": bundle, "accounts": entries.len()}))
+    }
+
+    /// Add the accounts of an exported bundle. Accounts already here are left
+    /// alone unless `replace` is set, and never while a session is using them.
+    pub fn import(&self, bundle: &str, passphrase: &str, replace: bool) -> Api<Value> {
+        let g = self.lock();
+        let entries = transfer::open(bundle, passphrase).map_err(|e| fail(400, e))?;
+        let (mut added, mut replaced, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+        for transfer::Entry { account, secret } in entries {
+            let exists = g.store.get(&account.id)?.is_some();
+            let in_use =
+                g.p.sessions
+                    .values()
+                    .any(|m| m.session.account_id.as_ref() == Some(&account.id));
+            if exists && (!replace || in_use) {
+                skipped.push(account.label);
+                continue;
+            }
+            self.vault.put(&account.id, &secret)?;
+            g.store.put(&account)?;
+            if exists {
+                replaced.push(account.label)
+            } else {
+                added.push(account.label)
+            }
+        }
+        Ok(json!({"added": added, "replaced": replaced, "skipped": skipped}))
     }
 
     // ---- sessions -------------------------------------------------------
@@ -480,22 +726,32 @@ impl Daemon {
         let mut g = self.lock();
         self.reap(&mut g);
         let accounts = self.accounts(&g)?;
-        let rows: Vec<Value> = g
-            .p
-            .sessions
-            .values()
-            .map(|m| {
-                let mut row = serde_json::to_value(m).unwrap_or_default();
-                let account = m.session.account_id.as_ref().and_then(|id| accounts.iter().find(|a| &a.id == id));
-                row["account_label"] = json!(account.map(|a| &a.label));
-                row["usage"] = json!(account.and_then(|a| a.usage.as_ref()));
-                row
-            })
-            .collect();
+        let rows: Vec<Value> =
+            g.p.sessions
+                .values()
+                .map(|m| {
+                    let mut row = serde_json::to_value(m).unwrap_or_default();
+                    let account = m
+                        .session
+                        .account_id
+                        .as_ref()
+                        .and_then(|id| accounts.iter().find(|a| &a.id == id));
+                    row["account_label"] = json!(account.map(|a| &a.label));
+                    row["usage"] = json!(account.and_then(|a| a.usage.as_ref()));
+                    row
+                })
+                .collect();
         Ok(json!(rows))
     }
 
-    fn decide(&self, g: &Inner, policy: &PolicyFile, event: Event, session: &Session, accounts: &[Account]) -> Decision {
+    fn decide(
+        &self,
+        g: &Inner,
+        policy: &PolicyFile,
+        event: Event,
+        session: &Session,
+        accounts: &[Account],
+    ) -> Decision {
         let local = Local::now();
         let home = self.home.to_string_lossy();
         engine::evaluate(
@@ -507,6 +763,7 @@ impl Daemon {
                 now: now(),
                 weekday: WEEKDAYS[local.weekday().num_days_from_monday() as usize],
                 hour: local.hour() as u8,
+                minute: local.minute() as u8,
                 home: &home,
                 rr_cursor: g.p.rr_cursor.as_deref(),
             },
@@ -538,18 +795,35 @@ impl Daemon {
         let chosen: Option<Account> = if let Some(name) = &req.account {
             Some(find(&accounts, name)?.clone())
         } else if let Some(tag) = &req.tag {
-            let target = Target { tag: Some(tag.clone()), ..Target::default() };
+            let target = Target {
+                tag: Some(tag.clone()),
+                ..Target::default()
+            };
             let policy = PolicyFile::default();
             let home = self.home.to_string_lossy();
-            let ctx = Context { session: &session, accounts: &accounts, now: now(), weekday: "mon", hour: 0, home: &home, rr_cursor: None };
+            let ctx = Context {
+                session: &session,
+                accounts: &accounts,
+                now: now(),
+                weekday: "mon",
+                hour: 0,
+                minute: 0,
+                home: &home,
+                rr_cursor: None,
+            };
             let _ = &policy;
             Some(
-                select::pick(Pick::MostQuota, select::candidates(&target, &ctx, None), None)
-                    .ok_or_else(|| fail(409, format!("no usable account is tagged `{tag}`")))?
-                    .clone(),
+                select::pick(
+                    Pick::MostQuota,
+                    select::candidates(&target, &ctx, None),
+                    None,
+                )
+                .ok_or_else(|| fail(409, format!("no usable account is tagged `{tag}`")))?
+                .clone(),
             )
         } else {
-            let policy = file::load(&self.policy_path()).map_err(|e| fail(400, format!("policy file: {e}")))?;
+            let policy = file::load(&self.policy_path())
+                .map_err(|e| fail(400, format!("policy file: {e}")))?;
             let decision = self.decide(&g, &policy, Event::SessionStart, &session, &accounts);
             rule = decision.rule;
             match decision.outcome {
@@ -558,7 +832,11 @@ impl Daemon {
                     accounts.iter().find(|a| a.id == id).cloned()
                 }
                 Outcome::Ask(ids) => {
-                    ask = accounts.iter().filter(|a| ids.contains(&a.id)).cloned().collect();
+                    ask = accounts
+                        .iter()
+                        .filter(|a| ids.contains(&a.id))
+                        .cloned()
+                        .collect();
                     None
                 }
                 _ => None,
@@ -600,7 +878,9 @@ impl Daemon {
         let account = find(&accounts, name)?.clone();
         match g.p.sessions.get(sid) {
             None => return Err(fail(404, "no such session")),
-            Some(m) if m.store.is_some() => return Err(fail(409, "session already has an account; use swap")),
+            Some(m) if m.store.is_some() => {
+                return Err(fail(409, "session already has an account; use swap"))
+            }
             Some(_) => {}
         }
         let env = self.attach(&mut g, sid, &account)?;
@@ -610,7 +890,10 @@ impl Daemon {
 
     fn attach(&self, g: &mut Inner, sid: &str, account: &Account) -> Api<BTreeMap<String, String>> {
         if !account.usable() {
-            return Err(fail(409, format!("{} is disabled or needs a new login", account.label)));
+            return Err(fail(
+                409,
+                format!("{} is disabled or needs a new login", account.label),
+            ));
         }
         let store_id = match self.holders(g, account).into_iter().next() {
             // Already live somewhere: join that profile rather than copy the login.
@@ -620,47 +903,81 @@ impl Daemon {
                 let profile = Profile::at(&self.data_dir.join("stores").join(&id));
                 profile.write(&*self.keychain, &self.secret_of(&account.id)?)?;
                 profile.link_shared(&self.default_profile())?;
-                g.p.stores.insert(id.clone(), StoreRec { profile, account_id: account.id.clone() });
+                g.p.stores.insert(
+                    id.clone(),
+                    StoreRec {
+                        profile,
+                        account_id: account.id.clone(),
+                    },
+                );
                 id
             }
         };
         let mut env = BTreeMap::from([("LLMPOOL_SESSION".to_string(), sid.to_string())]);
         if let Some(rec) = g.p.stores.get(&store_id) {
-            env.insert("CLAUDE_CONFIG_DIR".into(), rec.profile.config_dir.to_string_lossy().into_owned());
+            env.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                rec.profile.config_dir.to_string_lossy().into_owned(),
+            );
         }
         if let Some(m) = g.p.sessions.get_mut(sid) {
             m.store = Some(store_id);
             m.session.account_id = Some(account.id.clone());
         }
-        self.log(g, "assign", Some(sid), format!("session started as {}", account.label));
+        self.log(
+            g,
+            "assign",
+            Some(sid),
+            format!("session started as {}", account.label),
+        );
         Ok(env)
     }
 
     /// Change the login in a running session's profile. Every session sharing
     /// that profile moves with it.
     fn swap(&self, g: &mut Inner, sid: &str, to_id: &str, reason: &str) -> Api<()> {
-        let m = g.p.sessions.get(sid).cloned().ok_or_else(|| fail(404, "no such session"))?;
-        let store_id =
-            m.store.clone().ok_or_else(|| fail(409, "this session is not managed by llmpool; start it with `llmpool run`"))?;
+        let m =
+            g.p.sessions
+                .get(sid)
+                .cloned()
+                .ok_or_else(|| fail(404, "no such session"))?;
+        let store_id = m.store.clone().ok_or_else(|| {
+            fail(
+                409,
+                "this session is not managed by llmpool; start it with `llmpool run`",
+            )
+        })?;
         if m.session.account_id.as_deref() == Some(to_id) {
             return Err(fail(409, "the session already uses that account"));
         }
         let accounts = self.accounts(g)?;
         let to = find(&accounts, to_id)?;
         if !to.usable() {
-            return Err(fail(409, format!("{} is disabled or needs a new login", to.label)));
+            return Err(fail(
+                409,
+                format!("{} is disabled or needs a new login", to.label),
+            ));
         }
         if self.holders(g, to).iter().any(|held| *held != store_id) {
-            return Err(fail(409, format!("{} is in use by other sessions", to.label)));
+            return Err(fail(
+                409,
+                format!("{} is in use by other sessions", to.label),
+            ));
         }
-        let profile = self.profile_of(g, &store_id).ok_or_else(|| fail(500, "session profile is missing"))?;
+        let profile = self
+            .profile_of(g, &store_id)
+            .ok_or_else(|| fail(500, "session profile is missing"))?;
         let secret = self.secret_of(&to.id)?;
         {
             let _locks = lock::credentials(&profile.config_dir, LOCK_TIMEOUT)?;
             // What the profile holds now, which is not always what we put
             // there: the user can log it in to something else.
             let actual = profile.identity();
-            let holds = |a: &Account| actual.as_ref().is_some_and(|(email, org)| same_login(a, email, org.as_deref()));
+            let holds = |a: &Account| {
+                actual
+                    .as_ref()
+                    .is_some_and(|(email, org)| same_login(a, email, org.as_deref()))
+            };
             if actual.is_some() && !accounts.iter().any(holds) {
                 return Err(fail(
                     409,
@@ -678,8 +995,16 @@ impl Daemon {
             rec.account_id = to.id.clone();
         }
 
-        let from = m.session.account_id.as_ref().and_then(|id| accounts.iter().find(|a| &a.id == id));
-        let shared = if store_id == DEFAULT_STORE { " Every plain `claude` session shares this login and moved with it." } else { "" };
+        let from = m
+            .session
+            .account_id
+            .as_ref()
+            .and_then(|id| accounts.iter().find(|a| &a.id == id));
+        let shared = if store_id == DEFAULT_STORE {
+            " Every plain `claude` session shares this login and moved with it."
+        } else {
+            ""
+        };
         let text = format!(
             "llmpool: this session moved from {} to {} ({reason}). The switch takes effect within about a minute. \
              The first message on the new account rebuilds the prompt cache and costs more than usual.{shared}",
@@ -687,12 +1012,17 @@ impl Daemon {
             to.label,
         );
         let at = now();
-        for s in g.p.sessions.values_mut().filter(|s| s.store.as_ref() == Some(&store_id)) {
+        for s in
+            g.p.sessions
+                .values_mut()
+                .filter(|s| s.store.as_ref() == Some(&store_id))
+        {
             s.session.account_id = Some(to.id.clone());
             s.session.last_swap_at = Some(at);
             s.notices.push(text.clone());
             s.last_notice = Some(text.clone());
         }
+        self.tell(&format!("Switched to {}: {reason}", to.label));
         self.log(g, "swap", Some(sid), text);
         self.save(g);
         Ok(())
@@ -709,7 +1039,10 @@ impl Daemon {
     /// Point a session at its agent's process once that has started.
     pub fn set_pid(&self, sid: &str, pid: u32) -> Api<Value> {
         let mut g = self.lock();
-        g.p.sessions.get_mut(sid).ok_or_else(|| fail(404, "no such session"))?.pid = pid;
+        g.p.sessions
+            .get_mut(sid)
+            .ok_or_else(|| fail(404, "no such session"))?
+            .pid = pid;
         self.save(&g);
         Ok(json!({}))
     }
@@ -739,11 +1072,22 @@ impl Daemon {
             return;
         };
         // An account live in another profile cannot also be put in this one.
-        let free: Vec<Account> =
-            all.iter().filter(|a| self.holders(g, a).iter().all(|held| Some(held) == m.store.as_ref())).cloned().collect();
+        let free: Vec<Account> = all
+            .iter()
+            .filter(|a| {
+                self.holders(g, a)
+                    .iter()
+                    .all(|held| Some(held) == m.store.as_ref())
+            })
+            .cloned()
+            .collect();
         let decision = self.decide(g, &policy, event, &m.session, &free);
         let rule = decision.rule.clone().unwrap_or_default();
-        let label = |id: &String| all.iter().find(|a| &a.id == id).map_or(id.clone(), |a| a.label.clone());
+        let label = |id: &String| {
+            all.iter()
+                .find(|a| &a.id == id)
+                .map_or(id.clone(), |a| a.label.clone())
+        };
 
         let notice = match &decision.outcome {
             Outcome::Swap(to) => {
@@ -773,6 +1117,7 @@ impl Daemon {
                 fresh
             });
             if fresh {
+                self.tell(&text);
                 self.log(g, "notice", Some(sid), text);
             }
         }
@@ -790,16 +1135,26 @@ impl Daemon {
         }
         let agent_id = payload["session_id"].as_str()?;
         let t = now();
-        if let Some((id, m)) = g.p.sessions.iter_mut().find(|(_, m)| m.agent_session_id.as_deref() == Some(agent_id)) {
+        if let Some((id, m)) =
+            g.p.sessions
+                .iter_mut()
+                .find(|(_, m)| m.agent_session_id.as_deref() == Some(agent_id))
+        {
             m.last_seen = t;
             return Some(id.clone());
         }
         let accounts = self.accounts(g).ok()?;
         let (email, organization) = self.default_profile().identity()?;
-        let account = accounts.iter().find(|a| same_login(a, &email, organization.as_deref()))?.clone();
+        let account = accounts
+            .iter()
+            .find(|a| same_login(a, &email, organization.as_deref()))?
+            .clone();
         g.p.next += 1;
         let id = format!("s{}", g.p.next);
-        let cwd = payload["cwd"].as_str().or(payload["workspace"]["current_dir"].as_str()).unwrap_or_default();
+        let cwd = payload["cwd"]
+            .as_str()
+            .or(payload["workspace"]["current_dir"].as_str())
+            .unwrap_or_default();
         let session = Session {
             id: id.clone(),
             agent: "claude-code".into(),
@@ -824,7 +1179,15 @@ impl Daemon {
                 last_seen: t,
             },
         );
-        self.log(g, "adopt", Some(&id), format!("plain Claude Code session adopted, running as {}", account.label));
+        self.log(
+            g,
+            "adopt",
+            Some(&id),
+            format!(
+                "plain Claude Code session adopted, running as {}",
+                account.label
+            ),
+        );
         self.suggest(g, &id, &accounts, &account);
         self.save(g);
         Some(id)
@@ -837,13 +1200,24 @@ impl Daemon {
             return;
         };
         // Evaluated as a session with no account yet, as `llmpool run` would.
-        let fresh = Session { account_id: None, ..m.session.clone() };
+        let fresh = Session {
+            account_id: None,
+            ..m.session.clone()
+        };
         let decision = self.decide(g, &policy, Event::SessionStart, &fresh, accounts);
-        let label = |id: &String| accounts.iter().find(|a| &a.id == id).map_or(id.clone(), |a| a.label.clone());
+        let label = |id: &String| {
+            accounts
+                .iter()
+                .find(|a| &a.id == id)
+                .map_or(id.clone(), |a| a.label.clone())
+        };
         let wanted = match &decision.outcome {
             Outcome::Assign(id) if *id != current.id => label(id),
             Outcome::Ask(ids) if ids.iter().any(|id| *id != current.id) => {
-                format!("one of {}", ids.iter().map(label).collect::<Vec<_>>().join(", "))
+                format!(
+                    "one of {}",
+                    ids.iter().map(label).collect::<Vec<_>>().join(", ")
+                )
             }
             _ => return,
         };
@@ -877,7 +1251,12 @@ impl Daemon {
                     m.agent_session_id = payload["session_id"].as_str().map(str::to_string);
                 }
                 let source = payload["source"].as_str().unwrap_or("startup").to_string();
-                self.log(&mut g, "agent", Some(sid), format!("Claude Code reported in ({source})"));
+                self.log(
+                    &mut g,
+                    "agent",
+                    Some(sid),
+                    format!("Claude Code reported in ({source})"),
+                );
                 self.save(&g);
             }
             ("UserPromptSubmit", _) => {
@@ -898,7 +1277,23 @@ impl Daemon {
                 self.react(&mut g, sid, Event::CwdChanged);
             }
             ("StopFailure", "rate_limit") => self.react(&mut g, sid, Event::RateLimited),
-            ("StopFailure", "authentication_failed") => self.react(&mut g, sid, Event::AuthFailed),
+            ("StopFailure", "authentication_failed") => {
+                // The login is dead until someone signs in again; nothing
+                // should be moved onto it in the meantime.
+                let account = m
+                    .session
+                    .account_id
+                    .clone()
+                    .and_then(|id| g.store.get(&id).ok().flatten());
+                if let Some(mut account) = account {
+                    account.health = Health::ReloginRequired;
+                    let _ = g.store.put(&account);
+                    let text = format!("llmpool: {} needs a new login. Run `llmpool add claude` and sign in with it.", account.label);
+                    self.tell(&text);
+                    self.log(&mut g, "login", Some(sid), text);
+                }
+                self.react(&mut g, sid, Event::AuthFailed)
+            }
             _ => {}
         }
         json!({})
@@ -918,7 +1313,10 @@ impl Daemon {
         if let Some(model) = statusline::model(payload) {
             m.session.model = Some(model);
         }
-        let settled = m.session.last_swap_at.is_none_or(|at| t - at >= SETTLE_SECS);
+        let settled = m
+            .session
+            .last_swap_at
+            .is_none_or(|at| t - at >= SETTLE_SECS);
         let account_id = m.session.account_id.clone();
 
         let mut line = "llmpool".to_string();
@@ -931,7 +1329,11 @@ impl Daemon {
             }
             line = format!("llmpool: {}", account.label);
             for window in ["5h", "7d"] {
-                if account.usage.as_ref().is_some_and(|u| u.windows.contains_key(window)) {
+                if account
+                    .usage
+                    .as_ref()
+                    .is_some_and(|u| u.windows.contains_key(window))
+                {
                     line += &format!(" · {window} {:.0}%", account.used(window));
                 }
             }
@@ -962,7 +1364,8 @@ impl Daemon {
 
     /// TOML for a policy an editor holds as structured data.
     pub fn render_policy(&self, policy: Value) -> Api<Value> {
-        let policy: PolicyFile = serde_json::from_value(policy).map_err(|e| fail(400, e.to_string()))?;
+        let policy: PolicyFile =
+            serde_json::from_value(policy).map_err(|e| fail(400, e.to_string()))?;
         Ok(json!({"text": policy.to_toml()}))
     }
 
@@ -981,12 +1384,20 @@ impl Daemon {
         }
         .map_err(|e| fail(400, e.to_string()))?;
         let session = match &req.session_id {
-            Some(id) => g.p.sessions.get(id).ok_or_else(|| fail(404, "no such session"))?.session.clone(),
+            Some(id) => {
+                g.p.sessions
+                    .get(id)
+                    .ok_or_else(|| fail(404, "no such session"))?
+                    .session
+                    .clone()
+            }
             None => Session {
                 id: "preview".into(),
                 agent: "claude-code".into(),
                 provider: "claude".into(),
-                cwd: req.cwd.unwrap_or_else(|| self.home.to_string_lossy().into_owned()),
+                cwd: req
+                    .cwd
+                    .unwrap_or_else(|| self.home.to_string_lossy().into_owned()),
                 git_remote: None,
                 model: None,
                 account_id: None,
@@ -995,7 +1406,8 @@ impl Daemon {
         };
         let accounts = self.accounts(&g)?;
         let decision = self.decide(&g, &policy, req.event, &session, &accounts);
-        let labels: BTreeMap<&String, &String> = accounts.iter().map(|a| (&a.id, &a.label)).collect();
+        let labels: BTreeMap<&String, &String> =
+            accounts.iter().map(|a| (&a.id, &a.label)).collect();
         Ok(json!({"decision": decision, "labels": labels}))
     }
 

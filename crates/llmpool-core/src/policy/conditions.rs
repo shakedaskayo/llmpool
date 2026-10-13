@@ -2,11 +2,13 @@ use super::context::Context;
 use super::rule::Conditions;
 use globset::{Glob, GlobBuilder, GlobMatcher};
 
-const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+pub(crate) const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 /// Glob over free text such as a git remote or model name: `*` matches anything.
 fn text_glob(pattern: &str) -> Result<GlobMatcher, String> {
-    Glob::new(pattern).map(|g| g.compile_matcher()).map_err(|e| e.to_string())
+    Glob::new(pattern)
+        .map(|g| g.compile_matcher())
+        .map_err(|e| e.to_string())
 }
 
 /// Glob over a path: `*` stops at `/`, `**` crosses directories.
@@ -53,7 +55,9 @@ impl Conditions {
         }
         if let Some(t) = &self.time {
             if let Some(day) = t.days.iter().find(|d| !DAYS.contains(&d.as_str())) {
-                return Err(format!("`when.time.days`: unknown day `{day}`, use mon..sun"));
+                return Err(format!(
+                    "`when.time.days`: unknown day `{day}`, use mon..sun"
+                ));
             }
             if t.to_hour > 24 || t.from_hour >= t.to_hour {
                 return Err("`when.time`: need from_hour < to_hour <= 24".into());
@@ -65,9 +69,17 @@ impl Conditions {
     /// True when every condition that is set holds.
     pub fn hold(&self, ctx: &Context) -> bool {
         let s = ctx.session;
-        self.cwd.as_deref().is_none_or(|p| cwd_matches(p, &s.cwd, ctx.home))
-            && self.git_remote.as_deref().is_none_or(|p| text_matches(p, s.git_remote.as_deref()))
-            && self.model.as_deref().is_none_or(|p| text_matches(p, s.model.as_deref()))
+        self.cwd
+            .as_deref()
+            .is_none_or(|p| cwd_matches(p, &s.cwd, ctx.home))
+            && self
+                .git_remote
+                .as_deref()
+                .is_none_or(|p| text_matches(p, s.git_remote.as_deref()))
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|p| text_matches(p, s.model.as_deref()))
             && self
                 .account_tag
                 .as_ref()
@@ -106,7 +118,11 @@ mod tests {
             let s = session(cwd, None);
             assert!(c.hold(&ctx(&s, &[])), "{cwd} should match");
         }
-        for cwd in ["/home/u/work/acme-old", "/home/u/work", "/elsewhere/work/acme"] {
+        for cwd in [
+            "/home/u/work/acme-old",
+            "/home/u/work",
+            "/elsewhere/work/acme",
+        ] {
             let s = session(cwd, None);
             assert!(!c.hold(&ctx(&s, &[])), "{cwd} should not match");
         }
@@ -141,7 +157,7 @@ mod tests {
 
     #[test]
     fn time_window_uses_weekday_and_hour() {
-        // The fixture context is Tuesday, 10:00.
+        // The fixture context is Tuesday, 10:30.
         let s = session("/w", None);
         let c = ctx(&s, &[]);
         assert!(when("time = { days = ['mon', 'tue'], from_hour = 9, to_hour = 18 }").hold(&c));
@@ -164,6 +180,8 @@ mod tests {
         assert!(when("cwd = '['").check().is_err());
         assert!(when("time = { days = ['funday'] }").check().is_err());
         assert!(when("time = { to_hour = 30 }").check().is_err());
-        assert!(when("time = { from_hour = 18, to_hour = 9 }").check().is_err());
+        assert!(when("time = { from_hour = 18, to_hour = 9 }")
+            .check()
+            .is_err());
     }
 }

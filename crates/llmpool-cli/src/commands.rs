@@ -1,8 +1,8 @@
-use llmpool_daemon::client::{data_dir, home, Client};
 use crate::{AddAgent, Cli, Command, InstallAgent, PolicyCommand, UninstallAgent};
 use llmpool_adapter_claude::install;
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
+use llmpool_daemon::client::{data_dir, home, Client};
 use llmpool_daemon::{http, Daemon, NATIVE};
 use serde_json::{json, Value};
 use std::io::{IsTerminal, Read, Write};
@@ -55,15 +55,27 @@ fn connect() -> Result<Client, String> {
             return Ok(client);
         }
     }
-    Err(format!("the daemon did not start; see {}", data.join("daemon.log").display()))
+    Err(format!(
+        "the daemon did not start; see {}",
+        data.join("daemon.log").display()
+    ))
 }
 
 pub fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
-        Command::Add { agent: AddAgent::Claude { from_current, label, tags } } => add_claude(from_current, label, tags),
+        Command::Add {
+            agent:
+                AddAgent::Claude {
+                    from_current,
+                    label,
+                    tags,
+                },
+        } => add_claude(from_current, label, tags),
         Command::List { json } => list(json),
         Command::Tag { account, tags } => retag(&account, |set| set.extend(tags.iter().cloned())),
-        Command::Untag { account, tags } => retag(&account, |set| set.retain(|t| !tags.contains(t))),
+        Command::Untag { account, tags } => {
+            retag(&account, |set| set.retain(|t| !tags.contains(t)))
+        }
         Command::Enable { account } => patch(&account, json!({"enabled": true})),
         Command::Disable { account } => patch(&account, json!({"enabled": false})),
         Command::Remove { account } => {
@@ -73,12 +85,25 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Run { account, tag, args } => run_agent(account, tag, args),
         Command::Sessions { json } => sessions(json),
         Command::Switch { account, session } => switch(&account, session),
-        Command::Status { json, agent_session } => status(json, agent_session),
+        Command::Status {
+            json,
+            agent_session,
+        } => status(json, agent_session),
+        Command::Export { file } => export(&file),
+        Command::Import { file, replace } => import(&file, replace),
         Command::Policy { command } => done(policy(command)?),
-        Command::Install { agent: InstallAgent::Claude { shim } } => install_claude(shim),
-        Command::Uninstall { agent: UninstallAgent::Claude } => uninstall_claude(),
+        Command::Install {
+            agent: InstallAgent::Claude { shim },
+        } => install_claude(shim),
+        Command::Uninstall {
+            agent: UninstallAgent::Claude,
+        } => uninstall_claude(),
         Command::Daemon { stop } => daemon(stop),
-        Command::Hook { agent, event, argument } => Ok(hook(&agent, &event, argument.as_deref())),
+        Command::Hook {
+            agent,
+            event,
+            argument,
+        } => Ok(hook(&agent, &event, argument.as_deref())),
         Command::Statusline { agent } => Ok(statusline(&agent)),
     }
 }
@@ -92,7 +117,9 @@ fn done(message: String) -> Result<ExitCode, String> {
 fn encode(text: &str) -> String {
     text.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'@' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'@' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -117,7 +144,14 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> String {
         }
     }
     let line = |cells: Vec<String>| {
-        cells.iter().enumerate().map(|(i, c)| format!("{c:<w$}", w = widths[i])).collect::<Vec<_>>().join("  ").trim_end().to_string()
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_string()
     };
     let mut out = vec![line(header.iter().map(|h| h.to_string()).collect())];
     out.extend(rows.into_iter().map(line));
@@ -126,7 +160,11 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> String {
 
 // ---- accounts ---------------------------------------------------------------
 
-fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> Result<ExitCode, String> {
+fn add_claude(
+    from_current: bool,
+    label: Option<String>,
+    tags: Vec<String>,
+) -> Result<ExitCode, String> {
     let client = connect()?;
     let mut request = json!({"label": label, "tags": tags});
     if !from_current {
@@ -137,7 +175,9 @@ fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> R
              Log in with the account you want to add, then quit with /exit.\n\
              Do not use /logout: it would revoke the login you are adding.\n"
         );
-        let status = std::process::Command::new(agent_bin()).env("CLAUDE_CONFIG_DIR", &scratch).status();
+        let status = std::process::Command::new(agent_bin())
+            .env("CLAUDE_CONFIG_DIR", &scratch)
+            .status();
         if let Err(e) = status {
             let _ = std::fs::remove_dir_all(&scratch);
             return Err(format!("could not run `{}`: {e}", agent_bin()));
@@ -153,7 +193,10 @@ fn add_claude(from_current: bool, label: Option<String>, tags: Vec<String>) -> R
     }
     let account = captured?;
     eprintln!("{TERMS_NOTICE}");
-    done(format!("added {}", account["label"].as_str().unwrap_or_default()))
+    done(format!(
+        "added {}",
+        account["label"].as_str().unwrap_or_default()
+    ))
 }
 
 fn list(as_json: bool) -> Result<ExitCode, String> {
@@ -166,10 +209,21 @@ fn list(as_json: bool) -> Result<ExitCode, String> {
         .into_iter()
         .flatten()
         .map(|a| {
-            let tags: Vec<&str> = a["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let tags: Vec<&str> = a["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
             let state = match (a["enabled"].as_bool(), a["health"].as_str()) {
                 (Some(false), _) => "disabled".to_string(),
-                (_, Some("ok")) => if a["is_default"] == true { "ok (default login)".into() } else { "ok".into() },
+                (_, Some("ok")) => {
+                    if a["is_default"] == true {
+                        "ok (default login)".into()
+                    } else {
+                        "ok".into()
+                    }
+                }
                 (_, Some(other)) => other.replace('_', " "),
                 _ => String::new(),
             };
@@ -186,24 +240,47 @@ fn list(as_json: bool) -> Result<ExitCode, String> {
     if rows.is_empty() {
         return done("no accounts yet; add one with `llmpool add claude --from-current`".into());
     }
-    done(table(&["ACCOUNT", "TAGS", "5H", "7D", "STATE", "SESSIONS"], rows))
+    done(table(
+        &["ACCOUNT", "TAGS", "5H", "7D", "STATE", "SESSIONS"],
+        rows,
+    ))
 }
 
 fn patch(account: &str, body: Value) -> Result<ExitCode, String> {
-    let updated = connect()?.call("PATCH", &format!("/accounts/{}", encode(account)), Some(body))?;
-    done(format!("updated {}", updated["label"].as_str().unwrap_or(account)))
+    let updated = connect()?.call(
+        "PATCH",
+        &format!("/accounts/{}", encode(account)),
+        Some(body),
+    )?;
+    done(format!(
+        "updated {}",
+        updated["label"].as_str().unwrap_or(account)
+    ))
 }
 
-fn retag(account: &str, change: impl FnOnce(&mut std::collections::BTreeSet<String>)) -> Result<ExitCode, String> {
+fn retag(
+    account: &str,
+    change: impl FnOnce(&mut std::collections::BTreeSet<String>),
+) -> Result<ExitCode, String> {
     let client = connect()?;
     let accounts = client.call("GET", "/accounts", None)?;
     let current = accounts
         .as_array()
         .into_iter()
         .flatten()
-        .find(|a| [&a["id"], &a["label"], &a["email"]].iter().any(|v| v.as_str() == Some(account)))
+        .find(|a| {
+            [&a["id"], &a["label"], &a["email"]]
+                .iter()
+                .any(|v| v.as_str() == Some(account))
+        })
         .ok_or_else(|| format!("no account named `{account}`"))?;
-    let mut tags = current["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    let mut tags = current["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
     change(&mut tags);
     patch(account, json!({"tags": tags}))
 }
@@ -211,7 +288,12 @@ fn retag(account: &str, change: impl FnOnce(&mut std::collections::BTreeSet<Stri
 // ---- sessions ---------------------------------------------------------------
 
 fn git_remote(cwd: &Path) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(cwd).args(["config", "--get", "remote.origin.url"]).output().ok()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !url.is_empty()).then_some(url)
 }
@@ -223,17 +305,29 @@ fn choose(candidates: &[Value]) -> Option<String> {
     }
     eprintln!("llmpool: choose an account for this session");
     for (i, a) in candidates.iter().enumerate() {
-        eprintln!("  {}) {}  5h {}  7d {}", i + 1, a["label"].as_str().unwrap_or_default(), percent(a, "5h"), percent(a, "7d"));
+        eprintln!(
+            "  {}) {}  5h {}  7d {}",
+            i + 1,
+            a["label"].as_str().unwrap_or_default(),
+            percent(a, "5h"),
+            percent(a, "7d")
+        );
     }
     eprint!("number (Enter for your default login): ");
     let _ = std::io::stderr().flush();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).ok()?;
     let index: usize = line.trim().parse().ok()?;
-    candidates.get(index.checked_sub(1)?)?["id"].as_str().map(str::to_string)
+    candidates.get(index.checked_sub(1)?)?["id"]
+        .as_str()
+        .map(str::to_string)
 }
 
-fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) -> Result<ExitCode, String> {
+fn run_agent(
+    account: Option<String>,
+    tag: Option<String>,
+    args: Vec<String>,
+) -> Result<ExitCode, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let explicit = account.is_some() || tag.is_some();
     let request = json!({
@@ -246,7 +340,11 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
         let sid = reply["session_id"].as_str().unwrap_or_default().to_string();
         if let Some(candidates) = reply["ask"].as_array().filter(|c| !c.is_empty()) {
             if let Some(id) = choose(candidates) {
-                reply = client.call("POST", &format!("/sessions/{sid}/assign"), Some(json!({"account": id})))?;
+                reply = client.call(
+                    "POST",
+                    &format!("/sessions/{sid}/assign"),
+                    Some(json!({"account": id})),
+                )?;
             }
         }
         Ok((client, sid, reply))
@@ -264,10 +362,15 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
     command.args(args);
     match reply["account"]["label"].as_str() {
         Some(label) => {
-            let rule = reply["rule"].as_str().map(|r| format!(" (rule \"{r}\")")).unwrap_or_default();
+            let rule = reply["rule"]
+                .as_str()
+                .map(|r| format!(" (rule \"{r}\")"))
+                .unwrap_or_default();
             eprintln!("llmpool: running as {label}{rule}");
         }
-        None if client.is_some() => eprintln!("llmpool: no policy picked an account; using your default login"),
+        None if client.is_some() => {
+            eprintln!("llmpool: no policy picked an account; using your default login")
+        }
         None => {}
     }
     for (key, value) in reply["env"].as_object().into_iter().flatten() {
@@ -277,7 +380,11 @@ fn run_agent(account: Option<String>, tag: Option<String>, args: Vec<String>) ->
         // The session belongs to the agent from here on: if this launcher is
         // killed while the agent keeps running, the session must stay.
         if let Some(client) = &client {
-            let _ = client.call("POST", &format!("/sessions/{sid}/pid"), Some(json!({"pid": child.id()})));
+            let _ = client.call(
+                "POST",
+                &format!("/sessions/{sid}/pid"),
+                Some(json!({"pid": child.id()})),
+            );
         }
         child.wait()
     });
@@ -300,7 +407,10 @@ fn sessions(as_json: bool) -> Result<ExitCode, String> {
         .map(|s| {
             vec![
                 s["id"].as_str().unwrap_or_default().to_string(),
-                s["account_label"].as_str().unwrap_or("(default login)").to_string(),
+                s["account_label"]
+                    .as_str()
+                    .unwrap_or("(default login)")
+                    .to_string(),
                 percent(s, "5h"),
                 percent(s, "7d"),
                 s["cwd"].as_str().unwrap_or_default().to_string(),
@@ -310,7 +420,10 @@ fn sessions(as_json: bool) -> Result<ExitCode, String> {
     if rows.is_empty() {
         return done("no sessions; start one with `llmpool run`".into());
     }
-    done(table(&["SESSION", "ACCOUNT", "5H", "7D", "DIRECTORY"], rows))
+    done(table(
+        &["SESSION", "ACCOUNT", "5H", "7D", "DIRECTORY"],
+        rows,
+    ))
 }
 
 /// The session a command is about: named, else this terminal's, else the only one.
@@ -322,15 +435,23 @@ fn target_session(client: &Client, named: Option<String>) -> Result<String, Stri
     match sessions.as_array().map(Vec::as_slice) {
         Some([only]) => Ok(only["id"].as_str().unwrap_or_default().to_string()),
         Some([]) | None => Err("no sessions are running".into()),
-        Some(_) => Err("several sessions are running; pick one with --session (see `llmpool sessions`)".into()),
+        Some(_) => Err(
+            "several sessions are running; pick one with --session (see `llmpool sessions`)".into(),
+        ),
     }
 }
 
 fn switch(account: &str, session: Option<String>) -> Result<ExitCode, String> {
     let client = connect()?;
     let sid = target_session(&client, session)?;
-    client.call("POST", &format!("/sessions/{sid}/swap"), Some(json!({"account": account})))?;
-    done(format!("session {sid} now uses {account}; it takes effect within about a minute"))
+    client.call(
+        "POST",
+        &format!("/sessions/{sid}/swap"),
+        Some(json!({"account": account})),
+    )?;
+    done(format!(
+        "session {sid} now uses {account}; it takes effect within about a minute"
+    ))
 }
 
 fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, String> {
@@ -345,7 +466,10 @@ fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, Stri
         .flatten()
         .find(|s| match &current {
             Some(id) => s["id"].as_str() == Some(id),
-            None => agent_session.is_some() && s["agent_session_id"].as_str() == agent_session.as_deref(),
+            None => {
+                agent_session.is_some()
+                    && s["agent_session_id"].as_str() == agent_session.as_deref()
+            }
         })
         .cloned();
     if as_json {
@@ -361,6 +485,76 @@ fn status(as_json: bool, agent_session: Option<String>) -> Result<ExitCode, Stri
         )),
         None => list(false),
     }
+}
+
+// ---- export and import ------------------------------------------------------
+
+/// The passphrase for an export file: `LLMPOOL_PASSPHRASE` for scripts,
+/// otherwise typed without echo (twice when a new file is being made).
+fn passphrase(confirm: bool) -> Result<String, String> {
+    if let Ok(passphrase) = std::env::var("LLMPOOL_PASSPHRASE") {
+        return Ok(passphrase);
+    }
+    let first = rpassword::prompt_password("Passphrase: ")
+        .map_err(|e| format!("could not read a passphrase: {e}"))?;
+    if confirm && first != rpassword::prompt_password("Again: ").map_err(|e| e.to_string())? {
+        return Err("the two passphrases differ".into());
+    }
+    Ok(first)
+}
+
+fn export(file: &Path) -> Result<ExitCode, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let client = connect()?;
+    let exported = client.call(
+        "POST",
+        "/export",
+        Some(json!({"passphrase": passphrase(true)?})),
+    )?;
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(file)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    out.write_all(exported["bundle"].as_str().unwrap_or_default().as_bytes())
+        .map_err(|e| e.to_string())?;
+    eprintln!(
+        "note: a login works on one machine at a time. After importing this file elsewhere,\n\
+         remove the accounts here (`llmpool remove`), or the two copies will invalidate each other."
+    );
+    done(format!(
+        "exported {} account(s) to {}",
+        exported["accounts"],
+        file.display()
+    ))
+}
+
+fn import(file: &Path, replace: bool) -> Result<ExitCode, String> {
+    let bundle = read(file)?;
+    let client = connect()?;
+    let request = json!({"bundle": bundle, "passphrase": passphrase(false)?, "replace": replace});
+    let result = client.call("POST", "/import", Some(request))?;
+    let names = |key: &str| {
+        let list: Vec<&str> = result[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(", ")
+        }
+    };
+    done(format!(
+        "added: {}\nreplaced: {}\nleft as they were: {}",
+        names("added"),
+        names("replaced"),
+        names("skipped")
+    ))
 }
 
 // ---- policies ---------------------------------------------------------------
@@ -381,11 +575,13 @@ fn load_policy(path: &Path) -> Result<llmpool_core::policy::rule::PolicyFile, St
 
 fn policy(command: PolicyCommand) -> Result<String, String> {
     match command {
-        PolicyCommand::Check { file } => Ok(format!("ok: {} rule(s)", load_policy(&file)?.rules.len())),
+        PolicyCommand::Check { file } => {
+            Ok(format!("ok: {} rule(s)", load_policy(&file)?.rules.len()))
+        }
         PolicyCommand::DryRun { file, scenario } => {
             let policy = load_policy(&file)?;
-            let parsed: Scenario =
-                serde_json::from_str(&read(&scenario)?).map_err(|e| format!("{}: {e}", scenario.display()))?;
+            let parsed: Scenario = serde_json::from_str(&read(&scenario)?)
+                .map_err(|e| format!("{}: {e}", scenario.display()))?;
             serde_json::to_string_pretty(&parsed.decide(&policy)).map_err(|e| e.to_string())
         }
         PolicyCommand::Path => Ok(data_dir().join("policies.toml").display().to_string()),
@@ -395,7 +591,14 @@ fn policy(command: PolicyCommand) -> Result<String, String> {
 // ---- install ----------------------------------------------------------------
 
 fn claude_settings() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".claude")).join("settings.json")
+    // Inside a session llmpool started, CLAUDE_CONFIG_DIR is that session's
+    // own profile, whose settings are a link to the user's; write to the real one.
+    let custom = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|_| std::env::var_os("LLMPOOL_SESSION").is_none());
+    custom
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".claude"))
+        .join("settings.json")
 }
 
 fn previous_status_path() -> PathBuf {
@@ -405,12 +608,30 @@ fn previous_status_path() -> PathBuf {
 /// llmpool's Claude Code mod, compiled into the binary so installing needs
 /// nothing but the binary.
 const MOD_FILES: [(&str, &str); 6] = [
-    (".claude-plugin/plugin.json", include_str!("../../../claude-plugin/llmpool/.claude-plugin/plugin.json")),
-    ("hooks/hooks.json", include_str!("../../../claude-plugin/llmpool/hooks/hooks.json")),
-    ("hooks/register.tsx", include_str!("../../../claude-plugin/llmpool/hooks/register.tsx")),
-    ("hooks/view.ts", include_str!("../../../claude-plugin/llmpool/hooks/view.ts")),
-    ("hooks/view.test.ts", include_str!("../../../claude-plugin/llmpool/hooks/view.test.ts")),
-    ("types/index.d.ts", include_str!("../../../claude-plugin/llmpool/types/index.d.ts")),
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("../../../claude-plugin/llmpool/.claude-plugin/plugin.json"),
+    ),
+    (
+        "hooks/hooks.json",
+        include_str!("../../../claude-plugin/llmpool/hooks/hooks.json"),
+    ),
+    (
+        "hooks/register.tsx",
+        include_str!("../../../claude-plugin/llmpool/hooks/register.tsx"),
+    ),
+    (
+        "hooks/view.ts",
+        include_str!("../../../claude-plugin/llmpool/hooks/view.ts"),
+    ),
+    (
+        "hooks/view.test.ts",
+        include_str!("../../../claude-plugin/llmpool/hooks/view.test.ts"),
+    ),
+    (
+        "types/index.d.ts",
+        include_str!("../../../claude-plugin/llmpool/types/index.d.ts"),
+    ),
 ];
 
 fn mod_dir() -> PathBuf {
@@ -420,7 +641,10 @@ fn mod_dir() -> PathBuf {
 /// Write the mod, pointing it at this binary.
 fn write_mod(dir: &Path, exe: &Path) -> std::io::Result<()> {
     // The path lands inside a single-quoted TypeScript string.
-    let exe = exe.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'");
+    let exe = exe
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
     for (name, text) in MOD_FILES {
         let path = dir.join(name);
         std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
@@ -442,7 +666,12 @@ fn shell_rc() -> Result<PathBuf, String> {
 fn without_shim(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let begin = lines.iter().position(|l| l.trim() == SHIM_BEGIN);
-    let end = begin.and_then(|b| lines[b..].iter().position(|l| l.trim() == SHIM_END).map(|e| b + e));
+    let end = begin.and_then(|b| {
+        lines[b..]
+            .iter()
+            .position(|l| l.trim() == SHIM_END)
+            .map(|e| b + e)
+    });
     // A begin marker with no end is not our block; touching it could eat the
     // rest of someone's rc file.
     let (Some(begin), Some(end)) = (begin, end) else {
@@ -462,8 +691,17 @@ fn install_claude(shim: bool) -> Result<ExitCode, String> {
     let settings = claude_settings();
     std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
     write_mod(&mod_dir(), &exe).map_err(|e| e.to_string())?;
-    let changed = install::install(&settings, &exe, &previous_status_path(), &mod_dir()).map_err(|e| e.to_string())?;
-    println!("{} {}", if changed { "updated" } else { "already installed in" }, settings.display());
+    let changed = install::install(&settings, &exe, &previous_status_path(), &mod_dir())
+        .map_err(|e| e.to_string())?;
+    println!(
+        "{} {}",
+        if changed {
+            "updated"
+        } else {
+            "already installed in"
+        },
+        settings.display()
+    );
     println!("installed the llmpool mod; in Claude Code run /llmpool to see accounts and switch");
     if shim {
         let rc = shell_rc()?;
@@ -471,16 +709,28 @@ fn install_claude(shim: bool) -> Result<ExitCode, String> {
         let exe = exe.to_string_lossy().replace('\'', "'\\''");
         let block = format!("{SHIM_BEGIN}\nclaude() {{ '{exe}' run -- \"$@\"; }}\n{SHIM_END}\n");
         std::fs::write(&rc, text + &block).map_err(|e| format!("{}: {e}", rc.display()))?;
-        println!("added a `claude` function to {}; open a new terminal to use it", rc.display());
+        println!(
+            "added a `claude` function to {}; open a new terminal to use it",
+            rc.display()
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn uninstall_claude() -> Result<ExitCode, String> {
     let settings = claude_settings();
-    let changed = install::uninstall(&settings, &previous_status_path(), &mod_dir()).map_err(|e| e.to_string())?;
+    let changed = install::uninstall(&settings, &previous_status_path(), &mod_dir())
+        .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(data_dir().join("claude-plugin"));
-    println!("{} {}", if changed { "restored" } else { "nothing to remove from" }, settings.display());
+    println!(
+        "{} {}",
+        if changed {
+            "restored"
+        } else {
+            "nothing to remove from"
+        },
+        settings.display()
+    );
     if let Ok(rc) = shell_rc() {
         if let Ok(text) = std::fs::read_to_string(&rc) {
             let cleaned = without_shim(&text);
@@ -499,7 +749,9 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     let existing = Client::existing(Duration::from_secs(5));
     if stop {
         return match existing {
-            Some(client) => client.call("POST", "/shutdown", None).and_then(|_| done("daemon stopped".into())),
+            Some(client) => client
+                .call("POST", "/shutdown", None)
+                .and_then(|_| done("daemon stopped".into())),
             None => done("daemon is not running".into()),
         };
     }
@@ -509,7 +761,9 @@ fn daemon(stop: bool) -> Result<ExitCode, String> {
     // Taken before anything is opened: a second daemon must not touch state.
     let lock = http::instance_lock(&data_dir()).map_err(|e| e.to_string())?;
     let daemon = Daemon::open_default().map_err(|e| e.message)?;
-    http::start(Arc::new(daemon), lock).map_err(|e| e.to_string())?.wait();
+    http::start(Arc::new(daemon), lock)
+        .map_err(|e| e.to_string())?
+        .wait();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -533,7 +787,11 @@ fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
     let sid = std::env::var("LLMPOOL_SESSION").unwrap_or_else(|_| NATIVE.to_string());
     // A session starting is the one moment worth waiting for the daemon to
     // come up; every other hook only talks to one that is already there.
-    let client = if event == "SessionStart" { connect().ok() } else { Client::existing(Duration::from_secs(2)) };
+    let client = if event == "SessionStart" {
+        connect().ok()
+    } else {
+        Client::existing(Duration::from_secs(2))
+    };
     let Some(client) = client else {
         return ExitCode::SUCCESS;
     };
@@ -566,7 +824,13 @@ fn statusline(agent: &str) -> ExitCode {
         }
     }
     let previous = install::previous_status_command(&previous_status_path()).and_then(|command| {
-        let mut child = std::process::Command::new("sh").arg("-c").arg(command).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?;
         // A command that never reads its input closes the pipe; that is fine.
         let _ = child.stdin.take()?.write_all(input.as_bytes());
         let out = child.wait_with_output().ok()?;
@@ -585,7 +849,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    const POLICY: &str = "[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {}, notify = true }\n";
+    const POLICY: &str =
+        "[[rule]]\nname = 'rl'\non = 'rate_limited'\ndo = { swap = {}, notify = true }\n";
 
     const SCENARIO: &str = r#"{
       "event": "rate_limited",
@@ -611,16 +876,26 @@ mod tests {
     fn check_accepts_a_valid_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "p.toml", POLICY);
-        assert_eq!(policy(PolicyCommand::Check { file }).unwrap(), "ok: 1 rule(s)");
+        assert_eq!(
+            policy(PolicyCommand::Check { file }).unwrap(),
+            "ok: 1 rule(s)"
+        );
     }
 
     #[test]
     fn check_reports_invalid_rules_and_missing_files() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "bad.toml", "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n");
+        let file = write(
+            dir.path(),
+            "bad.toml",
+            "[[rule]]\nname = 'x'\non = 'moon_phase'\ndo = { hold = true }\n",
+        );
         let err = policy(PolicyCommand::Check { file }).unwrap_err();
         assert!(err.contains("moon_phase"), "{err}");
-        let err = policy(PolicyCommand::Check { file: dir.path().join("nope.toml") }).unwrap_err();
+        let err = policy(PolicyCommand::Check {
+            file: dir.path().join("nope.toml"),
+        })
+        .unwrap_err();
         assert!(err.contains("no such file"), "{err}");
     }
 
@@ -647,7 +922,8 @@ mod tests {
 
     #[test]
     fn shim_block_is_removed_cleanly_and_only_it() {
-        let rc = format!("export A=1\n{SHIM_BEGIN}\nclaude() {{ x; }}\n{SHIM_END}\nalias k=kubectl\n");
+        let rc =
+            format!("export A=1\n{SHIM_BEGIN}\nclaude() {{ x; }}\n{SHIM_END}\nalias k=kubectl\n");
         assert_eq!(without_shim(&rc), "export A=1\nalias k=kubectl\n");
         assert_eq!(without_shim("export A=1\n"), "export A=1\n");
         assert_eq!(without_shim("export A=1"), "export A=1");
@@ -661,7 +937,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_mod(dir.path(), Path::new("/opt/it's/llmpool")).unwrap();
         let module = fs::read_to_string(dir.path().join("hooks/register.tsx")).unwrap();
-        assert!(module.contains(r"const INSTALLED = '/opt/it\'s/llmpool'"), "binary path not filled in");
+        assert!(
+            module.contains(r"const INSTALLED = '/opt/it\'s/llmpool'"),
+            "binary path not filled in"
+        );
         assert!(!module.contains("__LLMPOOL_BIN__"));
         assert!(dir.path().join(".claude-plugin/plugin.json").exists());
     }

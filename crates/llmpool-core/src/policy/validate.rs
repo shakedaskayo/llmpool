@@ -13,7 +13,9 @@ pub fn validate(policy: &PolicyFile) -> Vec<String> {
     }
 
     for (index, rule) in policy.rules.iter().enumerate() {
-        let mut fail = |message: String| errors.push(format!("rule {} ({:?}): {message}", index + 1, rule.name));
+        let mut fail = |message: String| {
+            errors.push(format!("rule {} ({:?}): {message}", index + 1, rule.name))
+        };
 
         match triggers::find(&rule.on.kind) {
             None => fail(format!("unknown trigger `{}`", rule.on.kind)),
@@ -38,7 +40,10 @@ pub fn validate(policy: &PolicyFile) -> Vec<String> {
         if action.assign.is_some() && rule.on.kind != "session_start" {
             fail("`assign` is only valid on `session_start`; use `swap`".into());
         }
-        if targets.iter().any(|t| t.as_ref().is_some_and(|t| t.account.is_some() && t.tag.is_some())) {
+        if targets.iter().any(|t| {
+            t.as_ref()
+                .is_some_and(|t| t.account.is_some() && t.tag.is_some())
+        }) {
             fail("give `account` or `tag`, not both".into());
         }
     }
@@ -81,13 +86,25 @@ mod tests {
     #[test]
     fn action_must_be_exactly_one_thing() {
         assert_eq!(errors(&rule("on = 'rate_limited'\ndo = {}")).len(), 1);
-        assert_eq!(errors(&rule("on = 'rate_limited'\ndo = { swap = {}, hold = true }")).len(), 1);
-        assert_eq!(errors(&rule("on = 'rate_limited'\ndo = { swap = {}, ask = {} }")).len(), 1);
+        assert_eq!(
+            errors(&rule(
+                "on = 'rate_limited'\ndo = { swap = {}, hold = true }"
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            errors(&rule("on = 'rate_limited'\ndo = { swap = {}, ask = {} }")).len(),
+            1
+        );
     }
 
     #[test]
     fn assign_only_on_session_start() {
-        assert_eq!(errors(&rule("on = 'rate_limited'\ndo = { assign = {} }")).len(), 1);
+        assert_eq!(
+            errors(&rule("on = 'rate_limited'\ndo = { assign = {} }")).len(),
+            1
+        );
         assert!(errors(&rule("on = 'session_start'\ndo = { assign = {} }")).is_empty());
     }
 
@@ -99,7 +116,16 @@ mod tests {
 
     #[test]
     fn bad_condition_and_settings_are_reported() {
-        assert_eq!(errors(&rule("on = 'rate_limited'\nwhen = { cwd = '[' }\ndo = { hold = true }")).len(), 1);
-        assert_eq!(errors("[settings]\ncooldown_secs = -1\nmargin_points = 500\n").len(), 2);
+        assert_eq!(
+            errors(&rule(
+                "on = 'rate_limited'\nwhen = { cwd = '[' }\ndo = { hold = true }"
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            errors("[settings]\ncooldown_secs = -1\nmargin_points = 500\n").len(),
+            2
+        );
     }
 }
