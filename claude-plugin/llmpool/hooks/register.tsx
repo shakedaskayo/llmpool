@@ -1,15 +1,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Snapshot } from '../types'
-import { bar, peak, percentText, resetsIn, statusText, toSnapshot } from './view'
+import type { Row, Snapshot } from '../types'
+import {
+  bar,
+  best,
+  fullest,
+  isUsable,
+  level,
+  peak,
+  percentText,
+  resetsIn,
+  stateMark,
+  statusText,
+  toSnapshot,
+} from './view'
 
 // `llmpool install claude` replaces this with the installed binary's path.
 const INSTALLED = '__LLMPOOL_BIN__'
 const BIN = INSTALLED.startsWith('__') ? 'llmpool' : INSTALLED
 
 const PANE = 'llmpool'
-const TITLE = 'llmpool'
+const TITLE = 'llmpool · accounts'
 const REFRESH_MS = 15000
 /** Usage at which the band above the prompt appears. */
 const WARN_AT = 80
@@ -17,9 +29,6 @@ const WARN_AT = 80
 const EMPTY: Snapshot = { session: null, rows: [], others: [], error: null }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
 
-// Claude Code's id for this session, which is how llmpool finds a session it
-// did not launch. Set when the session starts.
-let agentSession = ''
 let isAnnounced = false
 
 const llmpool = ($: EngineInterface, args: string[]) => $.process.run([BIN, ...args], { timeoutMs: 8000 })
@@ -27,7 +36,9 @@ const llmpool = ($: EngineInterface, args: string[]) => $.process.run([BIN, ...a
 const refresh = async ($: EngineInterface) => {
   let next: Snapshot
   try {
-    const ran = await llmpool($, ['status', '--json', '--agent-session', agentSession])
+    // Claude Code's own id for this session is how llmpool finds a session it
+    // did not launch. Asked each time: it changes on /clear and on resume.
+    const ran = await llmpool($, ['status', '--json', '--agent-session', await $.session.id()])
     next =
       ran.exitCode === 0
         ? toSnapshot(JSON.parse(ran.stdout))
@@ -44,11 +55,17 @@ const refresh = async ($: EngineInterface) => {
   }
 }
 
-const use = async ($: EngineInterface, session: string, id: string, label: string) => {
-  const ran = await llmpool($, ['switch', id, '--session', session])
-  $.ui.toast(ran.exitCode === 0 ? `Switching to ${label}; takes effect within a minute` : ran.stderr.trim())
+const use = async ($: EngineInterface, session: string, row: Row) => {
+  const ran = await llmpool($, ['switch', row.id, '--session', session])
+  $.ui.toast(
+    ran.exitCode === 0
+      ? `Switching to ${row.label}. It takes effect within a minute.`
+      : `Could not switch: ${ran.stderr.replace(/^llmpool: /, '').trim()}`,
+  )
   await refresh($)
 }
+
+const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE })
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -56,7 +73,6 @@ export const register: Register = on => {
       name: 'llmpool',
       description: 'Show llmpool accounts and usage, and switch this session to another account',
     })
-    agentSession = e.session_id
     void refresh($)
     $.clock.every(REFRESH_MS, () => refresh($))
 
@@ -65,9 +81,9 @@ export const register: Register = on => {
 
   on('command.run', { command: 'llmpool' }, async $ => {
     await refresh($)
-    await $.ui.open({ id: PANE, title: TITLE })
+    await openPane($)
 
-    return { text: 'llmpool pane opened.' }
+    return { text: 'llmpool accounts pane opened.' }
   })
 
   // Usage moves when a turn ends; show it without waiting for the timer.
@@ -77,6 +93,8 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A band only when the current account is running out, with the way out on
+  // it: one press to the account that has the most room.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const snap = await read($, snapshot)
     const row = snap.rows.find(r => r.isCurrent)
@@ -84,13 +102,21 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Button, Text } = $.ui.resolve(e)
+    const full = fullest(row)
+    const tone = level(full.percent)
+    const reset = resetsIn(full.resetAt, await $.clock.now())
+    const target = snap.session === null ? undefined : best(snap)
 
     return (
-      <Box>
-        <Text color="yellow">
-          llmpool: {row.label} is at {Math.round(peak(row))}% of its limit{' '}
+      <Box gap={1}>
+        <Text color={tone.color} bold>
+          ⚠ {row.label}: {Math.round(full.percent)}% of the {full.name} limit
         </Text>
-        <Button key="open" label="Accounts" onPress={() => void $.ui.open({ id: PANE, title: TITLE })} />
+        <Text dimColor>{reset}</Text>
+        {target !== undefined && (
+          <Button key="band-switch" label={`Switch to ${target.label}`} onPress={() => use($, snap.session ?? '', target)} />
+        )}
+        <Button key="band-open" label="Accounts" onPress={() => void openPane($)} />
       </Box>
     )
   })
@@ -99,58 +125,120 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const snap = await read($, snapshot)
     const now = await $.clock.now()
+    const canSwitch = snap.session !== null
+
+    const meter = (name: string, percent: number | null, resetAt: number | null) => {
+      const tone = level(percent)
+
+      return (
+        <Box gap={1}>
+          <Text dimColor>{name}</Text>
+          <Text color={tone.color}>{bar(percent)}</Text>
+          <Text color={tone.color} bold>
+            {percentText(percent)}
+          </Text>
+          <Text color={tone.color}>{tone.word}</Text>
+          <Text dimColor>{resetsIn(resetAt, now)}</Text>
+        </Box>
+      )
+    }
+
+    // Digits switch: the first nine accounts that can be switched to.
+    const hotkeys = new Map<string, string>()
+    for (const row of snap.rows.filter(r => !r.isCurrent && isUsable(r)).slice(0, 9)) {
+      hotkeys.set(row.id, String(hotkeys.size + 1))
+    }
+
+    const card = (row: Row) => {
+      const mark = stateMark(row)
+      const usable = isUsable(row)
+
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Box gap={1}>
+            <Text color={row.isCurrent ? 'success' : usable ? 'text' : 'warning'} bold={row.isCurrent}>
+              {mark.icon} {row.label}
+            </Text>
+            {mark.text !== '' && <Text color={row.isCurrent ? 'success' : 'warning'}>{mark.text}</Text>}
+            {row.tags.length > 0 && <Text dimColor>{row.tags.map(tag => `#${tag}`).join(' ')}</Text>}
+            {row.sessions > 0 && !row.isCurrent && (
+              <Text dimColor>
+                in use by {row.sessions} session{row.sessions > 1 ? 's' : ''}
+              </Text>
+            )}
+          </Box>
+          {(usable || row.isCurrent) && (
+            <Box flexDirection="column" marginLeft={2}>
+              {meter('5h', row.h5, row.reset5)}
+              {meter('7d', row.d7, row.reset7)}
+              {canSwitch && hotkeys.has(row.id) && (
+                <Button
+                  key={`use-${row.id}`}
+                  plain
+                  hotkey={hotkeys.get(row.id)}
+                  label={`Switch this session to ${row.label}`}
+                  onPress={() => use($, snap.session ?? '', row)}
+                />
+              )}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+
+    if (snap.error !== null) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color="error" bold>
+            ⚠ llmpool is not answering
+          </Text>
+          <Text>{snap.error}</Text>
+          <Text dimColor>Check that `llmpool list` works in a terminal, then press r.</Text>
+          <Button key="refresh" plain hotkey="r" label="Try again" onPress={() => refresh($)} />
+        </Box>
+      )
+    }
+
+    if (snap.rows.length === 0) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text bold>No accounts in the pool yet</Text>
+          <Text>Add the login this Claude Code uses now:</Text>
+          <Text color="suggestion">  llmpool add claude --from-current</Text>
+          <Text>Add another account (opens a login in a scratch profile):</Text>
+          <Text color="suggestion">  llmpool add claude</Text>
+          <Button key="refresh" plain hotkey="r" label="Refresh" onPress={() => refresh($)} />
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column">
-        {snap.error !== null && <Text color="red">{snap.error}</Text>}
-        {snap.error === null && snap.session === null && (
-          <Text dimColor>llmpool does not manage this session: its login is not in the pool. Add it with `llmpool add claude --from-current`.</Text>
+        {!canSwitch && (
+          <Text color="warning">
+            ⚠ This session's login is not in the pool, so it cannot be switched here. Add it with `llmpool add claude
+            --from-current`.
+          </Text>
         )}
-        {snap.error === null && snap.rows.length === 0 && (
-          <Text dimColor>No accounts yet. Add one with `llmpool add claude --from-current`.</Text>
-        )}
-        {snap.rows.map(row => (
-          <Box flexDirection="column" marginTop={1}>
-            <Box>
-              <Text bold={row.isCurrent}>
-                {row.isCurrent ? '● ' : '  '}
-                {row.label}
-              </Text>
-              <Text dimColor>
-                {row.tags.length > 0 ? `  [${row.tags.join(', ')}]` : ''}
-                {row.state !== 'ok' ? `  ${row.state}` : ''}
-                {row.sessions > 0 ? `  ${row.sessions} session${row.sessions > 1 ? 's' : ''}` : ''}
-                {'  '}
-              </Text>
-              {snap.session !== null && !row.isCurrent && row.state === 'ok' && (
-                <Button key={`use-${row.id}`} label="Switch" onPress={() => use($, snap.session ?? '', row.id, row.label)} />
-              )}
-            </Box>
-            <Text>
-              {'  5h '}
-              {bar(row.h5)}
-              {percentText(row.h5)} <Text dimColor>{resetsIn(row.reset5, now)}</Text>
-            </Text>
-            <Text>
-              {'  7d '}
-              {bar(row.d7)}
-              {percentText(row.d7)} <Text dimColor>{resetsIn(row.reset7, now)}</Text>
-            </Text>
-          </Box>
-        ))}
+        {snap.rows.map(card)}
         {snap.others.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>Other sessions</Text>
-            {snap.others.map(s => (
-              <Text dimColor>
-                {'  '}
-                {s.id} {s.label} {s.cwd}
-              </Text>
+            <Text dimColor bold>
+              Other sessions ({snap.others.length})
+            </Text>
+            {snap.others.slice(0, 6).map(s => (
+              <Box gap={1} marginLeft={2}>
+                <Text dimColor>{s.label}</Text>
+                <Text dimColor wrap="truncate-start">
+                  {s.cwd}
+                </Text>
+              </Box>
             ))}
           </Box>
         )}
-        <Box marginTop={1}>
-          <Button key="refresh" label="Refresh" onPress={() => refresh($)} />
+        <Box marginTop={1} gap={2}>
+          <Button key="refresh" plain hotkey="r" label="Refresh" onPress={() => refresh($)} />
+          {hotkeys.size > 0 && canSwitch && <Text dimColor>Press a number to switch.</Text>}
         </Box>
       </Box>
     )
