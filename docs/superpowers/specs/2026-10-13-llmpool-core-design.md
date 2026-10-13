@@ -42,6 +42,23 @@ Out of this spec, each a later spec:
 - Windows and Linux packaging.
 - Packaging as a Claude Code plugin.
 
+## Requirements recorded for the team server spec
+
+Not designed here; captured so the later spec starts from them.
+
+- Policies can be inherited from the server. Inherited rules are evaluated
+  before local ones and cannot be edited or disabled on the client.
+- Accounts provided by the server cannot be edited, removed or exported on the
+  client.
+- A client on a user-owned machine can always bypass a local daemon, so
+  inherited policy is enforced only where the server controls what the client
+  receives: the server hands out short-lived credentials (leases) rather than
+  long-lived ones, and stops handing them out to a client that is out of
+  policy.
+- A credential the agent reads directly is readable by the user who runs the
+  agent. Only credentials served through a helper command or a proxy can be
+  kept from the user, and of those only short-lived ones limit the damage.
+
 ## Approach
 
 Native-path broker. The agent keeps its own login path and talks to the
