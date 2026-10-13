@@ -76,7 +76,8 @@ enum Command {
     },
     /// Save every account and its login to one passphrase-encrypted file
     Export { file: PathBuf },
-    /// Add the accounts of an exported file to this machine's pool
+    /// Add the accounts of an exported file to this machine's pool, or
+    /// `import claude-swap` to bring over what claude-swap holds
     Import {
         file: PathBuf,
         /// Also overwrite accounts that are already here

@@ -92,6 +92,7 @@ fn route(
         ("PATCH", ["accounts", id]) => d.patch_account(id, parse(body)?),
         ("DELETE", ["accounts", id]) => d.remove_account(id),
         ("POST", ["export"]) => d.export(text(&body, "passphrase")?),
+        ("POST", ["import", "claude-swap"]) => d.import_claude_swap(Path::new(text(&body, "dir")?)),
         ("POST", ["import"]) => d.import(
             text(&body, "bundle")?,
             text(&body, "passphrase")?,

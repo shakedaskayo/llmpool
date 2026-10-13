@@ -1057,3 +1057,107 @@ fn import_does_not_trust_the_file() {
         .unwrap();
     assert_eq!(result["added"], json!(["evil@x.io"]));
 }
+
+// ---- coming from claude-swap ------------------------------------------------
+
+/// The Keychain as claude-swap leaves it: one item per stored account.
+struct SwapKeychain(std::collections::HashMap<String, String>);
+
+impl llmpool_adapter_claude::profile::Keychain for SwapKeychain {
+    fn get(&self, _service: &str) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+    fn get_for(&self, service: &str, account: &str) -> std::io::Result<Option<String>> {
+        Ok(self.0.get(&format!("{service}/{account}")).cloned())
+    }
+    fn delete(&self, _service: &str) {}
+}
+
+#[test]
+fn accounts_come_over_from_claude_swap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (home, data, swap) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("swap"),
+    );
+    Profile::default_in(&home)
+        .write(&NoKeychain, &secret("home@x.io", "home-1"))
+        .unwrap();
+    std::fs::create_dir_all(swap.join("configs")).unwrap();
+    std::fs::write(
+        swap.join("sequence.json"),
+        r#"{"accounts": {"1": {"email": "home@x.io"}, "2": {"email": "two@x.io"}, "3": {"email": "gone@x.io"}}}"#,
+    )
+    .unwrap();
+    let mut items = std::collections::HashMap::new();
+    for (slot, email) in [("1", "home@x.io"), ("2", "two@x.io")] {
+        let s = secret(email, &format!("{email}-token"));
+        std::fs::write(
+            swap.join("configs")
+                .join(format!(".claude-config-{slot}-{email}.json")),
+            json!({"oauthAccount": s.account, "projects": {}}).to_string(),
+        )
+        .unwrap();
+        items.insert(
+            format!("claude-swap/account-{slot}-{email}"),
+            json!({"claudeAiOauth": s.oauth, "mcpOAuth": {}}).to_string(),
+        );
+    }
+    let daemon = Daemon::open(
+        &data,
+        &home,
+        Box::new(FileVault(data.join("vault"))),
+        Box::new(SwapKeychain(items)),
+    )
+    .unwrap();
+
+    let result = daemon.import_claude_swap(&swap).unwrap();
+    assert_eq!(result["added"], json!(["two@x.io"]));
+    let why = |email: &str| {
+        result["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["account"] == email)
+            .unwrap()["why"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        why("home@x.io").contains("--from-current"),
+        "the live login is newer than claude-swap's copy"
+    );
+    assert!(why("gone@x.io").contains("could not be read"));
+
+    // The imported account starts a session with the login claude-swap held.
+    let req = StartReq {
+        cwd: "/x".into(),
+        git_remote: None,
+        pid: std::process::id(),
+        account: Some("two@x.io".into()),
+        tag: None,
+    };
+    let reply = daemon.start_session(req).unwrap();
+    let profile = Profile::at(&PathBuf::from(
+        reply["env"]["CLAUDE_CONFIG_DIR"].as_str().unwrap(),
+    ));
+    assert_eq!(
+        profile.read(&NoKeychain).unwrap().unwrap().oauth["accessToken"],
+        "two@x.io-token"
+    );
+
+    // A second run adds nothing.
+    assert_eq!(
+        daemon.import_claude_swap(&swap).unwrap()["added"],
+        json!([])
+    );
+    assert_eq!(
+        daemon
+            .import_claude_swap(&dir.path().join("nowhere"))
+            .unwrap_err()
+            .status,
+        404
+    );
+}

@@ -473,7 +473,6 @@ Where the implementation differs from the design above, and why.
 | `http` hooks | `command` hooks (`llmpool hook claude <event>`) | The launcher's session id reaches a command through its environment; a command can also fail silently, which a hook must |
 | Unix socket for CLI and GUI, loopback for hooks | Loopback TCP only, one bearer token, file mode 0600 | One transport to secure and test |
 | `schedule` takes a cron expression | `schedule = { at = "HH:MM", days = [...] }` | Covers switching at a time of day without a cron parser; the engine is ticked once a minute |
-| Import from claude-swap | Not built. Migrate with `cswap switch N` followed by `llmpool add claude --from-current`, once per account | Avoids reading another tool's credential store and its changing formats |
 | GUI in React and TypeScript, live via server-sent events, tray with per-session switching | Plain HTML, CSS and JavaScript with no build step, polling every three seconds; tray lists sessions with a submenu of accounts to switch to | Fewer moving parts for the same screens |
 | `ask` on a running session opens a GUI picker | It queues a notice naming the candidates; the choice is made in `/llmpool`, the GUI or `llmpool switch` | One place to choose from, already present in every surface |
 | Account health `quarantined` | Unused; a login that fails is `relogin_required` | One state was enough |

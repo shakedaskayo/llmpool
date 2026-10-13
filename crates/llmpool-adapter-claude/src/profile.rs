@@ -31,6 +31,10 @@ pub trait Keychain: Send + Sync {
     /// Keychain could not be asked: a login that cannot be read must never be
     /// mistaken for a login that is not there.
     fn get(&self, service: &str) -> io::Result<Option<String>>;
+    /// As `get`, for a service that keeps several items apart by account name.
+    fn get_for(&self, _service: &str, _account: &str) -> io::Result<Option<String>> {
+        Ok(None)
+    }
     fn delete(&self, service: &str);
 }
 
@@ -52,11 +56,13 @@ const NOT_FOUND: i32 = 44;
 /// A locked Keychain asks the user; nothing here may wait on that forever.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
-impl Keychain for MacKeychain {
-    fn get(&self, service: &str) -> io::Result<Option<String>> {
+impl MacKeychain {
+    fn find(args: &[&str]) -> io::Result<Option<String>> {
         use std::io::Read;
         let mut child = std::process::Command::new("/usr/bin/security")
-            .args(["find-generic-password", "-s", service, "-w"])
+            .arg("find-generic-password")
+            .args(args)
+            .arg("-w")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -87,6 +93,16 @@ impl Keychain for MacKeychain {
                 "the Keychain refused to give Claude Code's login (code {code:?})"
             ))),
         }
+    }
+}
+
+impl Keychain for MacKeychain {
+    fn get(&self, service: &str) -> io::Result<Option<String>> {
+        Self::find(&["-s", service])
+    }
+
+    fn get_for(&self, service: &str, account: &str) -> io::Result<Option<String>> {
+        Self::find(&["-s", service, "-a", account])
     }
 
     fn delete(&self, service: &str) {

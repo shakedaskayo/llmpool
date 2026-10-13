@@ -425,11 +425,22 @@ impl Daemon {
     /// Every profile holding this account's login. More than one means the
     /// login was duplicated outside llmpool.
     fn holders(&self, g: &Inner, account: &Account) -> Vec<String> {
+        self.holders_given(g, account, &self.default_profile().identity())
+    }
+
+    /// As `holders`, with the default profile's identity already read: a loop
+    /// over every account should parse that file once, not once per account.
+    fn holders_given(
+        &self,
+        g: &Inner,
+        account: &Account,
+        default: &Option<(String, Option<String>)>,
+    ) -> Vec<String> {
         let mut held = Vec::new();
-        if let Some((email, organization)) = self.default_profile().identity() {
-            if same_login(account, &email, organization.as_deref()) {
-                held.push(DEFAULT_STORE.to_string());
-            }
+        if default.as_ref().is_some_and(|(email, organization)| {
+            same_login(account, email, organization.as_deref())
+        }) {
+            held.push(DEFAULT_STORE.to_string());
         }
         held.extend(
             g.p.stores
@@ -562,6 +573,7 @@ impl Daemon {
         let mut g = self.lock();
         self.reap(&mut g);
         let accounts = self.accounts(&g)?;
+        let default = self.default_profile().identity();
         let rows: Vec<Value> = accounts
             .iter()
             .map(|a| {
@@ -573,7 +585,10 @@ impl Daemon {
                         .collect();
                 let mut row = serde_json::to_value(a).unwrap_or_default();
                 row["sessions"] = json!(sessions);
-                row["is_default"] = json!(self.holders(&g, a).iter().any(|h| h == DEFAULT_STORE));
+                row["is_default"] = json!(self
+                    .holders_given(&g, a, &default)
+                    .iter()
+                    .any(|h| h == DEFAULT_STORE));
                 row
             })
             .collect();
@@ -782,6 +797,96 @@ impl Daemon {
             }
         }
         Ok(json!({"added": added, "replaced": replaced, "skipped": skipped}))
+    }
+
+    /// Bring over the accounts claude-swap holds on this machine. An account
+    /// already in the pool is left alone, and so is the one `~/.claude` is
+    /// logged in as: in both cases the copy llmpool can already reach is the
+    /// newer one. Nothing is removed from claude-swap.
+    pub fn import_claude_swap(&self, dir: &Path) -> Api<Value> {
+        let read = |path: PathBuf| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        };
+        let sequence = read(dir.join("sequence.json")).ok_or_else(|| {
+            fail(
+                404,
+                format!("no claude-swap data found in {}", dir.display()),
+            )
+        })?;
+        let g = self.lock();
+        let current = self.default_profile().identity();
+        let (mut added, mut skipped) = (Vec::new(), Vec::new());
+        for (slot, meta) in sequence["accounts"].as_object().into_iter().flatten() {
+            let Some(email) = meta["email"].as_str() else {
+                continue;
+            };
+            let mut skip = |why: &str| skipped.push(json!({"account": email, "why": why}));
+            let name = format!("{slot}-{email}");
+            let account = read(
+                dir.join("configs")
+                    .join(format!(".claude-config-{name}.json")),
+            )
+            .map(|c| c["oauthAccount"].clone());
+            // The Keychain on macOS; a file where claude-swap had no Keychain.
+            let stored = match self
+                .keychain
+                .get_for("claude-swap", &format!("account-{name}"))?
+            {
+                Some(text) => Some(text),
+                None => std::fs::read_to_string(
+                    dir.join("credentials").join(format!(".creds-{name}.enc")),
+                )
+                .ok(),
+            };
+            let oauth = stored
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .map(|c| c["claudeAiOauth"].clone());
+            let (Some(account), Some(oauth)) = (
+                account.filter(Value::is_object),
+                oauth.filter(Value::is_object),
+            ) else {
+                skip("its stored login could not be read");
+                continue;
+            };
+            let secret = Secret { oauth, account };
+            let (Some(email), organization) = (
+                secret.email().map(str::to_string),
+                secret.organization().map(str::to_string),
+            ) else {
+                skip("its stored login has no account in it");
+                continue;
+            };
+            let id = account_id(&email, organization.as_deref());
+            if g.store.get(&id)?.is_some() {
+                skip("already in the pool");
+                continue;
+            }
+            if current
+                .as_ref()
+                .is_some_and(|(e, o)| *e == email && *o == organization)
+            {
+                skip("it is the login Claude Code uses now; add it with `llmpool add claude --from-current`");
+                continue;
+            }
+            self.vault.put(&id, &serde_json::to_string(&secret)?)?;
+            g.store.put(&Account {
+                id,
+                provider: "claude".into(),
+                kind: Kind::Oauth,
+                label: email.clone(),
+                email: Some(email.clone()),
+                organization,
+                tags: BTreeSet::new(),
+                enabled: true,
+                health: Health::Ok,
+                usage: None,
+                login_expires_at: login_expiry(&secret),
+            })?;
+            added.push(email);
+        }
+        Ok(json!({"added": added, "skipped": skipped}))
     }
 
     // ---- sessions -------------------------------------------------------
@@ -1112,12 +1217,13 @@ impl Daemon {
                 .cloned()
                 .ok_or_else(|| fail(404, "no such session"))?;
         let accounts = self.accounts(&g)?;
+        let default = self.default_profile().identity();
         let next = accounts
             .iter()
             .filter(|a| a.usable() && m.session.account_id.as_ref() != Some(&a.id))
             // Not one that is live in another session's profile.
             .filter(|a| {
-                self.holders(&g, a)
+                self.holders_given(&g, a, &default)
                     .iter()
                     .all(|held| Some(held) == m.store.as_ref())
             })
@@ -1168,10 +1274,11 @@ impl Daemon {
             return;
         };
         // An account live in another profile cannot also be put in this one.
+        let default = self.default_profile().identity();
         let free: Vec<Account> = all
             .iter()
             .filter(|a| {
-                self.holders(g, a)
+                self.holders_given(g, a, &default)
                     .iter()
                     .all(|held| Some(held) == m.store.as_ref())
             })

@@ -82,7 +82,14 @@ accounts here, or the two copies invalidate each other.
 
 ### Coming from claude-swap
 
-For each account: `cswap switch N`, then `llmpool add claude --from-current`.
+```bash
+llmpool import claude-swap
+```
+
+Brings over every account claude-swap holds on this machine, except the one
+Claude Code is logged in as right now (add that with `--from-current`, which
+has the newer copy). An imported login belongs to llmpool from then on:
+claude-swap's own copy stops working the next time the login is used.
 
 ## Policies
 
@@ -184,3 +191,7 @@ with a file vault. To try the binary the same way, set `LLMPOOL_HOME`, `HOME`,
 Other agents and providers (Codex, Gemini CLI, Bedrock, API keys) and the team
 server with inherited policies. Each is its own design; the adapter and
 trigger traits are where they attach. Windows is not supported.
+
+## Licence
+
+MIT. See `LICENSE`.

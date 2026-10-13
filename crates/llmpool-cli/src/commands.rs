@@ -551,7 +551,44 @@ fn export(file: &Path) -> Result<ExitCode, String> {
     ))
 }
 
+/// `llmpool import claude-swap`: bring over the accounts claude-swap holds.
+fn import_claude_swap() -> Result<ExitCode, String> {
+    let dir = if cfg!(target_os = "linux") {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("claude-swap")
+    } else {
+        home().join(".claude-swap-backup")
+    };
+    let result = connect()?.call("POST", "/import/claude-swap", Some(json!({"dir": dir})))?;
+    for name in result["added"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        println!("added {name}");
+    }
+    for skipped in result["skipped"].as_array().into_iter().flatten() {
+        println!(
+            "left out {}: {}",
+            skipped["account"].as_str().unwrap_or_default(),
+            skipped["why"].as_str().unwrap_or_default()
+        );
+    }
+    eprintln!(
+        "note: an imported login now belongs to llmpool. claude-swap still holds its own copy,\n\
+         which stops working once the login is next used; switch accounts with llmpool from here on."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 fn import(file: &Path, replace: bool) -> Result<ExitCode, String> {
+    // The one word that is not a file name, unless there really is such a file.
+    if file == Path::new("claude-swap") && !file.exists() {
+        return import_claude_swap();
+    }
     let bundle = read(file)?;
     let client = connect()?;
     let request = json!({"bundle": bundle, "passphrase": passphrase(false)?, "replace": replace});
