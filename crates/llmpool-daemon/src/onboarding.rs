@@ -186,13 +186,48 @@ impl Daemon {
                 }
                 Some(_) => {
                     job.child = None;
-                    (job.scratch.clone(), job.label.clone(), job.tags.clone())
+                    (
+                        job.scratch.clone(),
+                        job.label.clone(),
+                        job.tags.clone(),
+                        job.email.clone(),
+                    )
                 }
             }
         };
         // Taken into the pool without the sign-in lock held: `capture` has
         // its own locking.
-        let (scratch, label, tags) = finished;
+        let (scratch, label, tags, asked) = finished;
+        // The address asked for only pre-fills the page; a browser already
+        // signed in to another account returns that account. Saying "done"
+        // would then be a lie about which login was added.
+        let got = Profile::at(&scratch).identity().map(|(email, _)| email);
+        let wrong = match (&asked, &got) {
+            (Some(asked), Some(got)) if !asked.is_empty() && !asked.eq_ignore_ascii_case(got) => {
+                Some((asked.clone(), got.clone()))
+            }
+            _ => None,
+        };
+        if let Some((asked, got)) = &wrong {
+            let known = self.lock().store.list().is_ok_and(|accounts| {
+                accounts
+                    .iter()
+                    .any(|a| a.email.as_deref() == Some(got.as_str()))
+            });
+            if known {
+                // Nothing new to add, and not what was asked for.
+                let mut slot = self.login_slot();
+                if let Some(job) = slot.as_mut() {
+                    job.stop();
+                    job.state = "failed";
+                    job.message = format!(
+                        "Your browser signed in as {got}, not {asked}: it is already signed in to that account. \
+                         Sign out of claude.ai in the browser, or open the sign-in link in a private window, and try again."
+                    );
+                }
+                return;
+            }
+        }
         let captured = self.capture(CaptureReq {
             profile_dir: Some(scratch),
             label,
@@ -205,7 +240,12 @@ impl Daemon {
                 Ok(account) => {
                     let name = account["label"].as_str().unwrap_or_default().to_string();
                     job.state = "done";
-                    job.message = format!("{name} is in the pool.");
+                    job.message = match &wrong {
+                        Some((asked, got)) => format!(
+                            "Signed in as {got}, not {asked} as asked; {got} is in the pool."
+                        ),
+                        None => format!("{name} is in the pool."),
+                    };
                     job.account = Some(name.clone());
                     drop(slot);
                     self.tell(&format!("{name} is signed in and in the pool."));

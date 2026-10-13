@@ -1242,6 +1242,9 @@ email="${4:-new@x.io}"
 echo "Opening https://claude.example/login?state=abc in your browser"
 [ "$email" = "refused@x.io" ] && exit 1
 [ "$email" = "slow@x.io" ] && sleep 30
+# A browser already signed in elsewhere returns that account, whatever was asked.
+[ "$email" = "wanted@x.io" ] && email="a@x.io"
+[ "$email" = "wanted-too@x.io" ] && email="surprise@x.io"
 if [ "$email" = "code@x.io" ]; then printf 'Paste code here if prompted > '; read code; [ "$code" = "c0de#st4te" ] || exit 1; fi
 printf '{"claudeAiOauth":{"accessToken":"tok-%s","refreshToken":"r"}}' "$email" > "$CLAUDE_CONFIG_DIR/.credentials.json"
 printf '{"oauthAccount":{"emailAddress":"%s","organizationUuid":"org"}}' "$email" > "$CLAUDE_CONFIG_DIR/.claude.json"
@@ -1263,6 +1266,17 @@ fn wait_for_login(w: &World) -> Value {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!("the sign-in never finished");
+}
+
+/// The sign-in page's address, once Claude Code has printed it.
+fn wait_for_url(w: &World) -> String {
+    for _ in 0..100 {
+        if let Some(url) = w.daemon.login_status()["url"].as_str() {
+            return url.to_string();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("no sign-in address was offered");
 }
 
 fn login(email: &str, tags: &[&str]) -> llmpool_daemon::LoginReq {
@@ -1310,11 +1324,7 @@ fn a_sign_in_that_is_refused_or_cancelled_adds_nothing_and_says_so() {
 
     w.daemon.start_login(login("slow@x.io", &[])).unwrap();
     // The page's address is offered in case the browser did not open.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    assert!(w.daemon.login_status()["url"]
-        .as_str()
-        .unwrap()
-        .starts_with("https://claude.example/login"));
+    assert!(wait_for_url(&w).starts_with("https://claude.example/login"));
     assert_eq!(
         w.daemon
             .start_login(login("new@x.io", &[]))
@@ -1547,10 +1557,9 @@ fn a_sign_in_that_asks_for_a_code_can_be_given_one() {
         "nothing is waiting yet"
     );
     w.daemon.start_login(login("code@x.io", &[])).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    assert_eq!(w.daemon.login_status()["state"], "waiting");
     // The address offered must be clean enough to open.
-    let url = w.daemon.login_status()["url"].as_str().unwrap().to_string();
+    let url = wait_for_url(&w);
+    assert_eq!(w.daemon.login_status()["state"], "waiting");
     assert_eq!(url, "https://claude.example/login?state=abc");
     assert_eq!(
         w.daemon.submit_login_code("two words").unwrap_err().status,
@@ -1560,4 +1569,38 @@ fn a_sign_in_that_asks_for_a_code_can_be_given_one() {
     let done = wait_for_login(&w);
     assert_eq!(done["state"], "done", "{done}");
     assert_eq!(done["account"], "code@x.io");
+}
+
+#[test]
+fn signing_in_as_the_wrong_account_is_said_plainly() {
+    let w = world();
+    stub_claude(&w);
+    // Asked for one account; the browser was signed in to another the pool already has.
+    w.daemon.start_login(login("wanted@x.io", &[])).unwrap();
+    let status = wait_for_login(&w);
+    assert_eq!(status["state"], "failed", "{status}");
+    let message = status["message"].as_str().unwrap();
+    assert!(
+        message.contains("signed in as a@x.io, not wanted@x.io"),
+        "{message}"
+    );
+    assert!(message.contains("private window"), "{message}");
+    assert_eq!(
+        vault_token(&w, "a@x.io"),
+        "a-1",
+        "the account already here is left as it was"
+    );
+    assert_eq!(
+        w.daemon.list_accounts().unwrap().as_array().unwrap().len(),
+        3
+    );
+
+    // Asked for one account; got a different, new one: it is added, and named.
+    w.daemon.start_login(login("wanted-too@x.io", &[])).unwrap();
+    let status = wait_for_login(&w);
+    assert_eq!(status["state"], "done", "{status}");
+    assert_eq!(
+        status["message"],
+        "Signed in as surprise@x.io, not wanted-too@x.io as asked; surprise@x.io is in the pool."
+    );
 }
