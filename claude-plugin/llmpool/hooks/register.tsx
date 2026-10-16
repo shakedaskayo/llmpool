@@ -35,6 +35,10 @@ const REFRESH_MS = 15000
 const WAITING_MS = 2500
 /** Usage at which the band above the prompt appears. */
 const WARN_AT = 80
+const OWN_ONCE = 'Yes, this time'
+const OWN_ALWAYS = 'Yes, for this session'
+/** The person said yes for the rest of the session. */
+let ownForArtifacts = false
 
 const EMPTY: Snapshot = {
   session: null,
@@ -164,7 +168,7 @@ const byCommand = async ($: EngineInterface, wanted: string): Promise<string> =>
   // A key is never typed here, where it would stay in the transcript.
   const team = wanted.match(/^team\b\s*(.*)$/)
   if (team) {
-    const what = team[1].trim()
+    const what = (team[1] ?? '').trim()
     const args =
       what === '' ? ['team'] : what === 'sync' ? ['team', 'sync'] : what === 'leave' ? ['team', 'disconnect'] : ['team', 'connect', what, '--detach']
     const ran = await llmpool($, args)
@@ -217,6 +221,46 @@ export const register: Register = on => {
   })
 
   let tick = 0
+
+  // Claude Code keeps claude.ai features off while a token or a key is set,
+  // which is how the gateway and pooled keys run a session. Claude Code reads
+  // them per call, so with the person's yes these tools run on their own
+  // claude.ai login, and the session goes back to the pool the moment the call ends.
+  on('tool.call', { tool: /^Artifact(Comments|Data)?$/ }, async ($, e, next) => {
+    const token = await $.env.get('ANTHROPIC_AUTH_TOKEN')
+    const key = await $.env.get('ANTHROPIC_API_KEY')
+    const base = await $.env.get('ANTHROPIC_BASE_URL')
+    if (!token && !key) {
+      return next(e)
+    }
+    const via = base?.includes('/gateway/') ? 'the team gateway' : 'a pooled key'
+    if (!ownForArtifacts) {
+      const answer = await $.ui
+        .ask(`Artifacts need your own claude.ai login, and this session runs on ${via}. Use your claude.ai account for this?`, {
+          header: 'llmpool',
+          options: [OWN_ONCE, OWN_ALWAYS, 'Not now'],
+        })
+        .catch(() => 'Not now')
+      if (answer !== OWN_ONCE && answer !== OWN_ALWAYS) {
+        return {
+          deny:
+            `Artifacts need a claude.ai login, and this session runs on ${via}; the user chose not to use their own account. ` +
+            'Keep the page as a local file and give them its path.',
+        }
+      }
+      ownForArtifacts = answer === OWN_ALWAYS
+    }
+    await $.env.set('ANTHROPIC_AUTH_TOKEN', undefined)
+    await $.env.set('ANTHROPIC_API_KEY', undefined)
+    await $.env.set('ANTHROPIC_BASE_URL', undefined)
+    try {
+      return await next(e)
+    } finally {
+      await $.env.set('ANTHROPIC_AUTH_TOKEN', token)
+      await $.env.set('ANTHROPIC_API_KEY', key)
+      await $.env.set('ANTHROPIC_BASE_URL', base)
+    }
+  })
 
   on('command.run', { command: 'llmpool' }, async ($, e) => {
     // `/llmpool switch work-2` reads naturally, so the word is allowed;

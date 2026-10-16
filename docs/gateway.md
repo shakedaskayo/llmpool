@@ -86,7 +86,7 @@ Add an Anthropic API key to the pool beside the subscription logins (`llmpool ad
 
 ## What changes for Claude Code
 
-Through a gateway Claude Code runs as an API client: it says "API usage billing", and its claude.ai connectors are off. Streaming, tools and prompt caching work as before. If those features matter more than keeping logins on the server, leave the gateway off and let the server lend instead.
+Through a gateway Claude Code runs as an API client: it says "API usage billing", and features that need a claude.ai login (Artifacts, claude.ai connectors) are off. With llmpool's mod installed, publishing an Artifact asks whether to use your own claude.ai account for that call: on yes, the call runs on your login and the session is back on the gateway when it ends. Streaming, tools and prompt caching work as before. If those features matter more than keeping logins on the server, leave the gateway off and let the server lend instead.
 
 ## Your own proxy, or another provider
 

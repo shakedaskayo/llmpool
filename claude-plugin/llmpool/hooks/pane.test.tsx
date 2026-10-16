@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 // What `llmpool status --json` answers for a session on work-1 at 91%, with
 // one account to switch to, one disabled and one that needs a login.
@@ -235,4 +235,44 @@ test('with room to spare the row above the prompt is a quiet quick switch, and i
     handedBack = String(error)
   }
   expect(handedBack).toContain('no implementation for ui.render')
+})
+
+// An environment the hooks read and write, as a session's process holds it.
+const gatewayEnv = (on: any, answer: string) => {
+  const env: Record<string, string | undefined> = { ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_BASE_URL: 'https://pool.example/gateway/claude' }
+  const seen: Array<Record<string, string | undefined>> = []
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$: any, e: any) => ({
+    result: { questions: e.questions, answers: { [e.questions[0].question]: answer } },
+  }))
+  on('tool.call', { tool: 'Artifact' }, () => {
+    seen.push({ ...env })
+
+    return { result: { text: 'published' } } as never
+  })
+
+  return { env, seen }
+}
+
+test('on the gateway, an Artifact runs on the own login once the person says yes, then the session is back on the pool', async ($, on) => {
+  host(on)
+  const { env, seen } = gatewayEnv(on, 'Yes, this time')
+  await $.tool.call({ tool: 'Artifact', file_path: 'a.html' } as never)
+  expect(seen).toEqual([{ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: undefined }])
+  expect(env.ANTHROPIC_AUTH_TOKEN).toBe('t')
+  expect(env.ANTHROPIC_BASE_URL).toBe('https://pool.example/gateway/claude')
+})
+
+test('on the gateway, a no keeps the session on the pool and the Artifact does not run', async ($, on) => {
+  host(on)
+  const { env, seen } = gatewayEnv(on, 'Not now')
+  const ran: any = await $.tool.call({ tool: 'Artifact', file_path: 'a.html' } as never).catch((err: Error) => ({ deny: err.message }))
+  expect(JSON.stringify(ran)).toMatch(/local file/)
+  expect(seen).toEqual([])
+  expect(env.ANTHROPIC_AUTH_TOKEN).toBe('t')
 })

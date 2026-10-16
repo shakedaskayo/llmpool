@@ -4,3 +4,6 @@ crates/llmpool-gui/gen/
 crates/llmpool-gui/binaries/
 .fastembed_cache/
 .DS_Store
+# Laid by Claude Code when it loads the mod
+claude-plugin/llmpool/tsconfig.json
+claude-plugin/llmpool/.claude-plugin/types/
