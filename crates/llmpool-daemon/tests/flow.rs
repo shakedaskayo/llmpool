@@ -801,6 +801,35 @@ fn a_tick_runs_scheduled_rules_only_on_their_minute() {
 }
 
 #[test]
+fn turned_off_nothing_switches_a_session_until_it_is_on_again() {
+    let w = world();
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    let _reply = start(&w, "/x", Some("a@x.io"));
+    w.daemon.put_policy(&format!("[[rule]]\nname = 'now'\non = {{ schedule = {{ at = '{now}' }} }}\ndo = {{ swap = {{}} }}\n")).unwrap();
+
+    // Turning off works whatever the policy file holds, and every surface sees it.
+    assert_eq!(
+        w.daemon.configure(&json!({"off": true})).unwrap()["off"],
+        true
+    );
+    w.daemon.tick();
+    assert_eq!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "a@x.io"
+    );
+
+    assert_eq!(
+        w.daemon.configure(&json!({"off": false})).unwrap()["off"],
+        false
+    );
+    w.daemon.tick();
+    assert_ne!(
+        w.daemon.list_sessions().unwrap()[0]["account_label"],
+        "a@x.io"
+    );
+}
+
+#[test]
 fn a_label_cannot_take_another_accounts_name() {
     let w = world();
     let rename = |label: &str| {

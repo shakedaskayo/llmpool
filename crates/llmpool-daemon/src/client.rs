@@ -23,6 +23,15 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// Present in the data directory while llmpool is turned off: agents start
+/// on the user's own login, as if llmpool were not installed, and nothing
+/// switches them.
+pub const OFF_FILE: &str = "off";
+
+pub fn is_off() -> bool {
+    data_dir().join(OFF_FILE).exists()
+}
+
 /// Which build of llmpool this is. Shared by everything built together.
 pub const BUILD: &str = env!("LLMPOOL_BUILD");
 

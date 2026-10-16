@@ -5,7 +5,7 @@ use crate::{
 use llmpool_adapter_claude::install;
 use llmpool_core::policy::engine::Scenario;
 use llmpool_core::policy::file;
-use llmpool_daemon::client::{data_dir, home, Client};
+use llmpool_daemon::client::{data_dir, home, is_off, Client, OFF_FILE};
 use llmpool_daemon::{http, Daemon, NATIVE};
 use serde_json::{json, Value};
 use std::io::{IsTerminal, Read, Write};
@@ -167,6 +167,8 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                 if on { "preferred over" } else { "treated like" }
             ))
         }
+        Command::Off => turn(true),
+        Command::On => turn(false),
         Command::List { json } => list(json),
         Command::Tag { account, tags } => retag(&account, |set| set.extend(tags.iter().cloned())),
         Command::Untag { account, tags } => {
@@ -638,6 +640,9 @@ fn run_agent(
 ) -> Result<ExitCode, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let explicit = account.is_some() || tag.is_some();
+    if is_off() && !explicit {
+        return run_plain(&agent_bin(), &args);
+    }
     let request = json!({
         "cwd": cwd, "git_remote": git_remote(&cwd), "pid": std::process::id(), "account": account, "tag": tag,
     });
@@ -752,6 +757,33 @@ fn add_key(
 }
 
 /// Run any agent on a key from the pool.
+/// Run an agent as if llmpool were not installed: its own login, no session.
+fn run_plain(program: &str, args: &[String]) -> Result<ExitCode, String> {
+    eprintln!("llmpool is off: on your own login (`llmpool on` to use the pool again)");
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| format!("could not run `{program}`: {e}"))?;
+    Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+/// `llmpool off` / `llmpool on`. The flag is a file, so it works with no
+/// daemon running and every surface sees it at once.
+fn turn(off: bool) -> Result<ExitCode, String> {
+    let path = data_dir().join(OFF_FILE);
+    if off {
+        std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
+        std::fs::write(&path, b"").map_err(|e| e.to_string())?;
+        done("llmpool is off: new sessions start on your own login and nothing switches them. `llmpool on` to use the pool again".into())
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+            _ => {}
+        }
+        done("llmpool is on: new sessions start on the account your policies pick".into())
+    }
+}
+
 fn exec(
     account: Option<String>,
     tag: Option<String>,
@@ -761,6 +793,9 @@ fn exec(
     let program = command
         .first()
         .ok_or("say which command to run, after `--`")?;
+    if is_off() && account.is_none() && tag.is_none() && provider.is_none() {
+        return run_plain(program, &command[1..]);
+    }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let client = connect()?;
     let reply = client.call(
@@ -1805,7 +1840,7 @@ fn agent_session() -> Option<String> {
 
 fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
     let input = stdin_text();
-    if agent != "claude" {
+    if agent != "claude" || is_off() {
         return ExitCode::SUCCESS;
     }
     let Some(sid) = agent_session() else {
@@ -1836,8 +1871,8 @@ fn hook(agent: &str, event: &str, argument: Option<&str>) -> ExitCode {
 /// would have shown.
 fn statusline(agent: &str) -> ExitCode {
     let input = stdin_text();
-    let mut line = None;
-    if let (Some(sid), "claude") = (agent_session(), agent) {
+    let mut line = is_off().then(|| "llmpool off".to_string());
+    if let (Some(sid), "claude", false) = (agent_session(), agent, is_off()) {
         if let Some(client) = Client::existing(Duration::from_millis(300)) {
             let payload = serde_json::from_str(&input).unwrap_or(Value::Null);
             line = client

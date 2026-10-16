@@ -35,6 +35,7 @@ permalink: /commands/
 | | |
 |---|---|
 | `llmpool policy path` / `check` / `dry-run` | Find, validate and test rules |
+| `llmpool off` / `llmpool on` | Agents on your own login with no switching, or back on the pool |
 | `llmpool prefer-own on\|off` | Your own account first while it has room |
 | `llmpool advisor [on\|off\|key\|ask]` | The optional decision model |
 

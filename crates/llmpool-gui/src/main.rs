@@ -3,7 +3,7 @@
 //! The llmpool window and tray icon. The interface is a client of the
 //! daemon's HTTP API, exactly like the command line.
 
-use llmpool_daemon::client::Client;
+use llmpool_daemon::client::{is_off, Client};
 use llmpool_daemon::{http, Daemon};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -230,6 +230,14 @@ fn tray_menu(app: &AppHandle, sessions: &Value, accounts: &Value) -> tauri::Resu
         menu.append(&submenu)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&CheckMenuItem::with_id(
+        app,
+        "off",
+        "Off: my own login, no switching",
+        true,
+        is_off(),
+        none,
+    )?)?;
     menu.append(&MenuItem::with_id(
         app,
         "next",
@@ -266,7 +274,7 @@ fn refresh_tray(app: &AppHandle) {
         Ok(state) => state,
         Err(_) => (json!([]), json!([])),
     };
-    let signature = format!("{sessions}{accounts}");
+    let signature = format!("{sessions}{accounts}{}", is_off());
     {
         let mut last = TRAY_STATE
             .lock()
@@ -304,6 +312,22 @@ fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         ["quit"] => app.exit(0),
+        ["off"] => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let off = !is_off();
+                let _ = client().and_then(|c| c.call("PUT", "/config", Some(json!({"off": off}))));
+                let _ = app.emit(
+                    "llmpool-message",
+                    if off {
+                        "llmpool is off: new sessions start on your own login"
+                    } else {
+                        "llmpool is on"
+                    },
+                );
+                refresh_tray(&app);
+            });
+        }
         ["swap", session, account] => {
             let (app, session, account) = (app.clone(), session.to_string(), account.to_string());
             std::thread::spawn(move || {

@@ -34,6 +34,10 @@ enum Command {
         #[command(subcommand)]
         command: Option<AdvisorCommand>,
     },
+    /// Turn llmpool off: agents start on your own login and nothing switches them
+    Off,
+    /// Turn llmpool back on
+    On,
     /// Prefer your own account (tagged `own`) whenever it has room: on or off
     PreferOwn {
         #[arg(value_parser = ["on", "off"])]

@@ -25,6 +25,8 @@ Start `claude` the way you always do. llmpool tells you at the start which accou
 ## Without the pane
 
 ```
+/llmpool off               this session and new ones on your own login, no switching
+/llmpool on                back on the pool
 /llmpool next              switch to the account with the most room
 /llmpool work-2            switch to an account by name
 /llmpool add               sign in to another account

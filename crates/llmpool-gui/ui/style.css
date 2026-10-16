@@ -360,6 +360,7 @@ a.buttonlike:hover { border-color: var(--muted); }
 }
 /* Old numbers stay marked as old however far the page has scrolled. */
 #offline { position: sticky; top: 0; z-index: 3; }
+#paused button { margin-left: 8px; }
 @media (max-width: 720px) {
   #offline { top: 61px; }
   /* The chosen tab is not parked under the way out. */

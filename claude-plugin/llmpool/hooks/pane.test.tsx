@@ -276,3 +276,37 @@ test('on the gateway, a no keeps the session on the pool and the Artifact does n
   expect(seen).toEqual([])
   expect(env.ANTHROPIC_AUTH_TOKEN).toBe('t')
 })
+
+test('/llmpool off takes this gateway session to the own login at once; /llmpool on puts it back', async ($, on) => {
+  host(on)
+  const { env } = gatewayEnv(on, 'Not now')
+  const calls: string[][] = []
+  let off = false
+  on('process.run', (_$, e) => {
+    calls.push([...e.argv])
+    const verb = e.argv[1]
+    if (verb === 'off' || verb === 'on') {
+      off = verb === 'off'
+    }
+    // work-2 is the user's own login here.
+    const accounts = STATUS.accounts.map(a => (a.id === 'b' ? { ...a, tags: ['own'] } : a))
+    const status = { ...STATUS, accounts, config: { ...STATUS.config, off } }
+
+    return { value: { exitCode: 0, stdout: verb === 'status' ? JSON.stringify(status) : '', stderr: '' } } as never
+  })
+
+  const said: any = await $.command.run({ command: 'llmpool', args: 'off' } as never)
+  expect(JSON.stringify(said)).toMatch(/llmpool is off/)
+  expect(calls.some(argv => argv.slice(1).join(' ') === 'off')).toBe(true)
+  expect(calls.some(argv => argv.slice(1).join(' ') === 'switch b --session s1')).toBe(true)
+  expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
+  // While off, the band says so and turns it back on in one press.
+  const ui = await $.ui.mount({ plugin: 'llmpool', surface: 'terminal', component: 'AbovePrompt', props: {} as never })
+  expect(await ui.find({ type: 'Text', text: /llmpool is off/ })).toBeDefined()
+  await ui.press({ key: 'band-on' })
+  await ui.unmount()
+  expect(calls.some(argv => argv.slice(1).join(' ') === 'on')).toBe(true)
+  expect(env.ANTHROPIC_AUTH_TOKEN).toBe('t')
+  expect(env.ANTHROPIC_BASE_URL).toBe('https://pool.example/gateway/claude')
+})

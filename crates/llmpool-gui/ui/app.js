@@ -1053,6 +1053,10 @@ function renderSettings() {
   $("settings").innerHTML = `${pageHead("Settings", "How accounts are chosen, and how llmpool sits on this Mac.")}
     <h3 class="section">Choosing accounts</h3>
     <div class="card pad">
+      <label class="switch"><input type="checkbox" data-act="off"${c.off ? " checked" : ""} />
+        <span><strong>Turn llmpool off</strong><br /><span class="muted">Agents start on your own login, as if llmpool were not installed, and nothing switches them. For when you need your own account and not the pool or the team gateway. A Claude Code session already running moves with <code>/llmpool off</code>.</span></span></label>
+    </div>
+    <div class="card pad">
       <label class="switch"><input type="checkbox" data-act="prefer-own"${c.prefer_own ? " checked" : ""} />
         <span><strong>Prefer my own account</strong><br /><span class="muted">An account tagged <code>own</code> is used whenever it has room; the rest of the pool is for when it does not. The login your agent had when you set llmpool up is tagged <code>own</code> for you.</span></span></label>
       <p class="indent"><label>Counts as having room below <input class="num" type="number" min="1" max="100" data-act="own-until" value="${esc(c.own_until ?? 85)}" /> % used</label></p>
@@ -1090,6 +1094,7 @@ function renderSettings() {
 async function settingsAction(el) {
   const act = el.dataset.act;
   const put = (change, ok) => attempt(() => api("PUT", "/config", change), ok);
+  if (act === "off") await put({ off: el.checked }, el.checked ? "llmpool is off: new sessions start on your own login" : "llmpool is on");
   if (act === "prefer-own") await put({ prefer_own: el.checked }, el.checked ? "Your own account comes first" : "All accounts are treated alike");
   if (act === "own-until") await put({ own_until: Number(el.value) }, "Saved");
   if (act === "advisor") await put({ advisor_enabled: el.checked }, el.checked ? "The decision model is on" : "The decision model is off; your rules decide alone");
@@ -1360,6 +1365,8 @@ function renderSummary() {
   // Said once, not every three seconds, to whoever is listening.
   if ($("offline").textContent !== stale) $("offline").textContent = stale;
   $("summary").className = state.offline ? "offline" : "muted online";
+  $("paused").hidden = SERVER || !state.config?.off;
+  if (!state.offline && state.config?.off) $("summary").textContent = "llmpool is off";
   // Not being set up yet is not a problem with an account.
   const problems = (SERVER ? 0 : state.issues.filter((i) => i.action !== "install").length) + state.accounts.filter((a) => !a.shared && a.health !== "ok").length;
   const counts = {
@@ -1460,6 +1467,12 @@ function selectTab(tab) {
   $("main").scrollTop = 0;
   window.scrollTo(0, 0);
 }
+$("turn-on").addEventListener("click", async () => {
+  if (await attempt(() => api("PUT", "/config", { off: false }), "llmpool is on")) {
+    state.config = { ...state.config, off: false };
+    renderSummary();
+  }
+});
 $("tabs").addEventListener("click", (e) => e.target.closest('[role="tab"]') && selectTab(e.target.closest('[role="tab"]')));
 const go = (name) => selectTab($(`tab-${name}`));
 // A server shows fewer pages; the hidden ones are not there for keys either.

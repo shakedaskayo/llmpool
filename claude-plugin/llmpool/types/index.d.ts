@@ -63,6 +63,8 @@ export type Snapshot = {
 
 /** The switches that can be thrown from here. */
 export type Config = {
+  /** llmpool is turned off: agents run on the user's own login. */
+  off: boolean
   preferOwn: boolean
   advisorOn: boolean
   advisorHasKey: boolean

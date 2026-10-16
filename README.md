@@ -128,6 +128,15 @@ The global key acts on the only running session, or on the login plain
 `claude` sessions share; with several separately managed sessions it opens the
 window so you can choose.
 
+### Turning it off
+
+When you need your own account and not the pool or the team gateway:
+`/llmpool off` in Claude Code (the session you are in moves at once),
+`llmpool off` in a terminal, the switch in Settings, or "Off" in the tray menu.
+Agents then start on your own login, as if llmpool were not installed, and
+nothing switches them; the status line says `llmpool off`. `/llmpool on` or
+`llmpool on` turns it back on, and a session moved by `/llmpool off` goes back to the pool.
+
 ### Moving to another machine
 
 ```bash

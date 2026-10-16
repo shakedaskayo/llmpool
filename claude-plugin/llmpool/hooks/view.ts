@@ -64,6 +64,7 @@ export const toSnapshot = (status: Json): Snapshot => {
   const pickedBy: string | null = status?.session?.picked_by ?? null
 
   const config: Config = {
+    off: status?.config?.off === true,
     preferOwn: status?.config?.prefer_own !== false,
     advisorOn: status?.config?.advisor_enabled === true,
     advisorHasKey: status?.config?.has_key === true,

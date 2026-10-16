@@ -553,6 +553,32 @@ impl Daemon {
         &self.data_dir
     }
 
+    /// Whether the user has turned llmpool off (see `client::OFF_FILE`).
+    pub fn is_off(&self) -> bool {
+        self.data_dir.join(client::OFF_FILE).exists()
+    }
+
+    pub fn set_off(&self, off: bool) -> Api<()> {
+        let path = self.data_dir.join(client::OFF_FILE);
+        let done = if off {
+            std::fs::write(&path, b"")
+        } else {
+            std::fs::remove_file(&path).or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            })
+        };
+        done.map_err(|e| {
+            fail(
+                500,
+                format!(
+                    "could not turn llmpool {}: {e}",
+                    if off { "off" } else { "on" }
+                ),
+            )
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -1811,6 +1837,10 @@ impl Daemon {
     /// Evaluate the policy for something that happened in a running session,
     /// and act on the outcome.
     fn react(&self, g: &mut Inner, sid: &str, event: Event) {
+        // Off means no account changes under anyone's feet.
+        if self.is_off() {
+            return;
+        }
         let Some(m) = g.p.sessions.get(sid).cloned() else {
             return;
         };

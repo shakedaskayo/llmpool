@@ -49,7 +49,7 @@ const EMPTY: Snapshot = {
   issues: [],
   login: { state: 'idle', message: '', url: null },
   stats: { headroom5: null, headroom7: null, switches24h: 0, lastSwitch: null },
-  config: { preferOwn: true, advisorOn: false, advisorHasKey: false },
+  config: { off: false, preferOwn: true, advisorOn: false, advisorHasKey: false },
   advice: '',
 }
 const snapshot = atom({ plugin: 'llmpool', key: 'snapshot' } as const, EMPTY)
@@ -148,8 +148,66 @@ const fix = ($: EngineInterface, issue: Issue) => (issue.action === 'add_current
 // Opened with the focus, so a key acts straight away.
 const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
 
+/** What `/llmpool off` took out of this session, put back by `/llmpool on`. */
+let parked: { token?: string; key?: string; base?: string } | null = null
+
+/**
+ * Off for new sessions, and for this one at once: a session on the gateway or
+ * a pooled key drops those variables (Claude Code reads them per request) and
+ * has the user's own login put in its profile.
+ */
+const turnOff = async ($: EngineInterface): Promise<string> => {
+  const ran = await llmpool($, ['off'])
+  if (ran.exitCode !== 0) {
+    return `Could not turn llmpool off: ${ran.stderr.replace(/^llmpool: /, '').trim()}`
+  }
+  const token = await $.env.get('ANTHROPIC_AUTH_TOKEN')
+  const key = await $.env.get('ANTHROPIC_API_KEY')
+  const base = await $.env.get('ANTHROPIC_BASE_URL')
+  let extra = ''
+  if ((token || key) && parked === null) {
+    const snap = await refresh($)
+    const own = snap.rows.find(r => r.tags.includes('own'))
+    if (own !== undefined && snap.session !== null) {
+      await llmpool($, ['switch', own.id, '--session', snap.session])
+    } else {
+      extra = ' Your own login is not in the pool: run /login if Claude Code asks.'
+    }
+    parked = { token, key, base }
+    await $.env.set('ANTHROPIC_AUTH_TOKEN', undefined)
+    await $.env.set('ANTHROPIC_API_KEY', undefined)
+    await $.env.set('ANTHROPIC_BASE_URL', undefined)
+  }
+  await refresh($)
+
+  return `llmpool is off: this session and new ones run on your own login, and nothing switches them.${extra} /llmpool on to use the pool again.`
+}
+
+const turnOn = async ($: EngineInterface): Promise<string> => {
+  const ran = await llmpool($, ['on'])
+  if (ran.exitCode !== 0) {
+    return `Could not turn llmpool on: ${ran.stderr.replace(/^llmpool: /, '').trim()}`
+  }
+  const back = parked
+  if (back !== null) {
+    await $.env.set('ANTHROPIC_AUTH_TOKEN', back.token)
+    await $.env.set('ANTHROPIC_API_KEY', back.key)
+    await $.env.set('ANTHROPIC_BASE_URL', back.base)
+    parked = null
+  }
+  await refresh($)
+
+  return back !== null ? 'llmpool is on: this session is back on the pool.' : 'llmpool is on: new sessions start on the account your policies pick.'
+}
+
 /** `/llmpool next`, `/llmpool add`, `/llmpool <account>`: act without the pane. */
 const byCommand = async ($: EngineInterface, wanted: string): Promise<string> => {
+  if (wanted === 'off') {
+    return turnOff($)
+  }
+  if (wanted === 'on') {
+    return turnOn($)
+  }
   const toggle = wanted.match(/^(row|pane) (on|off)$/)
   if (toggle) {
     const isOn = toggle[2] === 'on'
@@ -197,7 +255,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'llmpool',
       description: 'Accounts and usage; switch this session, or sign in to another account',
-      argumentHint: '[next | add | <account> | row on|off | pane on|off]',
+      argumentHint: '[off | on | next | add | <account> | row on|off | pane on|off]',
     })
     showRow = (await $.store.get('showRow')) !== false
     autoPane = (await $.store.get('autoPane')) !== false
@@ -303,6 +361,14 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Button, Text } = $.ui.resolve(e)
+    if (snap.config.off) {
+      return (
+        <Box gap={1}>
+          <Text dimColor>llmpool is off · your own login, no switching</Text>
+          <Button key="band-on" label="Turn on" onPress={async () => $.ui.toast(await turnOn($))} />
+        </Box>
+      )
+    }
     const problem = urgent(snap)
     if (problem !== undefined && snap.login.state !== 'waiting') {
       return (
@@ -566,6 +632,13 @@ export const register: Register = on => {
 
         <Box flexDirection="column">
           {heading('SETTINGS')}
+          <Button
+            key="set-off"
+            plain
+            hotkey="f"
+            label={snap.config.off ? 'llmpool is off: turn it back on' : 'Turn llmpool off: my own login, no switching'}
+            onPress={async () => $.ui.toast(snap.config.off ? await turnOn($) : await turnOff($))}
+          />
           <Button
             key="set-own"
             plain

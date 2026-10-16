@@ -473,6 +473,7 @@ impl Daemon {
         view["prefer_own"] = json!(policy.settings.prefer_own);
         view["own_until"] = json!(policy.settings.own_until);
         view["advisor_enabled"] = view["enabled"].clone();
+        view["off"] = json!(self.is_off());
         Ok(view)
     }
 
@@ -487,6 +488,13 @@ impl Daemon {
     /// Change the advisor's settings, or the own-account preference, leaving
     /// the rest of the policy file, comments included, exactly as it is.
     pub fn configure(&self, change: &Value) -> Api<Value> {
+        // Turning llmpool off must work whatever state the policy file is in.
+        if let Some(off) = change["off"].as_bool() {
+            self.set_off(off)?;
+            if change.as_object().is_some_and(|o| o.len() == 1) {
+                return self.config();
+            }
+        }
         let _g = self.lock();
         let path = self.policy_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
