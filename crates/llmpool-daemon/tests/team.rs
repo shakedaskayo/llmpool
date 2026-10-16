@@ -1799,3 +1799,37 @@ fn an_answer_that_names_no_reset_does_not_hold_an_account_as_full_for_ever() {
         "{ends}"
     );
 }
+
+#[test]
+fn a_members_gateway_row_shows_how_full_the_accounts_behind_it_are() {
+    let provider = upstream();
+    let pool = machine(&[("z@x.io", "z-1")]);
+    let (_serving, url) = on_a_free_port(&pool, |url| Config {
+        public_url: url,
+        api_keys: Config::keys(&format!("ci:{KEY}")).unwrap(),
+        gateway: true,
+        upstreams: [("claude".to_string(), provider.url.clone())].into(),
+        ..Config::default()
+    });
+    let sync = || -> Value {
+        ureq::post(&format!("{url}/v1/sync"))
+            .set("Authorization", &format!("Bearer {KEY}"))
+            .send_json(json!({}))
+            .unwrap()
+            .into_json()
+            .unwrap()
+    };
+    let door = |body: &Value| body["accounts"][0]["account"].clone();
+    // Before any request there is nothing to show, and nothing is made up.
+    assert_eq!(door(&sync())["id"], "gateway-claude");
+    assert!(door(&sync())["usage"].is_null());
+
+    ureq::post(&format!("{url}/gateway/claude/v1/messages"))
+        .set("Authorization", &format!("Bearer {KEY}"))
+        .send_json(json!({"model": "m", "messages": []}))
+        .unwrap();
+    let learned = accounts(&pool)["z@x.io"]["usage"]["windows"]["5h"].clone();
+    let shown = door(&sync())["usage"]["windows"]["5h"].clone();
+    assert_eq!(shown["used_percent"], learned["used_percent"]);
+    assert_eq!(shown["resets_at"], learned["resets_at"]);
+}

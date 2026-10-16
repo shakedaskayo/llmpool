@@ -16,7 +16,7 @@ mod replica;
 use crate::http::percent_decode;
 use crate::{fail, now, Api, ApiError, Daemon};
 use base64::Engine;
-use llmpool_core::model::{AccountId, Kind, Usage};
+use llmpool_core::model::{AccountId, Kind, Usage, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -458,6 +458,39 @@ fn claims_of(id_token: &str) -> Option<Value> {
         .decode(payload.trim_end_matches('='))
         .ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// What a gateway door shows as its usage: each window's mean across the
+/// accounts behind it (the room the pool has as a whole), ending at the
+/// earliest of their resets. None when no account has a reading.
+fn combined(usages: &[Usage]) -> Option<Usage> {
+    let mut windows = BTreeMap::<String, (f64, usize, Option<i64>)>::new();
+    for usage in usages {
+        for (name, w) in &usage.windows {
+            let (sum, n, reset) = windows.entry(name.clone()).or_insert((0.0, 0, None));
+            *sum += w.used_percent;
+            *n += 1;
+            *reset = match (*reset, w.resets_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+    (!windows.is_empty()).then(|| Usage {
+        windows: windows
+            .into_iter()
+            .map(|(name, (sum, n, resets_at))| {
+                (
+                    name,
+                    Window {
+                        used_percent: sum / n as f64,
+                        resets_at,
+                    },
+                )
+            })
+            .collect(),
+        fetched_at: usages.iter().map(|u| u.fetched_at).max().unwrap_or(0),
+    })
 }
 
 impl TeamServer {
@@ -982,12 +1015,20 @@ impl TeamServer {
         let d = &self.daemon;
         let g = d.lock();
         let mut providers = std::collections::BTreeSet::new();
+        // How full the accounts behind each door are, for the member's meters.
+        let mut behind = BTreeMap::<String, Vec<Usage>>::new();
         for account in d.accounts(&g)? {
             let lendable = account.kind != Kind::Oauth || account.provider == "claude";
             if account.usable() && lendable && settings.opens(email, &account.tags) {
                 // An Anthropic key can carry a Claude session too.
                 if account.provider == "anthropic" {
                     providers.insert("claude".to_string());
+                }
+                if let Some(usage) = account.usage.clone() {
+                    behind
+                        .entry(account.provider.clone())
+                        .or_default()
+                        .push(usage);
                 }
                 providers.insert(account.provider);
             }
@@ -1007,7 +1048,8 @@ impl TeamServer {
                         "label": format!("team gateway ({provider})"),
                         "email": null, "organization": null,
                         "tags": ["gateway"],
-                        "enabled": true, "health": "ok", "usage": null, "login_expires_at": null,
+                        "enabled": true, "health": "ok", "login_expires_at": null,
+                        "usage": combined(behind.get(provider.as_str()).map_or(&[][..], Vec::as_slice)),
                     },
                     "secret": {"env": self.gateway_env(provider, token)},
                     "others": 0, "held": false,
